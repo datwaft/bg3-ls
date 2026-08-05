@@ -14,7 +14,7 @@ arc-swap = "1.8"
 blake3 = "1.8"
 clap = { version = "4.5", features = ["derive"] }
 notify = "8.2"
-postcard = { version = "1.1", features = ["alloc", "use-std"] }
+postcard = { version = "1.1", default-features = false, features = ["alloc", "use-std"] }
 quick-xml = "0.41"
 rayon = "1.12"
 serde = { version = "1.0", features = ["derive", "rc"] }
@@ -26,7 +26,7 @@ tower-lsp-server = "0.23"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tree-sitter = "0.26.11"
-tree-sitter-bg3 = { path = "../tree-sitter-bg3" }
+tree-sitter-bg3 = { version = "=0.1.0", path = "../tree-sitter-bg3" }
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.19", features = ["serde", "v4"] }
 walkdir = "2.5"
