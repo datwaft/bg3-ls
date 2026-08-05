@@ -265,7 +265,26 @@ impl Coordinator {
                 })
             {
                 layers.push(Arc::clone(layer));
+                if let Some(progress) = progress {
+                    let percentage =
+                        10 + u32::try_from(80 * (index + 1) / module_count.max(1)).unwrap_or(80);
+                    progress
+                        .report_with_message(
+                            format!("Reused unchanged module {}", config.modules[index].name),
+                            percentage,
+                        )
+                        .await;
+                }
                 continue;
+            }
+            if let Some(progress) = progress {
+                let percentage = 10 + u32::try_from(80 * index / module_count.max(1)).unwrap_or(10);
+                progress
+                    .report_with_message(
+                        format!("Discovering {} and loading its cache", module.name),
+                        percentage,
+                    )
+                    .await;
             }
             let game_data = config.game_data.clone();
             let language = config.language.clone();
@@ -317,11 +336,22 @@ impl Coordinator {
                     10 + u32::try_from(80 * (index + 1) / module_count.max(1)).unwrap_or(80);
                 progress
                     .report_with_message(
-                        format!("Indexed module {}/{}", index + 1, module_count),
+                        format!(
+                            "Parsed and built module {} ({}/{})",
+                            config.modules[index].name,
+                            index + 1,
+                            module_count
+                        ),
                         percentage,
                     )
                     .await;
             }
+        }
+
+        if let Some(progress) = progress {
+            progress
+                .report_with_message("Publishing the complete workspace", 95)
+                .await;
         }
 
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
