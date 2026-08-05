@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out bg3-ls
+        uses: actions/checkout@v4
+        with:
+          path: bg3-ls
+      - name: Check out tree-sitter-bg3
+        uses: actions/checkout@v4
+        with:
+          repository: datwaft/tree-sitter-bg3
+          ref: v0.1.0
+          path: tree-sitter-bg3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        working-directory: bg3-ls
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        working-directory: bg3-ls
+        run: |
+          mkdir staging
+          cp "target/${{ matrix.target }}/release/bg3-ls" staging/
+          cp README.md LICENSE staging/
+          tar czf "bg3-ls-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" -C staging .
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: bg3-ls/bg3-ls-${{ github.ref_name }}-${{ matrix.target }}.tar.gz

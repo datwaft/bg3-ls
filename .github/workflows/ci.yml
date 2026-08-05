@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out bg3-ls
+        uses: actions/checkout@v4
+        with:
+          path: bg3-ls
+      - name: Check out tree-sitter-bg3
+        uses: actions/checkout@v4
+        with:
+          repository: datwaft/tree-sitter-bg3
+          ref: v0.1.0
+          path: tree-sitter-bg3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bg3-ls
+      - name: Check formatting
+        working-directory: bg3-ls
+        run: cargo fmt --all --check
+      - name: Lint
+        working-directory: bg3-ls
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        working-directory: bg3-ls
+        run: cargo test --workspace --locked
+      - name: Check dependencies and licenses
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: bg3-ls/Cargo.toml
+
+  neovim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out bg3-ls
+        uses: actions/checkout@v4
+        with:
+          path: bg3-ls
+      - name: Check out tree-sitter-bg3
+        uses: actions/checkout@v4
+        with:
+          repository: datwaft/tree-sitter-bg3
+          ref: v0.1.0
+          path: tree-sitter-bg3
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Neovim nightly
+        run: |
+          curl -L https://github.com/neovim/neovim/releases/download/nightly/nvim-linux-x86_64.tar.gz -o nvim.tar.gz
+          tar xzf nvim.tar.gz
+          echo "$PWD/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+      - name: Test stdio protocol
+        working-directory: bg3-ls
+        run: make test-lsp
