@@ -33,17 +33,17 @@ The server does not read `.pak`, `.loca`, `.lsf`, or other binary files.
 
 ## Install
 
-During local development, build and install the binary with:
+Download a release archive for your platform and put `bg3-ls` on `PATH`.
+
+For a source build, check out `bg3-ls` and the tagged grammar as sibling
+directories. The colocated path keeps local grammar work testable, and release
+CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
+git clone https://github.com/datwaft/bg3-ls
+git clone --branch v0.1.0 https://github.com/datwaft/tree-sitter-bg3
+cd bg3-ls
 cargo install --path crates/bg3-ls --locked
-```
-
-After tagged releases are available, use the release archive for your platform
-or install from Git:
-
-```sh
-cargo install --git https://github.com/datwaft/bg3-ls --tag v0.3.0 --locked
 ```
 
 Confirm that `bg3-ls` is on `PATH`:
