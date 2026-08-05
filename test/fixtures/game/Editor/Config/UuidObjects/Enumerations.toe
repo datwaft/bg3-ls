@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<enumerations>
+  <enumeration name="YesNo">
+    <items>
+      <item value="Default" />
+      <item value="Yes" />
+    </items>
+  </enumeration>
+</enumerations>

@@ -1,0 +1,34 @@
+[package]
+name = "bg3-ls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "bg3-ls"
+path = "src/main.rs"
+
+[dependencies]
+arc-swap.workspace = true
+bg3-ide = { path = "../bg3-ide" }
+bg3-index = { path = "../bg3-index" }
+clap.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-lsp-server.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tree-sitter.workspace = true
+tree-sitter-bg3.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

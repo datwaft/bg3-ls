@@ -1,0 +1,10 @@
+new entry "CHAINED"
+type "PassiveData"
+data "Boosts" "Ability(Strength,3)"
+
+new entry "CONSUMER"
+type "PassiveData"
+using "CHAINED"
+data "Boosts" "ApplyStatus(TEST_STATUS,100,1);UnlockSpell(Target_Test);AddPassive(CHAINED);ActionResource(ActionPoint,1)"
+data "DescriptionParams" "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+data "DisplayName" "h000000000000000000000000000000000001;2"

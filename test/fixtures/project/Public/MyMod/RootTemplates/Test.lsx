@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<save>
+  <region id="Templates">
+    <node id="root">
+      <children>
+        <node id="GameObjects">
+          <attribute id="MapKey" type="guid" value="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" />
+          <attribute id="Name" type="LSString" value="TEST_TEMPLATE" />
+          <attribute id="Type" type="FixedString" value="item" />
+        </node>
+      </children>
+    </node>
+  </region>
+</save>

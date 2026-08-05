@@ -1,0 +1,16 @@
+[package]
+name = "bg3-ide"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bg3-index = { path = "../bg3-index" }
+serde.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

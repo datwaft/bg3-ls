@@ -1,0 +1,40 @@
+[workspace]
+members = ["crates/bg3-ide", "crates/bg3-index", "crates/bg3-ls"]
+resolver = "2"
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/datwaft/bg3-ls"
+rust-version = "1.95"
+
+[workspace.dependencies]
+arc-swap = "1.8"
+blake3 = "1.8"
+clap = { version = "4.5", features = ["derive"] }
+notify = "8.2"
+postcard = { version = "1.1", features = ["alloc", "use-std"] }
+quick-xml = "0.41"
+rayon = "1.12"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+tempfile = "3.23"
+thiserror = "2.0"
+tokio = { version = "1.49", features = ["fs", "io-std", "macros", "rt-multi-thread", "sync", "time"] }
+tower-lsp-server = "0.23"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tree-sitter = "0.26.11"
+tree-sitter-bg3 = { path = "../tree-sitter-bg3" }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.19", features = ["serde", "v4"] }
+walkdir = "2.5"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

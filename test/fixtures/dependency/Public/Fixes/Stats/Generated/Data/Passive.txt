@@ -1,0 +1,8 @@
+new entry "CHAINED"
+type "PassiveData"
+data "Boosts" "UnlockSpell(Target_Test)"
+
+new entry "DEPENDENCY_ONLY"
+type "PassiveData"
+data "Boosts" "ApplyStatus(TEST_STATUS,100,1)"
+

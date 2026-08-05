@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<stats stat_object_definition_id="33333333-3333-3333-3333-333333333333">
+  <stat_objects>
+    <stat_object>
+      <fields>
+        <field name="UUID" type="IdTableFieldDefinition" value="cccccccc-cccc-cccc-cccc-cccccccccccc" />
+        <field name="Name" type="NameTableFieldDefinition" value="TEST_STATUS" />
+      </fields>
+    </stat_object>
+  </stat_objects>
+</stats>
+

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <stat_object_definitions folder="UuidObjects" file_extension="tbl">
+    <stat_object_definition
+      id="44444444-4444-4444-4444-444444444444"
+      name="ActionResourceDefinition"
+      category="ActionResource"
+      export_type="ActionResource"
+      object_type="ActionResource">
+      <field_definitions>
+        <field_definition name="UUID" type="Id" />
+        <field_definition name="Name" type="Name" auto_generated="true" />
+        <field_definition name="NameFS" type="String" display_name="Script name" />
+        <field_definition name="DisplayName" type="TranslatedString" />
+        <field_definition name="Hidden" type="Boolean" enumeration_type_name="YesNo" />
+      </field_definitions>
+    </stat_object_definition>
+  </stat_object_definitions>
+</root>

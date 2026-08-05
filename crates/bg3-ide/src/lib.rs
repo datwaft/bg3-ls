@@ -1,0 +1,461 @@
+//! Editor-neutral language operations over immutable BG3 module indexes.
+
+mod catalog;
+mod diagnostics;
+mod language;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use bg3_index::{
+    Definition, ModuleIndex, ModuleSpec, ParsedFile, Position, Reference, SchemaCatalog,
+    SymbolTarget, TextRange, canonical_kind,
+};
+
+pub use diagnostics::{Diagnostic, DiagnosticSeverity};
+pub use language::{CompletionItem, CompletionKind, CompletionList, SignatureHelp};
+
+/// A definition result with the module that contributes its precedence.
+#[derive(Clone, Debug)]
+pub struct ResolvedDefinition {
+    pub module: String,
+    pub rank: usize,
+    pub path: PathBuf,
+    pub definition: Definition,
+    pub ambiguous: bool,
+}
+
+/// A source location returned by editor-neutral analysis operations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceLocation {
+    pub path: PathBuf,
+    pub range: TextRange,
+}
+
+/// A top-level symbol with its module label.
+#[derive(Clone, Debug)]
+pub struct Symbol {
+    pub name: String,
+    pub kind: String,
+    pub module: String,
+    pub location: SourceLocation,
+}
+
+/// A full open-document overlay that replaces one disk record.
+#[derive(Clone, Debug)]
+pub struct OverlayDocument {
+    pub module: String,
+    pub version: i32,
+    pub text: String,
+    pub parsed: Arc<ParsedFile>,
+}
+
+/// Open document records kept separate from immutable disk module indexes.
+#[derive(Clone, Debug, Default)]
+pub struct OverlaySet {
+    pub(crate) documents: BTreeMap<PathBuf, OverlayDocument>,
+}
+
+impl OverlaySet {
+    /// Replaces the overlay for one open source path.
+    pub fn insert(&mut self, path: PathBuf, document: OverlayDocument) {
+        self.documents.insert(path, document);
+    }
+
+    /// Removes an overlay so queries use the disk record again.
+    pub fn remove(&mut self, path: &Path) {
+        self.documents.remove(path);
+    }
+
+    /// Returns the current overlay for one path.
+    pub fn get(&self, path: &Path) -> Option<&OverlayDocument> {
+        self.documents.get(path)
+    }
+
+    /// Lists open paths and versions for asynchronous diagnostic refreshes.
+    pub fn versions(&self) -> Vec<(PathBuf, i32)> {
+        self.documents
+            .iter()
+            .map(|(path, document)| (path.clone(), document.version))
+            .collect()
+    }
+
+    /// Tests whether a disk record is suppressed by an open document.
+    fn contains(&self, path: &Path) -> bool {
+        self.documents.contains_key(path)
+    }
+
+    /// Returns overlays owned by one module.
+    fn for_module<'a>(
+        &'a self,
+        module: &'a str,
+    ) -> impl Iterator<Item = (&'a PathBuf, &'a OverlayDocument)> {
+        self.documents
+            .iter()
+            .filter(move |(_, document)| document.module == module)
+    }
+}
+
+/// An immutable, generation-numbered composition of visible module layers.
+#[derive(Clone, Debug)]
+pub struct WorkspaceSnapshot {
+    pub schema: Arc<SchemaCatalog>,
+    pub layers: Vec<Arc<ModuleIndex>>,
+    pub generation: u64,
+    pub max_workspace_symbols: usize,
+    pub max_completion_items: usize,
+}
+
+impl WorkspaceSnapshot {
+    /// Creates a workspace whose layers are ordered from lowest to highest precedence.
+    pub fn new(
+        schema: Arc<SchemaCatalog>,
+        layers: Vec<Arc<ModuleIndex>>,
+        generation: u64,
+        max_workspace_symbols: usize,
+        max_completion_items: usize,
+    ) -> Self {
+        Self {
+            schema,
+            layers,
+            generation,
+            max_workspace_symbols,
+            max_completion_items,
+        }
+    }
+
+    /// Returns the most specific configured module that contains a source path.
+    pub fn module_for_path(&self, path: &Path) -> Option<&ModuleSpec> {
+        self.layers
+            .iter()
+            .filter(|layer| path.starts_with(&layer.spec.root))
+            .max_by_key(|layer| layer.spec.root.as_os_str().len())
+            .map(|layer| &layer.spec)
+    }
+
+    /// Resolves every visible declaration from highest to lowest precedence.
+    pub fn resolve(&self, target: &SymbolTarget, overlays: &OverlaySet) -> Vec<ResolvedDefinition> {
+        let mut resolved = Vec::new();
+        for (rank, layer) in self.layers.iter().enumerate().rev() {
+            let mut at_rank = Vec::new();
+            for (path, overlay) in overlays.for_module(&layer.spec.name) {
+                for definition in &overlay.parsed.definitions {
+                    if definition_matches(definition, target) {
+                        at_rank.push(ResolvedDefinition {
+                            module: layer.spec.name.clone(),
+                            rank,
+                            path: path.clone(),
+                            definition: definition.clone(),
+                            ambiguous: false,
+                        });
+                    }
+                }
+            }
+            for record in layer.resolve(target) {
+                if !overlays.contains(record.path.as_ref()) {
+                    at_rank.push(ResolvedDefinition {
+                        module: layer.spec.name.clone(),
+                        rank,
+                        path: record.path.as_ref().clone(),
+                        definition: record.definition().clone(),
+                        ambiguous: false,
+                    });
+                }
+            }
+            at_rank.sort_by(|left, right| {
+                left.path.cmp(&right.path).then_with(|| {
+                    left.definition
+                        .selection_range
+                        .start
+                        .line
+                        .cmp(&right.definition.selection_range.start.line)
+                })
+            });
+            if at_rank.len() > 1 {
+                for definition in &mut at_rank {
+                    definition.ambiguous = true;
+                }
+            }
+            resolved.extend(at_rank);
+        }
+        resolved
+    }
+
+    /// Returns definitions for the symbol under one source position.
+    pub fn definitions_at(
+        &self,
+        path: &Path,
+        position: Position,
+        overlays: &OverlaySet,
+    ) -> Vec<ResolvedDefinition> {
+        self.target_at(path, position, overlays)
+            .map_or_else(Vec::new, |target| self.resolve(&target, overlays))
+    }
+
+    /// Returns a rich Markdown description for the symbol under one position.
+    pub fn hover(&self, path: &Path, position: Position, overlays: &OverlaySet) -> Option<String> {
+        if let Some(field) = self.field_at(path, position, overlays) {
+            return Some(field);
+        }
+        let target = self.target_at(path, position, overlays)?;
+        let definitions = self.resolve(&target, overlays);
+        let effective = definitions.first()?;
+        let mut markdown = format!(
+            "**{}** `{}`\n\nModule: `{}`",
+            effective.definition.kind, effective.definition.name, effective.module
+        );
+        if let Some(uuid) = effective.definition.uuid {
+            markdown.push_str(&format!("\n\nUUID: `{uuid}`"));
+        }
+        if let Some(parent) = &effective.definition.parent {
+            markdown.push_str(&format!("\n\nParent: `{parent}`"));
+        }
+        for key in ["DisplayName", "Description", "Text", "Boosts"] {
+            if let Some(value) = effective.definition.fields.get(key) {
+                markdown.push_str(&format!("\n\n- **{key}:** `{value}`"));
+            }
+        }
+        markdown.push_str(&format!("\n\nSource: `{}`", effective.path.display()));
+        if definitions.len() > 1 {
+            markdown.push_str("\n\n**Override chain**\n");
+            for definition in definitions {
+                let ambiguity = if definition.ambiguous {
+                    " — same-rank ambiguity"
+                } else {
+                    ""
+                };
+                markdown.push_str(&format!(
+                    "\n- `{}` — `{}`{}",
+                    definition.module,
+                    definition.path.display(),
+                    ambiguity
+                ));
+            }
+        }
+        Some(markdown)
+    }
+
+    /// Finds references to the symbol under one position across visible modules.
+    pub fn references_at(
+        &self,
+        path: &Path,
+        position: Position,
+        include_declaration: bool,
+        overlays: &OverlaySet,
+    ) -> Vec<SourceLocation> {
+        let Some(target) = self.target_at(path, position, overlays) else {
+            return Vec::new();
+        };
+        let mut locations = Vec::new();
+        for layer in &self.layers {
+            for (overlay_path, overlay) in overlays.for_module(&layer.spec.name) {
+                for reference in &overlay.parsed.references {
+                    if reference.target == target {
+                        locations.push(SourceLocation {
+                            path: overlay_path.clone(),
+                            range: reference.range,
+                        });
+                    }
+                }
+            }
+            for record in layer.references_to(&target) {
+                if !overlays.contains(record.path.as_ref()) {
+                    locations.push(SourceLocation {
+                        path: record.path.as_ref().clone(),
+                        range: record.reference().range,
+                    });
+                }
+            }
+        }
+        if include_declaration {
+            locations.extend(
+                self.resolve(&target, overlays)
+                    .into_iter()
+                    .map(|definition| SourceLocation {
+                        path: definition.path,
+                        range: definition.definition.selection_range,
+                    }),
+            );
+        }
+        locations.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.range.start.line.cmp(&right.range.start.line))
+                .then(left.range.start.character.cmp(&right.range.start.character))
+        });
+        locations
+    }
+
+    /// Lists top-level declarations in one disk or open document.
+    pub fn document_symbols(&self, path: &Path, overlays: &OverlaySet) -> Vec<Symbol> {
+        let Some((module, file)) = self.file(path, overlays) else {
+            return Vec::new();
+        };
+        file.definitions
+            .iter()
+            .map(|definition| Symbol {
+                name: definition.name.clone(),
+                kind: definition.kind.clone(),
+                module: module.to_owned(),
+                location: SourceLocation {
+                    path: path.to_path_buf(),
+                    range: definition.range,
+                },
+            })
+            .collect()
+    }
+
+    /// Searches every visible declaration and preserves shadowed overrides.
+    pub fn workspace_symbols(&self, query: &str, overlays: &OverlaySet) -> Vec<Symbol> {
+        let query = query.to_ascii_lowercase();
+        let mut symbols = Vec::new();
+        let mut suppressed = BTreeSet::new();
+        for (path, overlay) in &overlays.documents {
+            suppressed.insert(path.clone());
+            for definition in &overlay.parsed.definitions {
+                if definition.name.to_ascii_lowercase().contains(&query) {
+                    symbols.push(Symbol {
+                        name: definition.name.clone(),
+                        kind: definition.kind.clone(),
+                        module: overlay.module.clone(),
+                        location: SourceLocation {
+                            path: path.clone(),
+                            range: definition.selection_range,
+                        },
+                    });
+                }
+            }
+        }
+        for layer in self.layers.iter().rev() {
+            for record in &layer.definitions {
+                if !suppressed.contains(record.path.as_ref())
+                    && record
+                        .definition()
+                        .name
+                        .to_ascii_lowercase()
+                        .contains(&query)
+                {
+                    symbols.push(Symbol {
+                        name: record.definition().name.clone(),
+                        kind: record.definition().kind.clone(),
+                        module: layer.spec.name.clone(),
+                        location: SourceLocation {
+                            path: record.path.as_ref().clone(),
+                            range: record.definition().selection_range,
+                        },
+                    });
+                }
+            }
+        }
+        symbols.truncate(self.max_workspace_symbols);
+        symbols
+    }
+
+    /// Finds the semantic target under one source position.
+    fn target_at(
+        &self,
+        path: &Path,
+        position: Position,
+        overlays: &OverlaySet,
+    ) -> Option<SymbolTarget> {
+        let (_, file) = self.file(path, overlays)?;
+        if let Some(reference) = file
+            .references
+            .iter()
+            .find(|reference| range_contains(reference.range, position))
+        {
+            return Some(reference.target.clone());
+        }
+        file.definitions
+            .iter()
+            .find(|definition| range_contains(definition.selection_range, position))
+            .map(|definition| SymbolTarget::Named {
+                kind: Some(definition.kind.clone()),
+                name: definition.name.clone(),
+            })
+    }
+
+    /// Returns schema field documentation when the position is on a field name.
+    fn field_at(&self, path: &Path, position: Position, overlays: &OverlaySet) -> Option<String> {
+        let (_, file) = self.file(path, overlays)?;
+        for definition in &file.definitions {
+            for (name, range) in &definition.field_ranges {
+                if range_contains(*range, position) {
+                    let candidates = if let Some(schema_id) = &definition.schema_id {
+                        self.schema.by_id.get(schema_id).into_iter().collect()
+                    } else {
+                        self.schema.infer(path, Some(&definition.kind))
+                    };
+                    for schema in candidates {
+                        if let Some(field) = schema.fields.get(name) {
+                            let mut markdown = format!("**Field** `{name}`");
+                            if let Some(field_type) = &field.field_type {
+                                markdown.push_str(&format!("\n\nType: `{field_type}`"));
+                            }
+                            if let Some(description) = &field.description {
+                                markdown.push_str(&format!("\n\n{description}"));
+                            }
+                            return Some(markdown);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the active disk or overlay file and its owning module.
+    fn file<'a>(
+        &'a self,
+        path: &Path,
+        overlays: &'a OverlaySet,
+    ) -> Option<(&'a str, &'a ParsedFile)> {
+        if let Some(overlay) = overlays.get(path) {
+            return Some((&overlay.module, &overlay.parsed));
+        }
+        self.layers.iter().find_map(|layer| {
+            layer
+                .file(path)
+                .map(|file| (layer.spec.name.as_str(), file.as_ref()))
+        })
+    }
+}
+
+/// Tests whether one position is inside a half-open source range.
+pub fn range_contains(range: TextRange, position: Position) -> bool {
+    let after_start =
+        (position.line, position.character) >= (range.start.line, range.start.character);
+    let before_end = (position.line, position.character) <= (range.end.line, range.end.character);
+    after_start && before_end
+}
+
+/// Tests a declaration against a semantic target.
+fn definition_matches(definition: &Definition, target: &SymbolTarget) -> bool {
+    match target {
+        SymbolTarget::Named {
+            kind: Some(kind),
+            name,
+        } => {
+            (canonical_kind(&definition.kind) == canonical_kind(kind) && definition.name == *name)
+                || definition.aliases.contains(name)
+        }
+        SymbolTarget::Named { kind: None, name } => {
+            definition.name == *name || definition.aliases.contains(name)
+        }
+        SymbolTarget::Uuid(uuid) => definition.uuid == Some(*uuid),
+    }
+}
+
+/// Returns the semantic target represented by one declaration.
+pub fn definition_target(definition: &Definition) -> SymbolTarget {
+    SymbolTarget::Named {
+        kind: Some(definition.kind.clone()),
+        name: definition.name.clone(),
+    }
+}
+
+/// Returns whether two references identify the same semantic target.
+pub fn references_same_target(left: &Reference, right: &Reference) -> bool {
+    left.target == right.target
+}

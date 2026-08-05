@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <stat_object_definitions folder="Stats" file_extension="stats">
+    <stat_object_definition id="11111111-1111-1111-1111-111111111111" name="Passive" category="Stats" export_type="PassiveData">
+      <field_definitions>
+        <field_definition name="UUID" type="Id" />
+        <field_definition name="Name" type="Name" />
+        <field_definition name="Using" type="BaseClass" description="Parent passive" />
+        <field_definition name="Boosts" type="String" autocomplete_type="Boosts" description="Passive effects" />
+        <field_definition name="Enabled" type="Boolean" enumeration_type_name="YesNo" />
+        <field_definition name="Flag" type="Boolean" />
+        <field_definition name="DisplayName" type="TranslatedString" description="Visible passive name" />
+        <field_definition name="ResourceId" type="Id" object_type="ActionResource" />
+        <field_definition name="Amount" type="Integer" min_value="0" max_value="2" />
+      </field_definitions>
+    </stat_object_definition>
+    <stat_object_definition id="22222222-2222-2222-2222-222222222222" name="SpellData" category="SpellData">
+      <field_definitions>
+        <field_definition name="UUID" type="Id" />
+        <field_definition name="Name" type="Name" />
+      </field_definitions>
+    </stat_object_definition>
+    <stat_object_definition id="33333333-3333-3333-3333-333333333333" name="StatusData" category="StatusData">
+      <field_definitions>
+        <field_definition name="UUID" type="Id" />
+        <field_definition name="Name" type="Name" />
+      </field_definitions>
+    </stat_object_definition>
+  </stat_object_definitions>
+</root>
