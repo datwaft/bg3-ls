@@ -127,6 +127,55 @@ impl ResolvedConfig {
     /// Loads workspace JSON and applies higher-priority inline LSP options.
     pub fn load(inline: Option<Value>, root_uri: &str) -> Result<Self, Error> {
         let workspace_root = workspace_root(root_uri)?;
+        Self::load_at_root(inline, workspace_root)
+    }
+
+    /// Finds the nearest workspace JSON file from a command working directory.
+    pub fn discover(start: &Path) -> Result<Self, Error> {
+        let start = fs::canonicalize(start).map_err(|error| {
+            Error::Config(format!(
+                "cannot resolve the configuration search directory {}: {error}",
+                start.display()
+            ))
+        })?;
+        let workspace_root = start
+            .ancestors()
+            .find(|directory| directory.join("bg3-ls.json").is_file())
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "cannot find bg3-ls.json from {} or its ancestors",
+                    start.display()
+                ))
+            })?
+            .to_path_buf();
+        Self::load_at_root(None, workspace_root)
+    }
+
+    /// Returns declaration kinds that configured packs make incomplete.
+    pub fn incomplete_kinds(&self) -> Vec<&'static str> {
+        let mut kinds = Vec::new();
+        if self
+            .game_data
+            .join("Localization")
+            .join(format!("{}.pak", self.language))
+            .is_file()
+        {
+            kinds.push("Localization");
+        }
+        if self.modules.iter().any(|module| {
+            module.role == ModuleRole::Base
+                && self
+                    .game_data
+                    .join(format!("{}.pak", module.name))
+                    .is_file()
+        }) {
+            kinds.extend(["SpellData", "StatusData", "PassiveData", "InterruptData"]);
+        }
+        kinds
+    }
+
+    /// Loads and merges configuration for one canonical workspace root.
+    fn load_at_root(inline: Option<Value>, workspace_root: PathBuf) -> Result<Self, Error> {
         let config_path = workspace_root.join("bg3-ls.json");
         let json = if config_path.is_file() {
             Some(read_layer(&config_path)?)
