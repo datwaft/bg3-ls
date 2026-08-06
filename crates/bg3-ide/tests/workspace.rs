@@ -450,6 +450,24 @@ data "ExportedAmount" "1"
 }
 
 #[test]
+fn does_not_diagnose_status_groups_as_missing_statuses() {
+    let (workspace, path) = fixture_workspace(200);
+    let text = r#"new entry "STATUS_GROUPS"
+type "PassiveData"
+data "Boosts" "HasStatus('SG_Charmed');ApplyStatus(MISSING_STATUS,100,1)"
+"#;
+    let overlays = overlay(&workspace, &path, text);
+    let diagnostics = workspace.diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning));
+
+    assert!(diagnostics.iter().all(|diagnostic| {
+        diagnostic.code != "unresolved-reference" || !diagnostic.message.contains("SG_Charmed")
+    }));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "unresolved-reference" && diagnostic.message.contains("MISSING_STATUS")
+    }));
+}
+
+#[test]
 fn syntax_diagnostics_can_disable_unresolved_references() {
     let (workspace, path) = fixture_workspace(200);
     let text = "new entry \"BROKEN\"\ntype \"PassiveData\"\ndata \"Boosts\" \"ApplyStatus(MISSING";
