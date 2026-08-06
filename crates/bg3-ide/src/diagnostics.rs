@@ -39,7 +39,7 @@ impl WorkspaceSnapshot {
         };
         // The Stats catalogs do not describe LSX nodes. Do not report legacy
         // schema errors until the server has a verified LSX schema source.
-        if file.source.kind == SourceKind::Lsx {
+        if matches!(file.source.kind, SourceKind::Lsx | SourceKind::Thoth) {
             return Vec::new();
         }
         let mut diagnostics: Vec<_> = file

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use bg3_index::{
     CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SchemaCatalog, SourceFile, SourceKind,
-    SymbolTarget, discover_module, parse_source, read_base_localization_package,
-    read_localization_package,
+    SymbolTarget, THOTH_FUNCTION_KIND, discover_module, parse_source,
+    read_base_localization_package, read_localization_package,
 };
 
 fn fixtures() -> PathBuf {
@@ -167,6 +167,60 @@ fn parses_plain_stats_references_and_functions() {
             .iter()
             .any(|function| function.name == "UnlockSpell")
     );
+}
+
+#[test]
+fn parses_thoth_declarations_parameters_and_calls() {
+    let source = SourceFile {
+        path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Test.khn"),
+        kind: SourceKind::Thoth,
+    };
+    let parsed = parse_source(
+        source,
+        "function ProjectOnly(entity, fallback)\n  try\n    return DependencyOnly(entity)\n  catch error then\n    return fallback\n  end\nend\n",
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert_eq!(parsed.definitions.len(), 1);
+    assert_eq!(parsed.definitions[0].kind, THOTH_FUNCTION_KIND);
+    assert_eq!(parsed.definitions[0].name, "ProjectOnly");
+    assert_eq!(
+        parsed.definitions[0].fields["Parameters"],
+        "entity, fallback"
+    );
+    assert!(parsed.references.iter().any(|reference| {
+        reference.target
+            == SymbolTarget::Named {
+                kind: Some(THOTH_FUNCTION_KIND.into()),
+                name: "DependencyOnly".into(),
+            }
+    }));
+    assert!(parsed.issues.is_empty());
+}
+
+#[test]
+fn discovers_thoth_helpers_only_below_mod_script_trees() {
+    let root = fixtures();
+    let module = ModuleSpec {
+        name: "MyMod".into(),
+        root: root.join("project"),
+        role: ModuleRole::Project,
+    };
+    let files = discover_module(&module, &root.join("game"), "English", false).unwrap();
+
+    assert!(files.iter().any(|file| {
+        file.kind == SourceKind::Thoth
+            && file
+                .path
+                .ends_with("Mods/MyMod/Scripts/thoth/helpers/MyMod.khn")
+    }));
+    assert!(files.iter().all(|file| {
+        file.kind != SourceKind::Thoth
+            || file.path.to_string_lossy().contains("/Mods/")
+                && file.path.to_string_lossy().contains("/Scripts/thoth/")
+    }));
 }
 
 #[test]
@@ -502,4 +556,48 @@ fn discards_corrupt_and_schema_obsolete_cache_objects() {
         .build_module(&module, &files, &schema, "English")
         .unwrap();
     assert_eq!(invalidated.misses, files.len());
+}
+
+#[test]
+fn caches_and_rebuilds_changed_thoth_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    let helper = root.join("Mods/Test/Scripts/thoth/helpers/Test.khn");
+    fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    fs::write(&helper, "function First(value)\n  return value\nend\n").unwrap();
+    let module = ModuleSpec {
+        name: "Test".into(),
+        root: root.clone(),
+        role: ModuleRole::Project,
+    };
+    let cache = CacheStore::new(directory.path().join("cache")).unwrap();
+    let schema = SchemaCatalog::default();
+
+    let sources = discover_module(&module, directory.path(), "English", false).unwrap();
+    let (_, cold) = cache
+        .build_module(&module, &sources, &schema, "English")
+        .unwrap();
+    let (_, warm) = cache
+        .build_module(&module, &sources, &schema, "English")
+        .unwrap();
+    assert_eq!(cold.misses, 1);
+    assert_eq!(warm.hits, 1);
+
+    fs::write(
+        &helper,
+        "function Changed(value, fallback)\n  return value or fallback\nend\n",
+    )
+    .unwrap();
+    let (changed, changed_stats) = cache
+        .build_module(&module, &sources, &schema, "English")
+        .unwrap();
+    assert_eq!(changed_stats.misses, 1);
+    assert_eq!(changed[0].definitions[0].name, "Changed");
+
+    fs::remove_file(&helper).unwrap();
+    let removed_sources = discover_module(&module, directory.path(), "English", false).unwrap();
+    let (removed, _) = cache
+        .build_module(&module, &removed_sources, &schema, "English")
+        .unwrap();
+    assert!(removed.is_empty());
 }

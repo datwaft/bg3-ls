@@ -25,8 +25,12 @@ pub enum SourceKind {
     ToolkitStats,
     Table,
     Lsx,
+    Thoth,
     Localization,
 }
+
+/// The semantic kind used for declarations and calls in Thoth helper files.
+pub const THOTH_FUNCTION_KIND: &str = "ThothFunction";
 
 /// Identifies one source file without assigning it a load-order rank.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

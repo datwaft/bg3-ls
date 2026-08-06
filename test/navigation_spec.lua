@@ -3,19 +3,31 @@ local binary = root .. "/target/debug/bg3-ls"
 local project = root .. "/test/fixtures/project"
 local source = project .. "/Public/MyMod/Stats/Generated/Data/Passive.txt"
 local lsx_source = project .. "/Public/MyMod/Progressions/Progressions.lsx"
+local thoth_source = project .. "/Mods/MyMod/Scripts/thoth/helpers/MyMod.khn"
 local cache = assert(vim.env.BG3_LS_TEST_CACHE)
 local dependency = vim.fn.tempname()
 local dependency_file = dependency .. "/Public/Fixes/Stats/Generated/Data/Passive.txt"
+local dependency_helper = dependency .. "/Mods/Fixes/Scripts/thoth/helpers/Watched.khn"
+local dependency_fixture_helper = dependency .. "/Mods/Fixes/Scripts/thoth/helpers/Fixes.khn"
 vim.fn.mkdir(vim.fs.dirname(dependency_file), "p")
 vim.fn.writefile(
   vim.fn.readfile(root .. "/test/fixtures/dependency/Public/Fixes/Stats/Generated/Data/Passive.txt"),
   dependency_file
 )
+vim.fn.mkdir(vim.fs.dirname(dependency_fixture_helper), "p")
+vim.fn.writefile(
+  vim.fn.readfile(root .. "/test/fixtures/dependency/Mods/Fixes/Scripts/thoth/helpers/Fixes.khn"),
+  dependency_fixture_helper
+)
 
 local progress = {}
+local completed_progress = 0
 local autocmd = vim.api.nvim_create_autocmd("LspProgress", {
   callback = function(event)
     progress[#progress + 1] = event.data.params.value.kind
+    if event.data.params.value.kind == "end" then
+      completed_progress = completed_progress + 1
+    end
   end,
 })
 
@@ -132,28 +144,60 @@ assert(vim.wait(5000, function()
   end)
 end, 50), "the server did not publish the invalid-enum diagnostic")
 
-vim.fn.writefile({
-  'new entry "CHAINED"',
-  'type "PassiveData"',
-  'data "Boosts" "UnlockSpell(Target_Test)"',
-  '',
-  'new entry "WATCHED"',
-  'type "PassiveData"',
-}, dependency_file)
-assert(vim.wait(10000, function()
-  local responses = vim.lsp.buf_request_sync(0, "workspace/executeCommand", {
-    command = "bg3.indexInfo",
-    arguments = {},
-  }, 1000)
-  local response = responses and responses[client_id]
-  return response
-    and response.result
-    and response.result.generation
-    and response.result.generation >= 2
-end, 50), "the filesystem watcher did not publish a new index generation")
+assert(vim.wait(5000, function()
+  return completed_progress >= 1
+end, 50), "the initial index progress did not finish")
 
-local watched = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "WATCHED" }, 5000)
-assert(watched[client_id] and #watched[client_id].result == 1, vim.inspect(watched))
+if vim.env.BG3_LS_SKIP_WATCHER_TESTS ~= "1" then
+  -- The coordinator installs the watcher immediately after it closes initial
+  -- progress. Give the OS watcher registration one event-loop turn to complete.
+  vim.wait(250)
+
+  vim.fn.writefile({
+    'new entry "CHAINED"',
+    'type "PassiveData"',
+    'data "Boosts" "UnlockSpell(Target_Test)"',
+    '',
+    'new entry "WATCHED"',
+    'type "PassiveData"',
+  }, dependency_file)
+  assert(vim.wait(10000, function()
+    return completed_progress >= 2
+  end, 50), "the filesystem watcher did not publish a new index generation")
+
+  local watched = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "WATCHED" }, 5000)
+  assert(watched[client_id] and #watched[client_id].result == 1, vim.inspect(watched))
+
+  vim.fn.mkdir(vim.fs.dirname(dependency_helper), "p")
+  vim.fn.writefile({
+    "function WatchedHelper(value)",
+    "  return value",
+    "end",
+  }, dependency_helper)
+  assert(vim.wait(10000, function()
+    return completed_progress >= 3
+  end, 50), "the watcher did not index an added Thoth helper")
+  local added = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "WatchedHelper" }, 5000)
+  assert(added[client_id] and #added[client_id].result == 1, vim.inspect(added))
+
+  vim.fn.writefile({
+    "function ChangedHelper(value, fallback)",
+    "  return value or fallback",
+    "end",
+  }, dependency_helper)
+  assert(vim.wait(10000, function()
+    return completed_progress >= 4
+  end, 50), "the watcher did not update a changed Thoth helper")
+  local changed = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "ChangedHelper" }, 5000)
+  assert(changed[client_id] and #changed[client_id].result == 1, vim.inspect(changed))
+
+  vim.fn.delete(dependency_helper)
+  assert(vim.wait(10000, function()
+    return completed_progress >= 5
+  end, 50), "the watcher did not remove a deleted Thoth helper")
+  local removed = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "ChangedHelper" }, 5000)
+  assert(removed[client_id] and #removed[client_id].result == 0, vim.inspect(removed))
+end
 
 vim.lsp.buf_detach_client(0, client_id)
 assert(vim.wait(5000, function()
@@ -221,6 +265,48 @@ assert(lsx_definition[client_id] and #lsx_definition[client_id].result == 3, vim
 assert(vim.wait(1000, function()
   return vim.tbl_isempty(vim.diagnostic.get(0))
 end, 50), "the server published legacy Stats diagnostics for LSX")
+
+vim.bo.modified = false
+vim.cmd("edit " .. vim.fn.fnameescape(thoth_source))
+vim.bo.filetype = "bg3_thoth"
+local thoth_client_id = assert(vim.lsp.start(lsp_config))
+assert(thoth_client_id == client_id, "the Thoth buffer did not reuse the project client")
+assert(vim.wait(5000, function()
+  return vim.lsp.buf_is_attached(0, client_id)
+end, 10), "the project client did not attach to the Thoth buffer")
+
+replace_buffer({
+  "function UnsavedCaller(value)",
+  "  return DependencyOnly(value)",
+  "end",
+})
+assert(vim.wait(5000, function()
+  local result = vim.lsp.buf_request_sync(0, "textDocument/documentSymbol", {
+    textDocument = { uri = vim.uri_from_bufnr(0) },
+  }, 1000)
+  local symbols = result and result[client_id] and result[client_id].result
+  return symbols and #symbols == 1 and symbols[1].name == "UnsavedCaller"
+end, 50), "the unsaved Thoth overlay did not replace the disk declarations")
+
+local thoth_definition = vim.lsp.buf_request_sync(0, "textDocument/definition", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = { line = 1, character = 10 },
+}, 5000)
+assert(thoth_definition[client_id] and #thoth_definition[client_id].result == 1, vim.inspect(thoth_definition))
+
+local thoth_signature = vim.lsp.buf_request_sync(0, "textDocument/signatureHelp", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = { line = 1, character = #"  return DependencyOnly(" },
+}, 5000)
+assert(thoth_signature[client_id] and thoth_signature[client_id].result, vim.inspect(thoth_signature))
+assert(
+  thoth_signature[client_id].result.signatures[1].label == "DependencyOnly(value)",
+  vim.inspect(thoth_signature)
+)
+
+assert(vim.wait(1000, function()
+  return vim.tbl_isempty(vim.diagnostic.get(0))
+end, 50), "the server published diagnostics for Thoth source")
 
 assert(vim.tbl_contains(progress, "begin"), vim.inspect(progress))
 assert(vim.tbl_contains(progress, "end"), vim.inspect(progress))

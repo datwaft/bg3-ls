@@ -1,0 +1,7 @@
+function OverrideHelper(dependencyValue)
+  return dependencyValue
+end
+
+function DependencyOnly(value)
+  return SharedOnly(value)
+end

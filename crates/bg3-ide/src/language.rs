@@ -3,8 +3,8 @@ use std::path::Path;
 
 use crate::{OverlaySet, WorkspaceSnapshot, range_contains};
 use bg3_index::{
-    Definition, FUNCTIONS, Position, SchemaDefinition, SchemaField, SymbolTarget, TextRange,
-    field_kind, function_spec, is_lsx_value_field,
+    Definition, FUNCTIONS, Position, SchemaDefinition, SchemaField, SymbolTarget,
+    THOTH_FUNCTION_KIND, TextRange, field_kind, function_spec, is_lsx_value_field,
 };
 
 /// The semantic category of one completion result.
@@ -67,6 +67,19 @@ impl WorkspaceSnapshot {
             .unwrap_or(usize::MAX)
             .min(line.len());
         let before = &line[..cursor];
+        if file.source.kind == bg3_index::SourceKind::Thoth {
+            let prefix = identifier_prefix(before);
+            let mut items = self.complete_thoth_functions(prefix, position, overlays, snippets);
+            items.sort_by(|left, right| {
+                left.label
+                    .to_ascii_lowercase()
+                    .cmp(&right.label.to_ascii_lowercase())
+                    .then(left.detail.cmp(&right.detail))
+            });
+            let incomplete = items.len() > self.max_completion_items;
+            items.truncate(self.max_completion_items);
+            return CompletionList { items, incomplete };
+        }
         let entry = active_definition(&file.definitions, position);
         let mut items = if let Some(prefix) = quoted_clause_prefix(before, "type") {
             self.complete_entry_types(prefix, position)
@@ -108,7 +121,7 @@ impl WorkspaceSnapshot {
         CompletionList { items, incomplete }
     }
 
-    /// Returns signature help only for curated functions with verified parameters.
+    /// Returns verified signatures for curated functions and declared Thoth helpers.
     pub fn signature_help(
         &self,
         path: &Path,
@@ -125,32 +138,50 @@ impl WorkspaceSnapshot {
             .map(|context| context.value_before_cursor)
             .unwrap_or(before);
         let context = call_context(expression)?;
-        let function = function_spec(&context.function)?;
-        let form = function.form_for_call(context.argument + 1, context.first_argument.as_deref());
-        let mut label = format!("{}(", function.name);
-        label.push_str(
-            &form
-                .parameters
-                .iter()
-                .map(|parameter| parameter.label)
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        if form.variadic {
-            if !form.parameters.is_empty() {
-                label.push_str(", ");
+        if let Some(function) = function_spec(&context.function) {
+            let form =
+                function.form_for_call(context.argument + 1, context.first_argument.as_deref());
+            let mut label = format!("{}(", function.name);
+            label.push_str(
+                &form
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.label)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            if form.variadic {
+                if !form.parameters.is_empty() {
+                    label.push_str(", ");
+                }
+                label.push_str("...");
             }
-            label.push_str("...");
+            label.push(')');
+            return Some(SignatureHelp {
+                label,
+                documentation: function.documentation.into(),
+                parameters: form
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.label.into())
+                    .collect(),
+                active_parameter: context.argument,
+            });
         }
-        label.push(')');
+
+        let target = SymbolTarget::Named {
+            kind: Some(THOTH_FUNCTION_KIND.into()),
+            name: context.function,
+        };
+        let definition = self.resolve(&target, overlays).into_iter().next()?;
+        let parameters = thoth_parameters(&definition.definition);
         Some(SignatureHelp {
-            label,
-            documentation: function.documentation.into(),
-            parameters: form
-                .parameters
-                .iter()
-                .map(|parameter| parameter.label.into())
-                .collect(),
+            label: format!("{}({})", definition.definition.name, parameters.join(", ")),
+            documentation: format!(
+                "Declared Thoth helper from module `{}`. Parameter types are not inferred.",
+                definition.module
+            ),
+            parameters,
             active_parameter: context.argument,
         })
     }
@@ -360,6 +391,11 @@ impl WorkspaceSnapshot {
                 items.push(item);
             }
         }
+        for item in self.complete_thoth_functions(prefix, position, overlays, snippets) {
+            if !items.iter().any(|existing| existing.label == item.label) {
+                items.push(item);
+            }
+        }
         let curated: BTreeSet<_> = FUNCTIONS.iter().map(|function| function.name).collect();
         for layer in self.layers.iter().rev() {
             for function in layer.functions.values() {
@@ -373,6 +409,64 @@ impl WorkspaceSnapshot {
                         "observed {} times; {}-{} arguments",
                         function.count, function.min_arity, function.max_arity
                     ));
+                    items.push(item);
+                }
+            }
+        }
+        items
+    }
+
+    /// Completes effective helper declarations and keeps same-rank ambiguity visible.
+    fn complete_thoth_functions(
+        &self,
+        prefix: &str,
+        position: Position,
+        overlays: &OverlaySet,
+        snippets: bool,
+    ) -> Vec<CompletionItem> {
+        let mut seen = BTreeSet::new();
+        let mut items = Vec::new();
+        for layer in self.layers.iter().rev() {
+            let mut candidates = BTreeMap::<String, Vec<String>>::new();
+            for (_, overlay) in overlays.for_module(&layer.spec.name) {
+                for definition in &overlay.parsed.definitions {
+                    add_thoth_candidate(&mut candidates, definition, prefix);
+                }
+            }
+            for record in layer.definitions_of_kind(THOTH_FUNCTION_KIND) {
+                if !overlays.contains(record.path.as_ref()) {
+                    add_thoth_candidate(&mut candidates, record.definition(), prefix);
+                }
+            }
+            for (name, parameter_lists) in candidates {
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                let ambiguous = parameter_lists.len() > 1;
+                for parameters in parameter_lists {
+                    let mut item = basic_item(&name, prefix, position, CompletionKind::Function);
+                    item.detail = Some(if ambiguous {
+                        format!("{} (same-rank ambiguity)", layer.spec.name)
+                    } else {
+                        layer.spec.name.clone()
+                    });
+                    item.documentation =
+                        Some("Declared Thoth helper. Parameter types are not inferred.".into());
+                    if snippets {
+                        let parameters = split_parameters(&parameters);
+                        if parameters.is_empty() {
+                            item.new_text = format!("{name}()");
+                        } else {
+                            let placeholders = parameters
+                                .iter()
+                                .enumerate()
+                                .map(|(index, parameter)| format!("${{{}:{parameter}}}", index + 1))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            item.new_text = format!("{name}({placeholders})");
+                            item.snippet = true;
+                        }
+                    }
                     items.push(item);
                 }
             }
@@ -488,6 +582,43 @@ enum SymbolInsertion {
     Name,
     Alias,
     Uuid,
+}
+
+/// Adds one helper declaration to its module-rank completion group.
+fn add_thoth_candidate(
+    candidates: &mut BTreeMap<String, Vec<String>>,
+    definition: &Definition,
+    prefix: &str,
+) {
+    if definition.kind == THOTH_FUNCTION_KIND
+        && starts_with_case_insensitive(&definition.name, prefix)
+    {
+        candidates.entry(definition.name.clone()).or_default().push(
+            definition
+                .fields
+                .get("Parameters")
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+}
+
+/// Returns parameter labels stored by the Thoth syntax extractor.
+fn thoth_parameters(definition: &Definition) -> Vec<String> {
+    definition
+        .fields
+        .get("Parameters")
+        .map_or_else(Vec::new, |parameters| split_parameters(parameters))
+}
+
+/// Splits a stored parameter list while preserving declared names.
+fn split_parameters(parameters: &str) -> Vec<String> {
+    parameters
+        .split(',')
+        .map(str::trim)
+        .filter(|parameter| !parameter.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Adds one matching declaration to its same-rank completion group.
@@ -760,6 +891,16 @@ fn basic_item(
 /// Returns one zero-based source line without allocating.
 fn source_line(source: &str, line: u32) -> Option<&str> {
     source.lines().nth(usize::try_from(line).ok()?)
+}
+
+/// Returns the incomplete identifier immediately before the cursor.
+fn identifier_prefix(source: &str) -> &str {
+    let start = source
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_ascii_alphanumeric() && *character != '_')
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    &source[start..]
 }
 
 /// Performs an ASCII-insensitive prefix comparison used for BG3 identifiers.

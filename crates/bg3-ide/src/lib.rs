@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, ParsedFile, Position, Reference,
-    SchemaCatalog, SymbolTarget, TextRange, canonical_kind,
+    SchemaCatalog, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, canonical_kind,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -238,15 +238,31 @@ impl WorkspaceSnapshot {
         let target = self.target_at(path, position, overlays)?;
         let definitions = self.resolve(&target, overlays);
         let effective = definitions.first()?;
+        let heading = if effective.definition.kind == THOTH_FUNCTION_KIND {
+            "Thoth function"
+        } else {
+            &effective.definition.kind
+        };
         let mut markdown = format!(
-            "**{}** `{}`\n\nModule: `{}`",
-            effective.definition.kind, effective.definition.name, effective.module
+            "**{heading}** `{}`\n\nModule: `{}`",
+            effective.definition.name, effective.module
         );
         if let Some(uuid) = effective.definition.uuid {
             markdown.push_str(&format!("\n\nUUID: `{uuid}`"));
         }
         if let Some(parent) = &effective.definition.parent {
             markdown.push_str(&format!("\n\nParent: `{parent}`"));
+        }
+        if effective.definition.kind == THOTH_FUNCTION_KIND {
+            let parameters = effective
+                .definition
+                .fields
+                .get("Parameters")
+                .map_or("", String::as_str);
+            markdown.push_str(&format!(
+                "\n\nSignature: `{}({parameters})`",
+                effective.definition.name
+            ));
         }
         for key in ["DisplayName", "Description", "Text", "Boosts"] {
             if let Some(value) = effective.definition.fields.get(key) {

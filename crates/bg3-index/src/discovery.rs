@@ -18,11 +18,11 @@ pub fn discover_module(
             roots.push((module.root.clone(), DiscoveryMode::StatsOnly));
             roots.push((
                 game_data.join("Public").join(&module.name),
-                DiscoveryMode::LsxOnly,
+                DiscoveryMode::ModuleResources,
             ));
             roots.push((
                 game_data.join("Mods").join(&module.name),
-                DiscoveryMode::LsxOnly,
+                DiscoveryMode::ModuleResources,
             ));
             if include_global_localization {
                 roots.push((
@@ -59,7 +59,7 @@ pub fn discover_module(
 #[derive(Clone, Copy, Debug)]
 enum DiscoveryMode {
     StatsOnly,
-    LsxOnly,
+    ModuleResources,
     LocalizationOnly,
     LooseModule,
 }
@@ -73,7 +73,7 @@ fn classify(path: &Path, mode: DiscoveryMode, language: &str) -> Option<SourceKi
         .to_ascii_lowercase();
     match mode {
         DiscoveryMode::StatsOnly => classify_stats(&normalized, &extension),
-        DiscoveryMode::LsxOnly => (extension == "lsx").then_some(SourceKind::Lsx),
+        DiscoveryMode::ModuleResources => classify_module_resource(&normalized, &extension),
         DiscoveryMode::LocalizationOnly => (extension == "xml").then_some(SourceKind::Localization),
         DiscoveryMode::LooseModule => {
             if let Some(kind) = classify_stats(&normalized, &extension) {
@@ -84,12 +84,27 @@ fn classify(path: &Path, mode: DiscoveryMode, language: &str) -> Option<SourceKi
             {
                 return Some(SourceKind::Lsx);
             }
+            if extension == "khn"
+                && normalized.contains("/mods/")
+                && normalized.contains("/scripts/thoth/")
+            {
+                return Some(SourceKind::Thoth);
+            }
             let localization = format!("/localization/{}/", language.to_ascii_lowercase());
             if extension == "xml" && normalized.contains(&localization) {
                 return Some(SourceKind::Localization);
             }
             None
         }
+    }
+}
+
+/// Classifies source formats that can occur below a base module resource root.
+fn classify_module_resource(normalized: &str, extension: &str) -> Option<SourceKind> {
+    match extension {
+        "lsx" => Some(SourceKind::Lsx),
+        "khn" if normalized.contains("/scripts/thoth/") => Some(SourceKind::Thoth),
+        _ => None,
     }
 }
 

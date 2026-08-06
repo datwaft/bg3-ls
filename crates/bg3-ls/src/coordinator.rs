@@ -7,7 +7,8 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use bg3_ide::WorkspaceSnapshot;
 use bg3_index::{
-    CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, discover_module,
+    CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, THOTH_FUNCTION_KIND,
+    discover_module,
 };
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -536,6 +537,9 @@ fn index_info(workspace: &WorkspaceSnapshot, cache: CacheStats) -> IndexInfo {
         info.references += layer.references.len();
         info.functions += layer.functions.len();
         for definition in &layer.definitions {
+            if definition.definition().kind == THOTH_FUNCTION_KIND {
+                info.functions += 1;
+            }
             if definition.definition().kind == "Localization" {
                 info.localizations += 1;
             } else if definition.definition().uuid.is_some() {

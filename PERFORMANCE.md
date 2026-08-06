@@ -60,3 +60,32 @@ The cache and repeated-trial RSS increase because the server now retains the
 configured base localization catalog. Normal operation keeps one published
 catalog; the repeated-trial RSS value also includes allocator pages from ten
 rebuilds.
+
+## Version 0.6 pre-release verification
+
+Issue #32 adds cached Thoth helper declarations and call references. The
+verification used the same machine, schema revision, base modules, project,
+and five-trial method as the version 0.5 measurement. It used
+`tree-sitter-bg3` 0.2.0 with parser ABI 15.
+
+The version 0.5 comparison values were 13.208 seconds cold p95, 377 ms warm
+p95, and 1.083 microseconds navigation p95.
+
+The index contained 2,531 documents and 47,800 definitions. The added Thoth
+source contributed one document and 77 declarations.
+
+| Metric | p50 | p95 | Change from version 0.5 p95 |
+| --- | ---: | ---: | ---: |
+| Cold indexing | 12.731 s | 12.844 s | -2.8% |
+| Warm indexing | 369 ms | 374 ms | -0.8% |
+| Navigation | 1.125 µs | 1.167 µs | +7.8% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100%
+- Repeated-trial RSS high-water mark after ten builds: 918,667,264 bytes
+- Cache size: 71,119,548 bytes in 2,539 files
+
+The cold and warm p95 results remain within the repository regression limits.
+The cache stores helper parameter lists and call ranges so warm workspaces do
+not parse unchanged `.khn` files again.

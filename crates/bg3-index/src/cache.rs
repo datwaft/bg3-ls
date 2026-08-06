@@ -417,12 +417,14 @@ fn context_fingerprint(source: &SourceFile, schema: &str, language: &str) -> Str
     let stats_abi = tree_sitter::Language::from(tree_sitter_bg3::BG3_STATS_LANGUAGE).abi_version();
     let value_abi =
         tree_sitter::Language::from(tree_sitter_bg3::BG3_STATS_VALUE_LANGUAGE).abi_version();
+    let thoth_abi = tree_sitter::Language::from(tree_sitter_bg3::BG3_THOTH_LANGUAGE).abi_version();
     let mut hash = blake3::Hasher::new();
     hash.update(EXTRACTOR_VERSION.as_bytes());
     hash.update(env!("CARGO_PKG_VERSION").as_bytes());
     hash.update(tree_sitter_bg3::GRAMMAR_VERSION.as_bytes());
     hash.update(&stats_abi.to_le_bytes());
     hash.update(&value_abi.to_le_bytes());
+    hash.update(&thoth_abi.to_le_bytes());
     hash.update(format!("{:?}", source.kind).as_bytes());
     hash.update(schema.as_bytes());
     hash.update(language.as_bytes());
