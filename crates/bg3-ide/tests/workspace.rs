@@ -139,7 +139,7 @@ fn completes_fields_and_values_in_incomplete_syntax() {
             .iter()
             .map(|item| item.label.as_str())
             .collect::<Vec<_>>(),
-        ["Enabled"]
+        ["Enabled", "ExportedAmount"]
     );
 
     let enum_text = "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Enabled\" \"Y";
@@ -417,6 +417,36 @@ data "Modes" "Yes;Maybe;No"
     assert!(invalid_diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "invalid-enum" && diagnostic.message.contains("`Maybe`")
     }));
+}
+
+#[test]
+fn resolves_legacy_fields_by_schema_export_name() {
+    let (workspace, path) = fixture_workspace(200);
+    let text = r#"new entry "EXPORTED_FIELD"
+type "PassiveData"
+data "ExportedAmount" "1"
+"#;
+    let overlays = overlay(&workspace, &path, text);
+    let diagnostics = workspace.diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning));
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "unknown-field"),
+        "an export name must identify its schema field: {diagnostics:?}"
+    );
+
+    let completion_text = "new entry \"EXPORTED_FIELD\"\ntype \"PassiveData\"\ndata \"Export";
+    let completion_overlays = overlay(&workspace, &path, completion_text);
+    let completion = workspace.completion(
+        &path,
+        Position {
+            line: 2,
+            character: 12,
+        },
+        &completion_overlays,
+        false,
+    );
+    assert_eq!(completion.items[0].label, "ExportedAmount");
 }
 
 #[test]

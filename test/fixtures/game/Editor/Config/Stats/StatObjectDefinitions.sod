@@ -14,6 +14,7 @@
         <field_definition name="DisplayName" type="TranslatedString" description="Visible passive name" />
         <field_definition name="ResourceId" type="Id" object_type="ActionResource" />
         <field_definition name="Amount" type="Integer" min_value="0" max_value="2" />
+        <field_definition name="Exported Amount" export_name="ExportedAmount" type="Integer" min_value="0" max_value="2" />
       </field_definitions>
     </stat_object_definition>
     <stat_object_definition id="22222222-2222-2222-2222-222222222222" name="SpellData" category="SpellData">

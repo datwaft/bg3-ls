@@ -122,7 +122,7 @@ fn validate_fields(
             .unwrap_or(definition.range);
         let fields: Vec<_> = schemas
             .iter()
-            .filter_map(|schema| schema.fields.get(name))
+            .filter_map(|schema| schema.field(name))
             .collect();
         if fields.is_empty() {
             diagnostics.push(Diagnostic {

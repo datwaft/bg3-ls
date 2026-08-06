@@ -388,7 +388,7 @@ impl WorkspaceSnapshot {
                         self.schema.infer(path, Some(&definition.kind))
                     };
                     for schema in candidates {
-                        if let Some(field) = schema.fields.get(name) {
+                        if let Some(field) = schema.field(name) {
                             let mut markdown = format!("**Field** `{name}`");
                             if let Some(field_type) = &field.field_type {
                                 markdown.push_str(&format!("\n\nType: `{field_type}`"));
