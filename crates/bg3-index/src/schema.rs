@@ -39,6 +39,27 @@ pub struct SchemaDefinition {
     pub fields: BTreeMap<String, SchemaField>,
 }
 
+impl SchemaDefinition {
+    /// Finds one field by its Toolkit name or its legacy export name.
+    pub fn field(&self, name: &str) -> Option<&SchemaField> {
+        self.fields.get(name).or_else(|| {
+            self.fields
+                .values()
+                .find(|field| field.export_name.as_deref() == Some(name))
+        })
+    }
+}
+
+impl SchemaField {
+    /// Returns the field name that legacy Stats files store in `data` clauses.
+    pub fn legacy_name(&self) -> &str {
+        self.export_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&self.name)
+    }
+}
+
 /// All schema and enumeration data needed to interpret BG3 sources.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SchemaCatalog {

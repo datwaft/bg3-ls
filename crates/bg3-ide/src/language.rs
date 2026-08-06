@@ -174,7 +174,7 @@ impl WorkspaceSnapshot {
             && let Some(entry) = active_definition(&file.definitions, position)
         {
             for schema in schemas_for_definition(self, path, entry) {
-                let Some(field) = schema.fields.get(&data.field) else {
+                let Some(field) = schema.field(&data.field) else {
                     continue;
                 };
                 let Some(enumeration) = field.enumeration_type_name.as_ref() else {
@@ -244,10 +244,12 @@ impl WorkspaceSnapshot {
             .unwrap_or_default();
         let mut fields = BTreeMap::<&str, &SchemaField>::new();
         for schema in schemas {
-            for (name, field) in &schema.fields {
+            for field in schema.fields.values() {
+                let name = field.legacy_name();
                 if !field.is_internal
                     && !field.auto_generated
-                    && !present.contains(name.as_str())
+                    && !present.contains(name)
+                    && !present.contains(field.name.as_str())
                     && starts_with_case_insensitive(name, prefix)
                 {
                     fields.entry(name).or_insert(field);
@@ -280,7 +282,7 @@ impl WorkspaceSnapshot {
     ) -> Vec<CompletionItem> {
         let schema_fields: Vec<_> = schemas_for_definition(self, path, entry)
             .into_iter()
-            .filter_map(|schema| schema.fields.get(field_name))
+            .filter_map(|schema| schema.field(field_name))
             .collect();
         for field in &schema_fields {
             if let Some(enumeration) = field.enumeration_type_name.as_ref()
