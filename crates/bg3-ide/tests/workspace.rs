@@ -363,6 +363,33 @@ type "NotARealType"
 }
 
 #[test]
+fn accepts_empty_values_that_clear_inherited_fields() {
+    let (workspace, path) = fixture_workspace(200);
+    let text = r#"new entry "CLEAR_VALUES"
+type "PassiveData"
+data "Enabled" ""
+data "Flag" ""
+data "Amount" ""
+data "UUID" ""
+data "DisplayName" ""
+"#;
+    let overlays = overlay(&workspace, &path, text);
+    let diagnostics = workspace.diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning));
+
+    assert!(
+        diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic.code.as_str(),
+            "invalid-enum"
+                | "invalid-boolean"
+                | "invalid-number"
+                | "invalid-uuid"
+                | "invalid-translated-string"
+        )),
+        "empty values must clear inherited fields: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn syntax_diagnostics_can_disable_unresolved_references() {
     let (workspace, path) = fixture_workspace(200);
     let text = "new entry \"BROKEN\"\ntype \"PassiveData\"\ndata \"Boosts\" \"ApplyStatus(MISSING";

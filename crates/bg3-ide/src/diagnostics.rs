@@ -156,6 +156,10 @@ fn field_value_error(
     field: &SchemaField,
     value: &str,
 ) -> Option<(&'static str, String)> {
+    // An empty legacy value removes inherited data, independent of the field type.
+    if value.is_empty() {
+        return None;
+    }
     if let Some(enumeration) = field.enumeration_type_name.as_ref()
         && let Some(values) = workspace.schema.enumerations.get(enumeration)
         && !values.iter().any(|candidate| candidate == value)
