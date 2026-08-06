@@ -104,6 +104,7 @@ pub struct WorkspaceSnapshot {
     pub generation: u64,
     pub max_workspace_symbols: usize,
     pub max_completion_items: usize,
+    incomplete_kinds: BTreeSet<String>,
 }
 
 impl WorkspaceSnapshot {
@@ -121,7 +122,26 @@ impl WorkspaceSnapshot {
             generation,
             max_workspace_symbols,
             max_completion_items,
+            incomplete_kinds: BTreeSet::new(),
         }
+    }
+
+    /// Marks symbol kinds whose visible loose sources omit packed data.
+    ///
+    /// Resolution still uses every indexed declaration. This flag only stops
+    /// diagnostics that would claim that an absent declaration does not exist.
+    pub fn with_incomplete_kinds(
+        mut self,
+        kinds: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.incomplete_kinds
+            .extend(kinds.into_iter().map(Into::into));
+        self
+    }
+
+    /// Tests whether the index can prove that a declaration kind is absent.
+    pub fn has_complete_kind(&self, kind: &str) -> bool {
+        !self.incomplete_kinds.contains(kind)
     }
 
     /// Returns the most specific configured module that contains a source path.

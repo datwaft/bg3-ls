@@ -86,6 +86,7 @@ impl WorkspaceSnapshot {
             };
             if reference.context != "using"
                 && is_diagnosable_kind(kind)
+                && self.has_complete_kind(kind)
                 && self.resolve(&reference.target, overlays).is_empty()
             {
                 diagnostics.push(Diagnostic {
