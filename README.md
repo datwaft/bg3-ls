@@ -1,5 +1,10 @@
 # bg3-ls
 
+> [!WARNING]
+> This repository is 100% vibecoded. **Why?** because I needed some tooling to
+> make some BG3 mods using Neovim, and I didn't want to spend my time on
+> non-modding things.
+
 `bg3-ls` is a standalone language server for Baldur's Gate 3 Stats files. It
 indexes loose Toolkit and mod data outside the editor process. Neovim stays
 responsive while the server builds or refreshes its index.
@@ -61,43 +66,43 @@ configuration in the mod's trusted `.nvim.lua`:
 local project_root = assert(vim.fs.root(vim.uv.cwd(), ".nvim.lua"))
 
 vim.lsp.config("bg3", {
-  cmd = { "bg3-ls" },
-  filetypes = { "bg3_stats" },
-  workspace_required = true,
+	cmd = { "bg3-ls" },
+	filetypes = { "bg3_stats" },
+	workspace_required = true,
 
-  -- Dependency files can be outside the project ancestor tree. Always return
-  -- this root so those buffers reuse the same load-order-aware client.
-  root_dir = function(_, on_dir)
-    on_dir(project_root)
-  end,
+	-- Dependency files can be outside the project ancestor tree. Always return
+	-- this root so those buffers reuse the same load-order-aware client.
+	root_dir = function(_, on_dir)
+		on_dir(project_root)
+	end,
 
-  init_options = {
-    game_data = "/path/to/Baldurs Gate 3/Data",
-    base_modules = {
-      "Shared",
-      "SharedDev",
-      "Gustav",
-      "GustavDev",
-      "GustavX",
-    },
-    project = {
-      name = "MyMod",
-      dependencies = {
-        {
-          name = "Item and Spell Bug Fixes",
-          path = "../ItemAndSpellBugFixes",
-        },
-      },
-      diagnostics = {
-        unresolved_references = "warning",
-      },
-    },
-    localization = {
-      language = "English",
-    },
-    max_workspace_symbols = 200,
-    max_completion_items = 200,
-  },
+	init_options = {
+		game_data = "/path/to/Baldurs Gate 3/Data",
+		base_modules = {
+			"Shared",
+			"SharedDev",
+			"Gustav",
+			"GustavDev",
+			"GustavX",
+		},
+		project = {
+			name = "MyMod",
+			dependencies = {
+				{
+					name = "Item and Spell Bug Fixes",
+					path = "../ItemAndSpellBugFixes",
+				},
+			},
+			diagnostics = {
+				unresolved_references = "warning",
+			},
+		},
+		localization = {
+			language = "English",
+		},
+		max_workspace_symbols = 200,
+		max_completion_items = 200,
+	},
 })
 
 vim.lsp.enable("bg3")
