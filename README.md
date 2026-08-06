@@ -108,7 +108,7 @@ local project_root = assert(vim.fs.root(vim.uv.cwd(), ".nvim.lua"))
 
 vim.lsp.config("bg3", {
 	cmd = { "bg3-ls" },
-	filetypes = { "bg3_stats" },
+	filetypes = { "bg3_stats", "bg3_lsx" },
 	workspace_required = true,
 
 	-- Dependency files can be outside the project ancestor tree. Always return
@@ -141,6 +141,10 @@ override. Current inline-only configurations continue to work.
 Standard LSP completion works with Blink's LSP source without extra setup.
 Fidget displays the server's standard schema, discovery, parsing, module-build,
 and publication progress.
+
+Install `tree-sitter-bg3` as a Neovim plugin to detect `bg3_lsx` files. The
+plugin keeps XML as the outer parser and injects `bg3_stats_value` into selected
+`LSString` fields.
 
 ## Load order
 
@@ -180,9 +184,14 @@ uses normal module precedence and replaces packed base text. The preview shows
 unresolved description parameters as source text because the server does not
 run game logic.
 
-Open Stats files replace their disk records with unsaved overlays. Closing a
-buffer restores its disk record. XML resources remain readable navigation
-targets, but the BG3 client does not attach to them.
+Open Stats and LSX files replace their disk records with unsaved overlays.
+Closing a buffer restores its disk record. In supported LSX values, the server
+provides definition, hover, references, function completion, typed symbol
+completion, and signature help. It does not apply legacy Stats schema
+diagnostics to LSX documents.
+
+Toolkit `.stats` and `.tbl` files and localization XML remain readable
+navigation targets. The BG3 client does not attach to those XML documents.
 
 The watcher coalesces events for 250 ms. It rebuilds only affected modules and
 publishes a complete immutable snapshot atomically. Queries continue to use the
@@ -276,6 +285,9 @@ repository.
 rename, formatting, semantic tokens, code actions, arbitrary full-text search,
 general packed-file extraction, dependency/mod package localization, binary
 resource formats, automatic dependency discovery, or native Windows releases.
+LSX support uses a conservative field list. It does not provide an LSX schema,
+field-name completion, LSX diagnostics, or XML entity transformation for
+injected highlighting.
 Packed base resources are not visible, so diagnostics intentionally skip
 generic expression identifiers, root-template UUID resolution, required
 fields, and inferred function arity. Static tooltip previews do not evaluate

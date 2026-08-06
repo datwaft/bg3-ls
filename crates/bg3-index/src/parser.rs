@@ -8,7 +8,7 @@ use tree_sitter::{Node, Parser};
 use uuid::Uuid;
 
 use crate::Error;
-use crate::catalog::{field_kind, function_spec};
+use crate::catalog::{field_kind, function_spec, is_lsx_value_field};
 use crate::domain::{
     Definition, LineMap, ObservedFunction, ParsedFile, Position, Reference, SourceFile,
     SourceIssue, SourceKind, SymbolTarget, TextRange,
@@ -311,6 +311,10 @@ fn parse_lsx(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
     reader.config_mut().trim_text(true);
     let mut stack: Vec<ResourceRecord> = Vec::new();
     let mut definitions = Vec::new();
+    let mut references = Vec::new();
+    let mut observed = HashMap::new();
+    let mut value_parser = Parser::new();
+    value_parser.set_language(&tree_sitter_bg3::BG3_STATS_VALUE_LANGUAGE.into())?;
 
     loop {
         let start = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
@@ -351,6 +355,17 @@ fn parse_lsx(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
                 if let Some(mut resource) = stack.pop() {
                     resource.record.range.end = lines.position(end);
                     if let Some(definition) = definition_from_resource(resource) {
+                        for (field_name, value) in &definition.fields {
+                            if !is_lsx_value_field(field_name) {
+                                continue;
+                            }
+                            if let Some(range) = definition.field_ranges.get(field_name) {
+                                let (mut found, functions) =
+                                    parse_value(&mut value_parser, value, *range, field_name)?;
+                                references.append(&mut found);
+                                merge_functions(&mut observed, functions);
+                            }
+                        }
                         definitions.push(definition);
                     }
                 }
@@ -363,8 +378,8 @@ fn parse_lsx(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
     Ok(ParsedFile {
         source,
         definitions,
-        references: Vec::new(),
-        observed_functions: Vec::new(),
+        references,
+        observed_functions: sorted_functions(observed),
         issues: Vec::new(),
     })
 }

@@ -299,6 +299,25 @@ fn indexes_tables_lsx_and_localization() {
             .to_string(),
         "dddddddd-dddd-dddd-dddd-dddddddddddd"
     );
+    assert!(index.references.iter().any(|reference| {
+        reference.reference().target
+            == SymbolTarget::Named {
+                kind: Some("ActionResource".into()),
+                name: "ActionPoint".into(),
+            }
+    }));
+    assert!(index.references.iter().any(|reference| {
+        reference.reference().target
+            == SymbolTarget::Named {
+                kind: Some("PassiveData".into()),
+                name: "CHAINED".into(),
+            }
+    }));
+    assert!(index.references.iter().any(|reference| {
+        reference.reference().target
+            == SymbolTarget::Uuid("dddddddd-dddd-dddd-dddd-dddddddddddd".parse().unwrap())
+    }));
+    assert!(index.functions.contains_key("SelectSpells"));
 }
 
 #[test]

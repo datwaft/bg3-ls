@@ -18,6 +18,7 @@ use thiserror::Error;
 pub use cache::{CacheStats, CacheStore};
 pub use catalog::{
     FUNCTIONS, FunctionForm, FunctionSpec, ParameterSpec, field_kind, function_spec,
+    is_lsx_value_field,
 };
 pub use discovery::{discover_module, path_is_within, resolve_path};
 pub use domain::{

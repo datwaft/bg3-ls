@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use bg3_index::{
-    Definition, SchemaDefinition, SchemaField, SymbolTarget, TextRange, is_schema_discriminator,
+    Definition, SchemaDefinition, SchemaField, SourceKind, SymbolTarget, TextRange,
+    is_schema_discriminator,
 };
 use uuid::Uuid;
 
@@ -36,6 +37,11 @@ impl WorkspaceSnapshot {
         let Some((_, file)) = self.file(path, overlays) else {
             return Vec::new();
         };
+        // The Stats catalogs do not describe LSX nodes. Do not report legacy
+        // schema errors until the server has a verified LSX schema source.
+        if file.source.kind == SourceKind::Lsx {
+            return Vec::new();
+        }
         let mut diagnostics: Vec<_> = file
             .issues
             .iter()

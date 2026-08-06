@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::{OverlaySet, WorkspaceSnapshot, range_contains};
 use bg3_index::{
     Definition, FUNCTIONS, Position, SchemaDefinition, SchemaField, SymbolTarget, TextRange,
-    field_kind, function_spec,
+    field_kind, function_spec, is_lsx_value_field,
 };
 
 /// The semantic category of one completion result.
@@ -74,7 +74,7 @@ impl WorkspaceSnapshot {
             entry.map_or_else(Vec::new, |entry| {
                 self.complete_symbols(&entry.kind, prefix, position, overlays)
             })
-        } else if let Some(data) = data_context(before) {
+        } else if let Some(data) = value_context(before) {
             if data.in_field_name {
                 entry.map_or_else(Vec::new, |entry| {
                     self.complete_fields(path, entry, data.prefix, position, file)
@@ -121,7 +121,7 @@ impl WorkspaceSnapshot {
         let before = &line[..cursor];
         // A Stats value starts with an unmatched document quote while the user edits it.
         // Remove the data-clause prefix before balancing expression quotes and calls.
-        let expression = data_context(before)
+        let expression = value_context(before)
             .map(|context| context.value_before_cursor)
             .unwrap_or(before);
         let context = call_context(expression)?;
@@ -562,6 +562,71 @@ fn data_context(line: &str) -> Option<DataContext<'_>> {
         value_before_cursor: value,
         in_field_name: false,
     })
+}
+
+/// Finds a supported legacy Stats or LSX value at the cursor.
+fn value_context(line: &str) -> Option<DataContext<'_>> {
+    data_context(line).or_else(|| lsx_value_context(line))
+}
+
+/// Recovers one incomplete LSX `value` attribute without parsing incomplete XML.
+fn lsx_value_context(line: &str) -> Option<DataContext<'_>> {
+    let element = line.rsplit_once("<attribute")?.1;
+    let field = closed_xml_attribute(element, "id")?;
+    if !is_lsx_value_field(field) {
+        return None;
+    }
+    let value = open_xml_attribute(element, "value")?;
+    let token_start = value
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_ascii_alphanumeric() && *character != '_')
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    Some(DataContext {
+        field: field.to_owned(),
+        prefix: &value[token_start..],
+        value_before_cursor: value,
+        in_field_name: false,
+    })
+}
+
+/// Returns a complete quoted XML attribute from the current start tag.
+fn closed_xml_attribute<'a>(element: &'a str, name: &str) -> Option<&'a str> {
+    let value = xml_attribute_start(element, name)?;
+    let quote = value.as_bytes().first().copied()?;
+    let content = &value[1..];
+    let end = content.bytes().position(|byte| byte == quote)?;
+    Some(&content[..end])
+}
+
+/// Returns an XML attribute value only while the cursor is inside its quotes.
+fn open_xml_attribute<'a>(element: &'a str, name: &str) -> Option<&'a str> {
+    let value = xml_attribute_start(element, name)?;
+    let quote = value.as_bytes().first().copied()?;
+    let content = &value[1..];
+    (!content.bytes().any(|byte| byte == quote)).then_some(content)
+}
+
+/// Finds the opening quote for one XML attribute with required name boundaries.
+fn xml_attribute_start<'a>(element: &'a str, name: &str) -> Option<&'a str> {
+    let bytes = element.as_bytes();
+    let mut cursor = 0;
+    while cursor + name.len() < bytes.len() {
+        let relative = element[cursor..].find(name)?;
+        let start = cursor + relative;
+        let before = start.checked_sub(1).and_then(|index| bytes.get(index));
+        let after = bytes.get(start + name.len());
+        if before.is_none_or(|byte| byte.is_ascii_whitespace())
+            && after.is_some_and(|byte| *byte == b'=')
+            && bytes
+                .get(start + name.len() + 1)
+                .is_some_and(|byte| matches!(*byte, b'\'' | b'"'))
+        {
+            return element.get(start + name.len() + 1..);
+        }
+        cursor = start + name.len();
+    }
+    None
 }
 
 /// Finds the innermost incomplete function call and active argument.
