@@ -129,6 +129,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bg3",
  "url",
+ "walkdir",
 ]
 
 [[package]]

@@ -26,6 +26,7 @@ tracing-subscriber.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bg3.workspace = true
 url.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

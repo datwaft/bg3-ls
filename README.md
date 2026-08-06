@@ -197,6 +197,27 @@ bg3-ls cache info
 bg3-ls cache clear
 ```
 
+Run project diagnostics without an editor from any directory below a configured
+workspace:
+
+```sh
+bg3-ls check
+bg3-ls check Public/MyMod/Stats/Generated/Data/Passive.txt
+bg3-ls check --format json --fail-on warning
+```
+
+The command finds the nearest `bg3-ls.json` in the current directory or its
+ancestors. With no paths, it reports diagnostics for all legacy Stats files in
+the project module. Explicit files or directories limit diagnostic output. The
+command still indexes visible dependencies and base modules for resolution.
+
+Human output uses one-based lines and columns. JSON output uses zero-based
+`line` and `character` values that match LSP positions. `--fail-on` accepts
+`error`, `warning`, `information`, `hint`, or `never`, and defaults to `error`.
+Exit code 0 means no diagnostic met the threshold. Exit code 1 means at least
+one diagnostic met it. Exit code 2 identifies a configuration, index, or file
+analysis failure. Diagnostic data uses stdout, while progress uses stderr.
+
 Use `--cache-dir PATH` before the subcommand to override the cache in tests.
 Protocol traffic always uses stdout. Set `BG3_LS_LOG` to a tracing filter, such
 as `bg3_ls=debug`, to write structured logs to stderr.

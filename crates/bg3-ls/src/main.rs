@@ -2,22 +2,26 @@ mod config;
 mod coordinator;
 mod server;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+use std::env;
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, ExitCode};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bg3_ide::{OverlaySet, WorkspaceSnapshot, definition_target};
-use bg3_index::{CacheStats, CacheStore, ModuleIndex, ModuleRole, ModuleSpec, discover_module};
-use clap::{Parser, Subcommand};
+use bg3_ide::{DiagnosticSeverity, OverlaySet, WorkspaceSnapshot, definition_target};
+use bg3_index::{
+    CacheStats, CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SourceKind, discover_module,
+};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use thiserror::Error;
 use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
+use crate::config::ResolvedConfig;
 use crate::server::Backend;
 
 /// Standalone language intelligence for Baldur's Gate 3 Stats files.
@@ -41,6 +45,39 @@ enum Command {
     },
     /// Measures cold and warm full-data indexing with a dedicated disposable cache.
     Benchmark(BenchmarkOptions),
+    /// Checks project Stats files without an LSP client.
+    Check(CheckOptions),
+}
+
+/// Inputs for one standalone diagnostic pass.
+#[derive(Clone, Debug, clap::Args)]
+struct CheckOptions {
+    /// Files or directories that limit diagnostic output.
+    #[arg(value_name = "PATH")]
+    paths: Vec<PathBuf>,
+    /// Selects human-readable or stable JSON diagnostic output.
+    #[arg(long, value_enum, default_value = "human")]
+    format: CheckFormat,
+    /// Selects the minimum severity that produces exit code 1.
+    #[arg(long, value_enum, default_value = "error")]
+    fail_on: FailOn,
+}
+
+/// Output encodings supported by the diagnostic command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CheckFormat {
+    Human,
+    Json,
+}
+
+/// Diagnostic thresholds supported by the diagnostic command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum FailOn {
+    Error,
+    Warning,
+    Information,
+    Hint,
+    Never,
 }
 
 /// Inputs required to reproduce a full-data indexing baseline.
@@ -117,7 +154,7 @@ pub enum Error {
 
 /// Runs cache maintenance or serves LSP messages over stdio by default.
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("BG3_LS_LOG").unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -126,7 +163,13 @@ async fn main() -> Result<(), Error> {
         .init();
     let cli = Cli::parse();
     if let Some(command) = cli.command {
-        return run_command(command, cli.cache_dir);
+        return match run_command(command, cli.cache_dir) {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("bg3-ls: {error}");
+                ExitCode::from(2)
+            }
+        };
     }
 
     let stdin = tokio::io::stdin();
@@ -134,21 +177,25 @@ async fn main() -> Result<(), Error> {
     let cache_dir = cli.cache_dir;
     let (service, socket) = LspService::new(move |client| Backend::new(client, cache_dir.clone()));
     Server::new(stdin, stdout, socket).serve(service).await;
-    Ok(())
+    ExitCode::SUCCESS
 }
 
 /// Executes one non-LSP command and writes only human-readable stdout.
-fn run_command(command: Command, cache_dir: Option<PathBuf>) -> Result<(), Error> {
+fn run_command(command: Command, cache_dir: Option<PathBuf>) -> Result<ExitCode, Error> {
     match command {
         Command::Cache {
             command: CacheCommand::Path,
-        } => println!("{}", open_cache(cache_dir)?.root().display()),
+        } => {
+            println!("{}", open_cache(cache_dir)?.root().display());
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Cache {
             command: CacheCommand::Info,
         } => {
             let cache = open_cache(cache_dir)?;
             let (files, bytes) = cache.info()?;
             println!("{} files, {} bytes", files, bytes);
+            Ok(ExitCode::SUCCESS)
         }
         Command::Cache {
             command: CacheCommand::Clear,
@@ -156,6 +203,7 @@ fn run_command(command: Command, cache_dir: Option<PathBuf>) -> Result<(), Error
             let cache = open_cache(cache_dir)?;
             cache.clear()?;
             println!("cleared {}", cache.root().display());
+            Ok(ExitCode::SUCCESS)
         }
         Command::Benchmark(options) => {
             let cache_dir = cache_dir.ok_or_else(|| {
@@ -167,9 +215,10 @@ fn run_command(command: Command, cache_dir: Option<PathBuf>) -> Result<(), Error
                 serde_json::to_string_pretty(&report)
                     .map_err(|error| Error::Protocol(error.to_string()))?
             );
+            Ok(ExitCode::SUCCESS)
         }
+        Command::Check(options) => run_check(options, open_cache(cache_dir)?),
     }
-    Ok(())
 }
 
 /// Opens the explicit cache override or the normal XDG cache.
@@ -179,6 +228,222 @@ fn open_cache(cache_dir: Option<PathBuf>) -> Result<CacheStore, Error> {
     } else {
         CacheStore::xdg()?
     })
+}
+
+/// One stable JSON diagnostic record with zero-based source positions.
+#[derive(Debug, Serialize)]
+struct CheckDiagnostic {
+    path: String,
+    range: CheckRange,
+    severity: &'static str,
+    code: String,
+    message: String,
+}
+
+/// One zero-based diagnostic range in JSON output.
+#[derive(Debug, Serialize)]
+struct CheckRange {
+    start: CheckPosition,
+    end: CheckPosition,
+}
+
+/// One zero-based line and character pair in JSON output.
+#[derive(Debug, Serialize)]
+struct CheckPosition {
+    line: u32,
+    character: u32,
+}
+
+/// Builds a workspace, computes diagnostics, and selects the process exit code.
+fn run_check(options: CheckOptions, cache: CacheStore) -> Result<ExitCode, Error> {
+    let current_directory = env::current_dir()?;
+    let config = ResolvedConfig::discover(&current_directory)?;
+    eprintln!("bg3-ls: building the workspace index");
+    let (workspace, _) = build_workspace(
+        &cache,
+        &config.game_data,
+        &config.modules,
+        &config.language,
+        config.max_workspace_symbols,
+        config.max_completion_items,
+        &config.incomplete_kinds(),
+    )?;
+    let project_root = config
+        .modules
+        .iter()
+        .find(|module| module.role == ModuleRole::Project)
+        .map(|module| module.root.as_path())
+        .ok_or_else(|| Error::Config("the configuration has no project module".into()))?;
+    let paths = select_check_paths(&workspace, project_root, &current_directory, &options.paths)?;
+    let reference_severity = config
+        .unresolved_references
+        .as_deref()
+        .map(configured_severity);
+    let overlays = OverlaySet::default();
+    let mut output = Vec::new();
+    let mut failed = false;
+    for path in paths {
+        for diagnostic in workspace.diagnostics(&path, &overlays, reference_severity) {
+            failed |= options.fail_on.matches(diagnostic.severity);
+            output.push(CheckDiagnostic {
+                path: display_path(project_root, &path),
+                range: CheckRange {
+                    start: CheckPosition {
+                        line: diagnostic.range.start.line,
+                        character: diagnostic.range.start.character,
+                    },
+                    end: CheckPosition {
+                        line: diagnostic.range.end.line,
+                        character: diagnostic.range.end.character,
+                    },
+                },
+                severity: severity_name(diagnostic.severity),
+                code: diagnostic.code,
+                message: diagnostic.message,
+            });
+        }
+    }
+    match options.format {
+        CheckFormat::Human => print_human_diagnostics(&output),
+        CheckFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&output)
+                .map_err(|error| Error::Protocol(error.to_string()))?
+        ),
+    }
+    Ok(if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// Selects indexed legacy Stats files from defaults or explicit paths.
+fn select_check_paths(
+    workspace: &WorkspaceSnapshot,
+    project_root: &Path,
+    current_directory: &Path,
+    requested: &[PathBuf],
+) -> Result<Vec<PathBuf>, Error> {
+    if requested.is_empty() {
+        let project = workspace
+            .layers
+            .iter()
+            .find(|layer| layer.spec.role == ModuleRole::Project)
+            .ok_or_else(|| Error::Config("the workspace has no project index".into()))?;
+        return Ok(project
+            .files
+            .iter()
+            .filter(|(_, file)| file.source.kind == SourceKind::PlainStats)
+            .map(|(path, _)| path.clone())
+            .collect());
+    }
+
+    let mut selected = BTreeSet::new();
+    for requested_path in requested {
+        let path = if requested_path.is_absolute() {
+            requested_path.clone()
+        } else {
+            current_directory.join(requested_path)
+        };
+        let path = fs::canonicalize(&path).map_err(|error| {
+            Error::Config(format!(
+                "cannot resolve diagnostic path {}: {error}",
+                path.display()
+            ))
+        })?;
+        if path.is_dir() {
+            for entry in walkdir::WalkDir::new(&path).follow_links(false) {
+                let entry = entry.map_err(|error| Error::Config(error.to_string()))?;
+                if entry.file_type().is_file() && is_indexed_plain_stats(workspace, entry.path()) {
+                    selected.insert(entry.into_path());
+                }
+            }
+        } else if is_indexed_plain_stats(workspace, &path) {
+            selected.insert(path);
+        } else {
+            return Err(Error::Config(format!(
+                "diagnostic path is not an indexed legacy Stats file: {}",
+                path.display()
+            )));
+        }
+    }
+    if selected.is_empty() {
+        return Err(Error::Config(format!(
+            "the selected paths contain no indexed legacy Stats files below {}",
+            project_root.display()
+        )));
+    }
+    Ok(selected.into_iter().collect())
+}
+
+/// Tests whether one path has a parsed legacy Stats record in any visible layer.
+fn is_indexed_plain_stats(workspace: &WorkspaceSnapshot, path: &Path) -> bool {
+    workspace.layers.iter().any(|layer| {
+        layer
+            .file(path)
+            .is_some_and(|file| file.source.kind == SourceKind::PlainStats)
+    })
+}
+
+/// Prints diagnostics in the common path, line, column form.
+fn print_human_diagnostics(diagnostics: &[CheckDiagnostic]) {
+    for diagnostic in diagnostics {
+        println!(
+            "{}:{}:{}: {} [{}] {}",
+            diagnostic.path,
+            diagnostic.range.start.line + 1,
+            diagnostic.range.start.character + 1,
+            diagnostic.severity,
+            diagnostic.code,
+            diagnostic.message
+        );
+    }
+}
+
+/// Returns a project-relative display path when one is available.
+fn display_path(project_root: &Path, path: &Path) -> String {
+    path.strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Converts the validated configuration severity to the editor-neutral type.
+fn configured_severity(value: &str) -> DiagnosticSeverity {
+    match value {
+        "error" => DiagnosticSeverity::Error,
+        "warning" => DiagnosticSeverity::Warning,
+        "information" => DiagnosticSeverity::Information,
+        "hint" => DiagnosticSeverity::Hint,
+        _ => unreachable!("configuration validation rejects unsupported severities"),
+    }
+}
+
+/// Returns the stable lower-case diagnostic severity name.
+const fn severity_name(severity: DiagnosticSeverity) -> &'static str {
+    match severity {
+        DiagnosticSeverity::Error => "error",
+        DiagnosticSeverity::Warning => "warning",
+        DiagnosticSeverity::Information => "information",
+        DiagnosticSeverity::Hint => "hint",
+    }
+}
+
+impl FailOn {
+    /// Tests whether one diagnostic meets this failure threshold.
+    const fn matches(self, severity: DiagnosticSeverity) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Error => matches!(severity, DiagnosticSeverity::Error),
+            Self::Warning => matches!(
+                severity,
+                DiagnosticSeverity::Error | DiagnosticSeverity::Warning
+            ),
+            Self::Information => !matches!(severity, DiagnosticSeverity::Hint),
+            Self::Hint => true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -342,6 +607,20 @@ fn build_benchmark_workspace(
     modules: &[ModuleSpec],
     language: &str,
 ) -> Result<(WorkspaceSnapshot, CacheStats), Error> {
+    build_workspace(cache, game_data, modules, language, 200, 200, &[])
+}
+
+/// Builds one immutable workspace for non-LSP commands.
+#[allow(clippy::too_many_arguments)]
+fn build_workspace(
+    cache: &CacheStore,
+    game_data: &std::path::Path,
+    modules: &[ModuleSpec],
+    language: &str,
+    max_workspace_symbols: usize,
+    max_completion_items: usize,
+    incomplete_kinds: &[&str],
+) -> Result<(WorkspaceSnapshot, CacheStats), Error> {
     let (schema, _) = cache.load_schema(game_data)?;
     let schema = Arc::new(schema);
     let mut layers = Vec::new();
@@ -358,7 +637,17 @@ fn build_benchmark_workspace(
         totals.misses += stats.misses;
         layers.push(Arc::new(ModuleIndex::new(module.clone(), files)));
     }
-    Ok((WorkspaceSnapshot::new(schema, layers, 1, 200, 200), totals))
+    Ok((
+        WorkspaceSnapshot::new(
+            schema,
+            layers,
+            1,
+            max_workspace_symbols,
+            max_completion_items,
+        )
+        .with_incomplete_kinds(incomplete_kinds.iter().copied()),
+        totals,
+    ))
 }
 
 /// Measures exact semantic lookup latency against one indexed declaration.

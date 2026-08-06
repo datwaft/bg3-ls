@@ -355,29 +355,7 @@ impl Coordinator {
         }
 
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let mut incomplete_kinds = Vec::new();
-        // A standard BG3 installation stores base localization in one language
-        // pack. Loose XML remains useful for navigation, but it cannot prove
-        // that a handle is absent while this pack exists.
-        if config
-            .game_data
-            .join("Localization")
-            .join(format!("{}.pak", config.language))
-            .is_file()
-        {
-            incomplete_kinds.push("Localization");
-        }
-        if config.modules.iter().any(|module| {
-            module.role == ModuleRole::Base
-                && config
-                    .game_data
-                    .join(format!("{}.pak", module.name))
-                    .is_file()
-        }) {
-            // These declarations normally live in the configured module packs.
-            // The loose Toolkit export is useful but is not an absence proof.
-            incomplete_kinds.extend(["SpellData", "StatusData", "PassiveData", "InterruptData"]);
-        }
+        let incomplete_kinds = config.incomplete_kinds();
         let workspace = WorkspaceSnapshot::new(
             schema,
             layers,
