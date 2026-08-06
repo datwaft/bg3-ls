@@ -109,6 +109,38 @@ fn classifies_schema_object_references_without_guessing_generic_identifiers() {
 }
 
 #[test]
+fn classifies_status_groups_separately_from_status_declarations() {
+    let root = fixtures();
+    let parsed = parse_source(
+        SourceFile {
+            path: root.join("project/Public/MyMod/Stats/Generated/Data/Passive.txt"),
+            kind: SourceKind::PlainStats,
+        },
+        "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"StatusOnEquip\" \"SG_Charmed\"\ndata \"Boosts\" \"HasStatus('SG_Frightened') and HasStatus(PRONE)\"\n",
+        &load_schema(&root),
+        "English",
+    )
+    .unwrap();
+
+    for name in ["SG_Charmed", "SG_Frightened"] {
+        assert!(parsed.references.iter().any(|reference| {
+            reference.target
+                == SymbolTarget::Named {
+                    kind: Some("StatusGroup".into()),
+                    name: name.into(),
+                }
+        }));
+    }
+    assert!(parsed.references.iter().any(|reference| {
+        reference.target
+            == SymbolTarget::Named {
+                kind: Some("StatusData".into()),
+                name: "PRONE".into(),
+            }
+    }));
+}
+
+#[test]
 fn indexes_tables_lsx_and_localization() {
     let root = fixtures();
     let game = root.join("game");

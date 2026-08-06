@@ -574,10 +574,10 @@ fn parse_value(
             "identifier" if !is_function_name(node) => {
                 let name = node.utf8_text(value.as_bytes())?.to_owned();
                 references.push(Reference {
-                    target: SymbolTarget::Named {
-                        kind: call_context(node, value).or_else(|| field_kind(field_name)),
+                    target: named_target(
                         name,
-                    },
+                        call_context(node, value).or_else(|| field_kind(field_name)),
+                    ),
                     range: translate_range(node_range(node), origin),
                     context: format!("field:{field_name}"),
                 });
@@ -606,11 +606,12 @@ fn parse_value(
                     .parent()
                     .is_some_and(|parent| parent.kind() == "string_literal") =>
             {
+                let name = node.utf8_text(value.as_bytes())?.to_owned();
                 references.push(Reference {
-                    target: SymbolTarget::Named {
-                        kind: call_context(node, value).or_else(|| field_kind(field_name)),
-                        name: node.utf8_text(value.as_bytes())?.to_owned(),
-                    },
+                    target: named_target(
+                        name,
+                        call_context(node, value).or_else(|| field_kind(field_name)),
+                    ),
                     range: translate_range(node_range(node), origin),
                     context: format!("field:{field_name}"),
                 });
@@ -621,6 +622,16 @@ fn parse_value(
         pending.extend(node.named_children(&mut cursor));
     }
     Ok((references, discover_functions(value)))
+}
+
+/// Separates status-group markers from concrete status declarations.
+fn named_target(name: String, kind: Option<String>) -> SymbolTarget {
+    let kind = if name.starts_with("SG_") && kind.as_deref() == Some("StatusData") {
+        Some("StatusGroup".into())
+    } else {
+        kind
+    };
+    SymbolTarget::Named { kind, name }
 }
 
 /// Applies a schema object type only when every viable candidate agrees on the kind.
