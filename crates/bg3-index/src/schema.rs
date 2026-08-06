@@ -140,8 +140,18 @@ impl SchemaCatalog {
 
     /// Infers all valid schemas for one legacy Stats entry.
     pub fn infer<'a>(&'a self, path: &Path, entry_kind: Option<&str>) -> Vec<&'a SchemaDefinition> {
+        self.infer_legacy(path, entry_kind, &BTreeMap::new())
+    }
+
+    /// Infers legacy schemas from the path, entry kind, and type discriminator.
+    pub fn infer_legacy<'a>(
+        &'a self,
+        path: &Path,
+        entry_kind: Option<&str>,
+        fields: &BTreeMap<String, String>,
+    ) -> Vec<&'a SchemaDefinition> {
         let stem = path.file_stem().and_then(|value| value.to_str());
-        let mut candidates: Vec<_> = self
+        let candidates: Vec<_> = self
             .by_id
             .values()
             .filter(|definition| {
@@ -152,23 +162,129 @@ impl SchemaCatalog {
                 })
             })
             .collect();
-
-        if let Some(stem) = stem {
-            let named: Vec<_> = candidates
+        let path_matches = stem.map_or_else(Vec::new, |stem| {
+            candidates
                 .iter()
                 .copied()
                 .filter(|definition| definition.name.eq_ignore_ascii_case(stem))
-                .collect();
-            if !named.is_empty() {
-                candidates = named;
+                .collect()
+        });
+        let discriminator_matches =
+            discriminator(entry_kind, fields).map_or_else(Vec::new, |(_, value, prefix)| {
+                let schema_name = format!("{prefix}{value}");
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|definition| definition.name.eq_ignore_ascii_case(&schema_name))
+                    .collect()
+            });
+
+        match (path_matches.is_empty(), discriminator_matches.is_empty()) {
+            (true, true) => candidates,
+            (false, true) => path_matches,
+            (true, false) => discriminator_matches,
+            (false, false) => {
+                let intersection: Vec<_> = path_matches
+                    .iter()
+                    .copied()
+                    .filter(|candidate| {
+                        discriminator_matches
+                            .iter()
+                            .any(|other| other.id == candidate.id)
+                    })
+                    .collect();
+                if intersection.is_empty() {
+                    let mut union = path_matches;
+                    union.extend(discriminator_matches);
+                    union.sort_by(|left, right| left.id.cmp(&right.id));
+                    union.dedup_by(|left, right| left.id == right.id);
+                    union
+                } else {
+                    intersection
+                }
             }
         }
-        candidates
+    }
+
+    /// Returns a verified conflict for one legacy schema discriminator.
+    pub fn discriminator_error(
+        &self,
+        path: &Path,
+        entry_kind: Option<&str>,
+        fields: &BTreeMap<String, String>,
+    ) -> Option<(&'static str, String)> {
+        let (field, value, prefix) = discriminator(entry_kind, fields)?;
+        let candidates: Vec<_> = self
+            .by_id
+            .values()
+            .filter(|definition| {
+                entry_kind.is_none_or(|kind| {
+                    definition.export_type.as_deref() == Some(kind)
+                        || definition.category.as_deref() == Some(kind)
+                        || definition.name == kind
+                })
+            })
+            .collect();
+        let selected_name = format!("{prefix}{value}");
+        let selected: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|definition| definition.name.eq_ignore_ascii_case(&selected_name))
+            .collect();
+        if selected.is_empty() {
+            return Some((
+                field,
+                format!("`{value}` does not identify a known `{field}` schema."),
+            ));
+        }
+        let stem = path.file_stem().and_then(|value| value.to_str())?;
+        let path_schema = candidates
+            .iter()
+            .copied()
+            .find(|definition| definition.name.eq_ignore_ascii_case(stem));
+        if let Some(path_schema) = path_schema
+            && selected
+                .iter()
+                .all(|definition| definition.id != path_schema.id)
+        {
+            return Some((
+                field,
+                format!(
+                    "`{field}` selects `{selected_name}`, but the source path selects `{}`.",
+                    path_schema.name
+                ),
+            ));
+        }
+        None
     }
 
     /// Returns a stable digest used to invalidate schema-dependent file caches.
     pub fn digest(&self) -> Result<blake3::Hash, Error> {
         Ok(blake3::hash(&postcard::to_stdvec(self)?))
+    }
+}
+
+/// Tests whether one legacy field selects a Stats schema subtype.
+pub fn is_schema_discriminator(entry_kind: &str, field: &str) -> bool {
+    matches!(
+        (entry_kind, field),
+        ("StatusData", "StatusType") | ("SpellData", "SpellType")
+    )
+}
+
+/// Extracts one applicable legacy type discriminator and its schema prefix.
+fn discriminator<'a>(
+    entry_kind: Option<&str>,
+    fields: &'a BTreeMap<String, String>,
+) -> Option<(&'static str, &'a str, &'static str)> {
+    match entry_kind {
+        Some("StatusData") => fields
+            .get("StatusType")
+            .map(|value| ("StatusType", value.as_str(), "Status_")),
+        Some("SpellData") => fields
+            .get("SpellType")
+            .map(|value| ("SpellType", value.as_str(), "Spell_")),
+        _ => None,
     }
 }
 

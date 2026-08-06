@@ -48,6 +48,31 @@ fn loads_schema_metadata_and_enumerations() {
 }
 
 #[test]
+fn infers_legacy_schemas_from_type_discriminators() {
+    let root = fixtures();
+    let schema = load_schema(&root);
+    let status_fields = std::collections::BTreeMap::from([("StatusType".into(), "BOOST".into())]);
+    let status = schema.infer_legacy(Path::new("Status.txt"), Some("StatusData"), &status_fields);
+    assert_eq!(
+        status
+            .iter()
+            .map(|value| value.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Status_BOOST"]
+    );
+
+    let spell_fields = std::collections::BTreeMap::from([("SpellType".into(), "Target".into())]);
+    let spell = schema.infer_legacy(Path::new("Spell.txt"), Some("SpellData"), &spell_fields);
+    assert_eq!(
+        spell
+            .iter()
+            .map(|value| value.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Spell_Target"]
+    );
+}
+
+#[test]
 fn parses_plain_stats_references_and_functions() {
     let root = fixtures();
     let path = root.join("project/Public/MyMod/Stats/Generated/Data/Passive.txt");

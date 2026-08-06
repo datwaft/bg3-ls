@@ -481,6 +481,73 @@ data "ExportedAmount" "1"
 }
 
 #[test]
+fn treats_legacy_type_discriminators_as_schema_metadata() {
+    let (workspace, path) = fixture_workspace(200);
+    let status_path = path.with_file_name("Status_BOOST.txt");
+    let status_text = r#"new entry "STATUS"
+type "StatusData"
+data "StatusType" "BOOST"
+data "Boosts" ""
+"#;
+    let status_overlays = overlay(&workspace, &status_path, status_text);
+    let status_diagnostics = workspace.diagnostics(
+        &status_path,
+        &status_overlays,
+        Some(DiagnosticSeverity::Warning),
+    );
+    assert!(status_diagnostics.iter().all(|diagnostic| {
+        diagnostic.code != "unknown-field" && diagnostic.code != "invalid-schema-discriminator"
+    }));
+
+    let spell_path = path.with_file_name("Spell_Target.txt");
+    let spell_text = r#"new entry "SPELL"
+type "SpellData"
+data "SpellType" "Target"
+data "SpellFlags" ""
+"#;
+    let spell_overlays = overlay(&workspace, &spell_path, spell_text);
+    let spell_diagnostics = workspace.diagnostics(
+        &spell_path,
+        &spell_overlays,
+        Some(DiagnosticSeverity::Warning),
+    );
+    assert!(spell_diagnostics.iter().all(|diagnostic| {
+        diagnostic.code != "unknown-field" && diagnostic.code != "invalid-schema-discriminator"
+    }));
+}
+
+#[test]
+fn diagnoses_conflicting_schema_discriminators_without_field_cascades() {
+    let (workspace, path) = fixture_workspace(200);
+    let status_path = path.with_file_name("Status_BOOST.txt");
+    let text = r#"new entry "CONFLICT"
+type "StatusData"
+data "StatusType" "HEAL"
+data "Boosts" ""
+data "Bogus" "value"
+"#;
+    let overlays = overlay(&workspace, &status_path, text);
+    let diagnostics =
+        workspace.diagnostics(&status_path, &overlays, Some(DiagnosticSeverity::Warning));
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "invalid-schema-discriminator")
+            .count(),
+        1
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "unknown-field")
+            .count(),
+        1,
+        "only the normal unknown field must produce unknown-field"
+    );
+}
+
+#[test]
 fn does_not_diagnose_status_groups_as_missing_statuses() {
     let (workspace, path) = fixture_workspace(200);
     let text = r#"new entry "STATUS_GROUPS"

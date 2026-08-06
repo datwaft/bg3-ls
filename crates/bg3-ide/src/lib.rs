@@ -404,7 +404,8 @@ impl WorkspaceSnapshot {
                     let candidates = if let Some(schema_id) = &definition.schema_id {
                         self.schema.by_id.get(schema_id).into_iter().collect()
                     } else {
-                        self.schema.infer(path, Some(&definition.kind))
+                        self.schema
+                            .infer_legacy(path, Some(&definition.kind), &definition.fields)
                     };
                     for schema in candidates {
                         if let Some(field) = schema.field(name) {

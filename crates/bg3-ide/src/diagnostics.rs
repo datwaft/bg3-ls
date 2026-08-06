@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use bg3_index::{Definition, SchemaDefinition, SchemaField, SymbolTarget, TextRange};
+use bg3_index::{
+    Definition, SchemaDefinition, SchemaField, SymbolTarget, TextRange, is_schema_discriminator,
+};
 use uuid::Uuid;
 
 use crate::{OverlaySet, WorkspaceSnapshot};
@@ -55,6 +57,21 @@ impl WorkspaceSnapshot {
                     message: format!("No Stats schema matches `{}`.", definition.kind),
                 });
                 continue;
+            }
+            if let Some((field, message)) =
+                self.schema
+                    .discriminator_error(path, Some(&definition.kind), &definition.fields)
+            {
+                diagnostics.push(Diagnostic {
+                    range: definition
+                        .field_ranges
+                        .get(field)
+                        .copied()
+                        .unwrap_or(definition.range),
+                    severity: DiagnosticSeverity::Error,
+                    code: "invalid-schema-discriminator".into(),
+                    message,
+                });
             }
             validate_fields(self, definition, &schemas, &mut diagnostics);
         }
@@ -126,6 +143,9 @@ fn validate_fields(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for (name, value) in &definition.fields {
+        if is_schema_discriminator(&definition.kind, name) {
+            continue;
+        }
         let range = definition
             .field_ranges
             .get(name)
@@ -289,7 +309,9 @@ fn schemas_for_definition<'a>(
     if let Some(schema_id) = &definition.schema_id {
         workspace.schema.by_id.get(schema_id).into_iter().collect()
     } else {
-        workspace.schema.infer(path, Some(&definition.kind))
+        workspace
+            .schema
+            .infer_legacy(path, Some(&definition.kind), &definition.fields)
     }
 }
 
