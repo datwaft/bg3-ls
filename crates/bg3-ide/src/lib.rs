@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bg3_index::{
-    Definition, ModuleIndex, ModuleSpec, ParsedFile, Position, Reference, SchemaCatalog,
-    SymbolTarget, TextRange, canonical_kind,
+    Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, ParsedFile, Position, Reference,
+    SchemaCatalog, SymbolTarget, TextRange, canonical_kind,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -104,6 +104,7 @@ pub struct WorkspaceSnapshot {
     pub generation: u64,
     pub max_workspace_symbols: usize,
     pub max_completion_items: usize,
+    base_localization: Arc<LocalizationCatalog>,
     incomplete_kinds: BTreeSet<String>,
 }
 
@@ -122,8 +123,25 @@ impl WorkspaceSnapshot {
             generation,
             max_workspace_symbols,
             max_completion_items,
+            base_localization: Arc::new(LocalizationCatalog::default()),
             incomplete_kinds: BTreeSet::new(),
         }
+    }
+
+    /// Adds packed base text that has no navigable source location.
+    pub fn with_base_localization(mut self, catalog: Arc<LocalizationCatalog>) -> Self {
+        self.base_localization = catalog;
+        self
+    }
+
+    /// Returns the number of packed base localization handles.
+    pub fn base_localization_count(&self) -> usize {
+        self.base_localization.len()
+    }
+
+    /// Shares the immutable packed catalog with a scoped workspace rebuild.
+    pub fn base_localization(&self) -> Arc<LocalizationCatalog> {
+        Arc::clone(&self.base_localization)
     }
 
     /// Marks symbol kinds whose visible loose sources omit packed data.
@@ -238,7 +256,7 @@ impl WorkspaceSnapshot {
         markdown.push_str(&format!("\n\nSource: `{}`", effective.path.display()));
         if definitions.len() > 1 {
             markdown.push_str("\n\n**Override chain**\n");
-            for definition in definitions {
+            for definition in &definitions {
                 let ambiguity = if definition.ambiguous {
                     " — same-rank ambiguity"
                 } else {
@@ -252,7 +270,125 @@ impl WorkspaceSnapshot {
                 ));
             }
         }
+        if let Some(preview) = self.tooltip_preview(&definitions, overlays) {
+            markdown.push_str(&preview);
+        }
         Some(markdown)
+    }
+
+    /// Builds a static localized preview from effective inherited tooltip fields.
+    fn tooltip_preview(
+        &self,
+        definitions: &[ResolvedDefinition],
+        overlays: &OverlaySet,
+    ) -> Option<String> {
+        let effective = definitions.first()?;
+        let mut visited = BTreeSet::new();
+        let fields = self.inherited_fields(effective, definitions, 0, overlays, &mut visited);
+        let display_name = fields
+            .get("DisplayName")
+            .filter(|value| !value.is_empty())
+            .and_then(|value| self.localized_value(value, overlays));
+        let description = fields
+            .get("Description")
+            .filter(|value| !value.is_empty())
+            .and_then(|value| self.localized_value(value, overlays));
+        let parameters = fields
+            .get("DescriptionParams")
+            .filter(|value| !value.is_empty());
+        if display_name.is_none() && description.is_none() && parameters.is_none() {
+            return None;
+        }
+
+        let mut markdown = "\n\n---\n\n### Game text preview".to_owned();
+        if let Some(display_name) = display_name {
+            markdown.push_str(&format!("\n\n**{}**", render_localized_text(&display_name)));
+        }
+        if let Some(description) = description {
+            markdown.push_str(&format!("\n\n{}", render_localized_text(&description)));
+        }
+        if let Some(parameters) = parameters {
+            markdown.push_str(&format!(
+                "\n\nDescription parameters: {}",
+                markdown_inline_code(parameters)
+            ));
+        }
+        markdown.push_str("\n\n*Static preview. Game logic and UI formatting are not evaluated.*");
+        Some(markdown)
+    }
+
+    /// Resolves `using` recursively and lets each child field replace its parent value.
+    fn inherited_fields(
+        &self,
+        current: &ResolvedDefinition,
+        chain: &[ResolvedDefinition],
+        chain_index: usize,
+        overlays: &OverlaySet,
+        visited: &mut BTreeSet<(usize, PathBuf, u32, u32)>,
+    ) -> BTreeMap<String, String> {
+        let identity = (
+            current.rank,
+            current.path.clone(),
+            current.definition.selection_range.start.line,
+            current.definition.selection_range.start.character,
+        );
+        if !visited.insert(identity) {
+            return BTreeMap::new();
+        }
+
+        let mut fields = BTreeMap::new();
+        if let Some(parent) = &current.definition.parent {
+            if parent == &current.definition.name {
+                if let Some((next_index, next)) = chain
+                    .iter()
+                    .enumerate()
+                    .skip(chain_index + 1)
+                    .find(|(_, candidate)| candidate.rank < current.rank)
+                {
+                    fields = self.inherited_fields(next, chain, next_index, overlays, visited);
+                }
+            } else {
+                let parent_chain = self.resolve(
+                    &SymbolTarget::Named {
+                        kind: Some(current.definition.kind.clone()),
+                        name: parent.clone(),
+                    },
+                    overlays,
+                );
+                if let Some(parent_definition) = parent_chain.first() {
+                    fields = self.inherited_fields(
+                        parent_definition,
+                        &parent_chain,
+                        0,
+                        overlays,
+                        visited,
+                    );
+                }
+            }
+        }
+        fields.extend(current.definition.fields.clone());
+        fields
+    }
+
+    /// Resolves a translated-string handle from loose layers before packed base text.
+    fn localized_value(&self, value: &str, overlays: &OverlaySet) -> Option<String> {
+        let handle = value.split_once(';').map_or(value, |(handle, _)| handle);
+        let loose = self.resolve(
+            &SymbolTarget::Named {
+                kind: Some("Localization".into()),
+                name: handle.into(),
+            },
+            overlays,
+        );
+        loose
+            .first()
+            .and_then(|definition| definition.definition.fields.get("Text"))
+            .cloned()
+            .or_else(|| {
+                self.base_localization
+                    .get(handle)
+                    .map(|value| value.text.to_owned())
+            })
     }
 
     /// Finds references to the symbol under one position across visible modules.
@@ -478,4 +614,60 @@ pub fn definition_target(definition: &Definition) -> SymbolTarget {
 /// Returns whether two references identify the same semantic target.
 pub fn references_same_target(left: &Reference, right: &Reference) -> bool {
     left.target == right.target
+}
+
+/// Converts common Larian presentation tags to safe readable Markdown text.
+fn render_localized_text(source: &str) -> String {
+    let mut plain = String::with_capacity(source.len());
+    let mut remaining = source;
+    while let Some(open) = remaining.find('<') {
+        plain.push_str(&remaining[..open]);
+        let Some(close) = remaining[open..].find('>') else {
+            plain.push_str(&remaining[open..]);
+            remaining = "";
+            break;
+        };
+        let tag = remaining[open + 1..open + close]
+            .trim()
+            .to_ascii_lowercase();
+        if tag.starts_with("br") || tag.starts_with("/p") {
+            plain.push('\n');
+        }
+        remaining = &remaining[open + close + 1..];
+    }
+    plain.push_str(remaining);
+
+    let unescaped = plain
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'");
+    let mut markdown = String::with_capacity(unescaped.len());
+    for character in unescaped.chars() {
+        if matches!(
+            character,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '#' | '<' | '>'
+        ) {
+            markdown.push('\\');
+        }
+        markdown.push(character);
+    }
+    markdown
+}
+
+/// Wraps raw source in a Markdown fence that cannot collide with its backticks.
+fn markdown_inline_code(source: &str) -> String {
+    let longest_run = source
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest_run + 1);
+    let padding = if source.starts_with(['`', ' ']) || source.ends_with(['`', ' ']) {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{padding}{source}{padding}{fence}")
 }

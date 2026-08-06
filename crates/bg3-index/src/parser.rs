@@ -400,6 +400,38 @@ fn parse_localization(source: SourceFile, text: &str, language: &str) -> Result<
                     body.push_str(&event.xml_content(XmlVersion::Implicit1_0)?);
                 }
             }
+            Event::CData(event) => {
+                if let Some((_, _, _, _, body)) = current.as_mut() {
+                    body.push_str(&event.xml_content(XmlVersion::Implicit1_0)?);
+                }
+            }
+            Event::GeneralRef(event) => {
+                if let Some((_, _, _, _, body)) = current.as_mut() {
+                    let reference = event.xml10_content()?;
+                    if let Some(number) = reference.strip_prefix('#') {
+                        let (radix, digits) = number
+                            .strip_prefix(['x', 'X'])
+                            .map_or((10, number), |digits| (16, digits));
+                        let value = u32::from_str_radix(digits, radix).map_err(|_| {
+                            Error::Parse(format!(
+                                "localization contains invalid character reference `&{reference};`"
+                            ))
+                        })?;
+                        let character = char::from_u32(value).ok_or_else(|| {
+                            Error::Parse(format!(
+                                "localization contains invalid character reference `&{reference};`"
+                            ))
+                        })?;
+                        body.push(character);
+                    } else if let Some(value) = quick_xml::escape::resolve_xml_entity(&reference) {
+                        body.push_str(value);
+                    } else {
+                        return Err(Error::Parse(format!(
+                            "localization contains unknown entity `&{reference};`"
+                        )));
+                    }
+                }
+            }
             Event::End(event) if event.name().as_ref() == b"content" => {
                 if let Some((handle, version, mut range, selection_range, body)) = current.take() {
                     range.end = lines.position(end);

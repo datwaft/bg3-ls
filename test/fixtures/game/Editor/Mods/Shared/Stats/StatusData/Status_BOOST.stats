@@ -7,6 +7,15 @@
         <field name="Name" type="NameTableFieldDefinition" value="TEST_STATUS" />
       </fields>
     </stat_object>
+    <stat_object>
+      <fields>
+        <field name="UUID" type="IdTableFieldDefinition" value="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" />
+        <field name="Name" type="NameTableFieldDefinition" value="ENLARGE" />
+        <field name="DisplayName" type="TranslatedStringTableFieldDefinition" value="h000000000000000000000000000000000001;2" />
+        <field name="Description" type="TranslatedStringTableFieldDefinition" value="h000000000000000000000000000000000002;1" />
+        <field name="DescriptionParams" type="StringTableFieldDefinition" value="Distance(3)" />
+        <field name="Boosts" type="StringTableFieldDefinition" value="ObjectSize(+1)" />
+      </fields>
+    </stat_object>
   </stat_objects>
 </stats>
-

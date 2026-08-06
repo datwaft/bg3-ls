@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use bg3_index::{
     CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SchemaCatalog, SourceFile, SourceKind,
-    SymbolTarget, discover_module, parse_source,
+    SymbolTarget, discover_module, parse_source, read_base_localization_package,
+    read_localization_package,
 };
 
 fn fixtures() -> PathBuf {
@@ -29,6 +30,71 @@ fn load_schema(root: &Path) -> SchemaCatalog {
             .unwrap();
     }
     schema
+}
+
+fn synthetic_loca(entries: &[(&str, u16, &str)]) -> Vec<u8> {
+    let table_size = 12 + entries.len() * 70;
+    let mut bytes = Vec::with_capacity(
+        table_size
+            + entries
+                .iter()
+                .map(|(_, _, text)| text.len() + 1)
+                .sum::<usize>(),
+    );
+    bytes.extend_from_slice(b"LOCA");
+    bytes.extend_from_slice(&u32::try_from(entries.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(&u32::try_from(table_size).unwrap().to_le_bytes());
+    for (handle, version, text) in entries {
+        let mut key = [0_u8; 64];
+        key[..handle.len()].copy_from_slice(handle.as_bytes());
+        bytes.extend_from_slice(&key);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(text.len() + 1).unwrap().to_le_bytes());
+    }
+    for (_, _, text) in entries {
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.push(0);
+    }
+    bytes
+}
+
+fn synthetic_package(language: &str, loca: &[u8], compression: u8) -> Vec<u8> {
+    let stored = match compression {
+        0 => loca.to_vec(),
+        2 => lz4_flex::block::compress(loca),
+        _ => loca.to_vec(),
+    };
+    let mut entry = vec![0_u8; 272];
+    let name = format!(
+        "Localization/{language}/{}.loca",
+        language.to_ascii_lowercase()
+    );
+    entry[..name.len()].copy_from_slice(name.as_bytes());
+    entry[256..260].copy_from_slice(&40_u32.to_le_bytes());
+    entry[263] = compression;
+    entry[264..268].copy_from_slice(&u32::try_from(stored.len()).unwrap().to_le_bytes());
+    let uncompressed = if compression == 0 { 0 } else { loca.len() };
+    entry[268..272].copy_from_slice(&u32::try_from(uncompressed).unwrap().to_le_bytes());
+
+    let compressed_list = lz4_flex::block::compress(&entry);
+    let mut file_list = Vec::with_capacity(8 + compressed_list.len());
+    file_list.extend_from_slice(&1_u32.to_le_bytes());
+    file_list.extend_from_slice(&u32::try_from(compressed_list.len()).unwrap().to_le_bytes());
+    file_list.extend_from_slice(&compressed_list);
+
+    let file_list_offset = 40 + stored.len();
+    let mut package = Vec::with_capacity(file_list_offset + file_list.len());
+    package.extend_from_slice(b"LSPK");
+    package.extend_from_slice(&18_u32.to_le_bytes());
+    package.extend_from_slice(&u64::try_from(file_list_offset).unwrap().to_le_bytes());
+    package.extend_from_slice(&u32::try_from(file_list.len()).unwrap().to_le_bytes());
+    package.push(0);
+    package.push(0);
+    package.extend_from_slice(&[0_u8; 16]);
+    package.extend_from_slice(&1_u16.to_le_bytes());
+    package.extend_from_slice(&stored);
+    package.extend_from_slice(&file_list);
+    package
 }
 
 #[test]
@@ -233,6 +299,150 @@ fn indexes_tables_lsx_and_localization() {
             .to_string(),
         "dddddddd-dddd-dddd-dddd-dddddddddddd"
     );
+}
+
+#[test]
+fn reads_uncompressed_and_lz4_v18_localization_packages() {
+    let handle = "h111111111111111111111111111111111111";
+    let generated_handle = "hsynthetic_g_suffix_1";
+    let loca = synthetic_loca(&[
+        (handle, 7, "Synthetic <LSTag>preview</LSTag>"),
+        (generated_handle, 3, "Generated handle"),
+    ]);
+    for compression in [0, 2] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("English.pak");
+        fs::write(&path, synthetic_package("English", &loca, compression)).unwrap();
+
+        let catalog = read_localization_package(&path, "English").unwrap();
+        assert_eq!(catalog.language(), "English");
+        assert_eq!(catalog.get(handle).unwrap().version, 7);
+        assert_eq!(
+            catalog.get(handle).unwrap().text,
+            "Synthetic <LSTag>preview</LSTag>"
+        );
+        assert_eq!(
+            catalog.get(generated_handle).unwrap().text,
+            "Generated handle"
+        );
+    }
+}
+
+#[test]
+fn keeps_the_last_duplicate_localization_handle() {
+    let handle = "hsynthetic_g_suffix_1";
+    let catalog = bg3_index::LocalizationCatalog::from_entries(
+        "English",
+        [
+            (handle.into(), 1, "First".into()),
+            (handle.into(), 2, "Second".into()),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog.get(handle).unwrap().version, 2);
+    assert_eq!(catalog.get(handle).unwrap().text, "Second");
+}
+
+#[test]
+fn preserves_loose_localization_entities_and_cdata() {
+    let source = SourceFile {
+        path: PathBuf::from("Localization/English/english.xml"),
+        kind: SourceKind::Localization,
+    };
+    let parsed = parse_source(
+        source,
+        r#"<contentList><content contentuid="h111111111111111111111111111111111111" version="1">A &amp; B&#33; <![CDATA[<tag>]]></content></contentList>"#,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert_eq!(parsed.definitions[0].fields["Text"], "A & B! <tag>");
+}
+
+#[test]
+fn rejects_unsafe_localization_package_variants() {
+    let loca = synthetic_loca(&[("h111111111111111111111111111111111111", 1, "Synthetic")]);
+    let directory = tempfile::tempdir().unwrap();
+
+    let mut bad_signature = synthetic_package("English", &loca, 0);
+    bad_signature[0] = b'X';
+    let path = directory.path().join("bad-signature.pak");
+    fs::write(&path, bad_signature).unwrap();
+    assert!(read_localization_package(&path, "English").is_err());
+
+    let mut solid = synthetic_package("English", &loca, 0);
+    solid[20] = 0x04;
+    let path = directory.path().join("solid.pak");
+    fs::write(&path, solid).unwrap();
+    assert!(read_localization_package(&path, "English").is_err());
+
+    let mut multipart = synthetic_package("English", &loca, 0);
+    multipart[38..40].copy_from_slice(&2_u16.to_le_bytes());
+    let path = directory.path().join("multipart.pak");
+    fs::write(&path, multipart).unwrap();
+    assert!(read_localization_package(&path, "English").is_err());
+
+    let mut too_many = synthetic_package("English", &loca, 0);
+    let file_list_offset =
+        usize::try_from(u64::from_le_bytes(too_many[8..16].try_into().unwrap())).unwrap();
+    too_many[file_list_offset..file_list_offset + 4].copy_from_slice(&100_001_u32.to_le_bytes());
+    let path = directory.path().join("too-many.pak");
+    fs::write(&path, too_many).unwrap();
+    assert!(read_localization_package(&path, "English").is_err());
+
+    let path = directory.path().join("unsupported-compression.pak");
+    fs::write(&path, synthetic_package("English", &loca, 3)).unwrap();
+    assert!(read_localization_package(&path, "English").is_err());
+}
+
+#[test]
+fn caches_and_invalidates_the_base_localization_catalog() {
+    let directory = tempfile::tempdir().unwrap();
+    let game = directory.path().join("game");
+    let localization = game.join("Localization");
+    fs::create_dir_all(&localization).unwrap();
+    let package = localization.join("English.pak");
+    let handle = "h111111111111111111111111111111111111";
+    fs::write(
+        &package,
+        synthetic_package("English", &synthetic_loca(&[(handle, 1, "First")]), 0),
+    )
+    .unwrap();
+    let cache = CacheStore::new(directory.path().join("cache")).unwrap();
+
+    let (first, first_hit) = cache
+        .load_base_localization(&game, "English")
+        .unwrap()
+        .unwrap();
+    assert!(!first_hit);
+    assert_eq!(first.get(handle).unwrap().text, "First");
+    let (_, second_hit) = cache
+        .load_base_localization(&game, "English")
+        .unwrap()
+        .unwrap();
+    assert!(second_hit);
+
+    fs::write(
+        &package,
+        synthetic_package(
+            "English",
+            &synthetic_loca(&[(handle, 2, "Second value")]),
+            0,
+        ),
+    )
+    .unwrap();
+    let (changed, changed_hit) = cache
+        .load_base_localization(&game, "English")
+        .unwrap()
+        .unwrap();
+    assert!(!changed_hit);
+    assert_eq!(changed.get(handle).unwrap().text, "Second value");
+
+    let missing = read_base_localization_package(directory.path(), "English").unwrap();
+    assert!(missing.is_none());
 }
 
 #[test]

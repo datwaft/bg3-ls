@@ -10,6 +10,9 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{ParsedFile, SourceFile};
+use crate::localization::{
+    LocalizationCatalog, base_localization_package_path, read_localization_package,
+};
 use crate::parser::parse_source;
 use crate::schema::SchemaCatalog;
 use crate::{Error, ModuleSpec};
@@ -17,6 +20,7 @@ use crate::{Error, ModuleSpec};
 const CACHE_MAGIC: &[u8; 8] = b"BG3LSIDX";
 const CACHE_VERSION: u32 = 1;
 const EXTRACTOR_VERSION: &str = "bg3-ls-index-v1";
+const LOCALIZATION_EXTRACTOR_VERSION: &str = "bg3-ls-localization-v1";
 const ABANDONED_OBJECT_AGE: Duration = Duration::from_hours(720);
 
 /// Summary of cache use during one module build.
@@ -36,7 +40,7 @@ pub struct CacheStore {
 impl CacheStore {
     /// Opens a cache at an explicit path and creates its directories.
     pub fn new(root: PathBuf) -> Result<Self, Error> {
-        for child in ["objects", "manifests", "schemas"] {
+        for child in ["objects", "manifests", "schemas", "localizations"] {
             fs::create_dir_all(root.join(child))?;
         }
         let threads = std::thread::available_parallelism()
@@ -109,6 +113,50 @@ impl CacheStore {
         }
         self.write_envelope(&path, &schema)?;
         Ok((schema, false))
+    }
+
+    /// Loads the optional base language package and reuses its decoded catalog.
+    pub fn load_base_localization(
+        &self,
+        game_data: &Path,
+        language: &str,
+    ) -> Result<Option<(LocalizationCatalog, bool)>, Error> {
+        let package = base_localization_package_path(game_data, language);
+        if !package.is_file() {
+            return Ok(None);
+        }
+        let metadata = fs::metadata(&package)?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |value| value.as_nanos());
+        let mut key = blake3::Hasher::new();
+        key.update(package.to_string_lossy().as_bytes());
+        key.update(language.as_bytes());
+        let cache_path = self
+            .root
+            .join("localizations")
+            .join(format!("{}.cache", key.finalize().to_hex()));
+        if let Ok(cached) = self.read_envelope::<CachedLocalization>(&cache_path)
+            && cached.size == metadata.len()
+            && cached.modified == modified
+            && cached.extractor_version == LOCALIZATION_EXTRACTOR_VERSION
+        {
+            return Ok(Some((cached.catalog, true)));
+        }
+
+        let catalog = read_localization_package(&package, language)?;
+        self.write_envelope(
+            &cache_path,
+            &CachedLocalization {
+                size: metadata.len(),
+                modified,
+                extractor_version: LOCALIZATION_EXTRACTOR_VERSION.into(),
+                catalog: catalog.clone(),
+            },
+        )?;
+        Ok(Some((catalog, false)))
     }
 
     /// Parses a module in parallel and reuses unchanged cached file records.
@@ -194,7 +242,7 @@ impl CacheStore {
         if self.root.exists() {
             fs::remove_dir_all(&self.root)?;
         }
-        for child in ["objects", "manifests", "schemas"] {
+        for child in ["objects", "manifests", "schemas", "localizations"] {
             fs::create_dir_all(self.root.join(child))?;
         }
         Ok(())
@@ -345,6 +393,14 @@ struct FileManifest {
     content_hash: String,
     fingerprint: String,
     object: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CachedLocalization {
+    size: u64,
+    modified: u128,
+    extractor_version: String,
+    catalog: LocalizationCatalog,
 }
 
 /// Includes every semantic input that can change a cached parsed file.

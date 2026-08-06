@@ -35,3 +35,28 @@ measurement, not the normal first-start working set.
 
 On the same machine and data revision, a later release must not regress warm
 p95 by more than 15% or cold p95 by more than 20%.
+
+## Version 0.4 pre-release verification
+
+Issue #26 adds the cached English base localization catalog. The verification
+used the same machine, data revision, modules, grammar, and five-trial method as
+the baseline.
+
+| Metric | p50 | p95 | Change from baseline p95 |
+| --- | ---: | ---: | ---: |
+| Cold indexing | 12.663 s | 12.712 s | -9.8% |
+| Warm indexing | 378 ms | 379 ms | +12.5% |
+| Navigation | 1.125 µs | 1.209 µs | +3.6% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100%
+- Repeated-trial RSS high-water mark after ten builds: 906,838,016 bytes
+- Cache size: 69,358,463 bytes in 2,538 files
+- Indexed localization handles: 232,878
+
+The warm and cold p95 results remain within the repository regression limits.
+The cache and repeated-trial RSS increase because the server now retains the
+configured base localization catalog. Normal operation keeps one published
+catalog; the repeated-trial RSS value also includes allocator pages from ten
+rebuilds.

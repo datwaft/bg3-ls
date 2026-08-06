@@ -70,6 +70,19 @@ assert(vim.wait(5000, function()
 end, 50), "the definition request queued during initial indexing did not finish")
 assert(#early_definition == 3, vim.inspect(early_definition))
 
+local tooltip_source = vim.api.nvim_buf_get_lines(0, 4, 5, false)[1]
+local tooltip_start = assert(tooltip_source:find("CONSUMER", 1, true)) - 1
+local hover_response = vim.lsp.buf_request_sync(0, "textDocument/hover", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = { line = 4, character = tooltip_start },
+}, 5000)
+local hover = assert(hover_response[client_id] and hover_response[client_id].result)
+local hover_text = hover.contents.value
+assert(hover_text:find("---", 1, true), hover_text)
+assert(hover_text:find("Test action & label", 1, true), hover_text)
+assert(hover_text:find("Synthetic description", 1, true), hover_text)
+assert(hover_text:find("aaaaaaaa%-aaaa%-aaaa%-aaaa%-aaaaaaaaaaaa"), hover_text)
+
 local function replace_buffer(lines)
   vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
 end
