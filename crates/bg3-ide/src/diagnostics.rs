@@ -60,17 +60,27 @@ impl WorkspaceSnapshot {
         }
 
         for reference in &file.references {
-            if reference.context == "using" && self.resolve(&reference.target, overlays).is_empty()
-            {
-                diagnostics.push(Diagnostic {
-                    range: reference.range,
-                    severity: DiagnosticSeverity::Warning,
-                    code: "missing-parent".into(),
-                    message: format!(
-                        "Parent `{}` is not visible.",
-                        target_name(&reference.target)
-                    ),
-                });
+            if reference.context == "using" {
+                let Some(severity) = unresolved_references else {
+                    continue;
+                };
+                let complete = match &reference.target {
+                    SymbolTarget::Named {
+                        kind: Some(kind), ..
+                    } => self.has_complete_kind(kind),
+                    _ => false,
+                };
+                if complete && self.resolve(&reference.target, overlays).is_empty() {
+                    diagnostics.push(Diagnostic {
+                        range: reference.range,
+                        severity,
+                        code: "missing-parent".into(),
+                        message: format!(
+                            "Parent `{}` is not visible.",
+                            target_name(&reference.target)
+                        ),
+                    });
+                }
                 continue;
             }
             let Some(severity) = unresolved_references else {

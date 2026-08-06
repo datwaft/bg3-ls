@@ -579,6 +579,40 @@ data "Boosts" "ApplyStatus(BASE_STATUS,100,1);UnlockSpell(Target_BaseSpell)"
 }
 
 #[test]
+fn diagnoses_parents_only_when_layers_are_complete_and_enabled() {
+    let text = "new entry \"CHILD\"\ntype \"PassiveData\"\nusing \"MISSING_PARENT\"\n";
+
+    let (complete, path) = fixture_workspace(200);
+    let complete_overlays = overlay(&complete, &path, text);
+    let complete_diagnostics =
+        complete.diagnostics(&path, &complete_overlays, Some(DiagnosticSeverity::Hint));
+    assert!(complete_diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "missing-parent" && diagnostic.severity == DiagnosticSeverity::Hint
+    }));
+
+    let disabled = complete.diagnostics(&path, &complete_overlays, None);
+    assert!(
+        disabled
+            .iter()
+            .all(|diagnostic| diagnostic.code != "missing-parent")
+    );
+
+    let (incomplete, path) = fixture_workspace(200);
+    let incomplete = incomplete.with_incomplete_kinds(["PassiveData"]);
+    let incomplete_overlays = overlay(&incomplete, &path, text);
+    let incomplete_diagnostics = incomplete.diagnostics(
+        &path,
+        &incomplete_overlays,
+        Some(DiagnosticSeverity::Warning),
+    );
+    assert!(
+        incomplete_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "missing-parent")
+    );
+}
+
+#[test]
 fn syntax_diagnostics_can_disable_unresolved_references() {
     let (workspace, path) = fixture_workspace(200);
     let text = "new entry \"BROKEN\"\ntype \"PassiveData\"\ndata \"Boosts\" \"ApplyStatus(MISSING";
