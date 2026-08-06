@@ -197,12 +197,24 @@ pub fn field_kind(name: &str) -> Option<&'static str> {
     match name {
         "ContainerSpells" | "Spells" => Some("SpellData"),
         "InterruptPrototype" => Some("InterruptData"),
-        "Passives" | "PassivesAdded" | "PassivesOnEquip" => Some("PassiveData"),
+        "Passives" | "PassivesAdded" | "PassivesOnEquip" | "PassivesRemoved" => Some("PassiveData"),
         "PersonalStatusImmunities" | "StatusImmunities" | "StatusInInventory" | "StatusOnEquip" => {
             Some("StatusData")
         }
         _ => None,
     }
+}
+
+/// Returns whether an LSX attribute contains a supported Stats-value expression.
+///
+/// LSX has many free-form `LSString` fields. A conservative allowlist prevents
+/// ordinary names and UI text from becoming speculative semantic references.
+pub fn is_lsx_value_field(name: &str) -> bool {
+    field_kind(name).is_some()
+        || matches!(
+            name,
+            "Boosts" | "BoostsOnEquip" | "BoostsOnUnequip" | "Selectors"
+        )
 }
 
 /// Tests identifiers that select an explicit functor target instead of a resource.

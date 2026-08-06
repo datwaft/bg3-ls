@@ -82,7 +82,7 @@ impl Backend {
         let parsed = parse_source(
             SourceFile {
                 path: path.clone(),
-                kind: SourceKind::PlainStats,
+                kind: open_document_kind(&path)?,
             },
             &text,
             &snapshot.schema,
@@ -183,6 +183,23 @@ impl Backend {
                 }
             }
         }
+    }
+}
+
+/// Selects a supported source format for an attached loose document.
+fn open_document_kind(path: &Path) -> Result<SourceKind, Error> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("txt") => Ok(SourceKind::PlainStats),
+        Some("lsx") => Ok(SourceKind::Lsx),
+        _ => Err(Error::Config(format!(
+            "the server cannot attach to this source format: {}",
+            path.display()
+        ))),
     }
 }
 

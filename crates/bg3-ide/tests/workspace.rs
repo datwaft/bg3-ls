@@ -80,7 +80,11 @@ fn overlay(workspace: &WorkspaceSnapshot, path: &Path, text: &str) -> OverlaySet
     let parsed = parse_source(
         SourceFile {
             path: path.to_owned(),
-            kind: SourceKind::PlainStats,
+            kind: if path.extension().is_some_and(|extension| extension == "lsx") {
+                SourceKind::Lsx
+            } else {
+                SourceKind::PlainStats
+            },
         },
         text,
         &workspace.schema,
@@ -97,6 +101,108 @@ fn overlay(workspace: &WorkspaceSnapshot, path: &Path, text: &str) -> OverlaySet
         },
     );
     overlays
+}
+
+#[test]
+fn supports_language_features_in_lsx_values_without_stats_diagnostics() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Public/MyMod/Progressions/Progressions.lsx");
+    let text = r#"<node id="Progression">
+  <attribute id="Boosts" type="LSString" value="ActionResource(ActionPoint,1)"/>
+  <attribute id="Name" type="LSString" value="UnsavedProgression"/>
+  <attribute id="PassivesAdded" type="LSString" value="CHAINED"/>
+  <attribute id="Selectors" type="LSString" value="SelectSpells(eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee,1,0)"/>
+  <attribute id="UUID" type="guid" value="99999999-9999-9999-9999-999999999999"/>
+</node>"#;
+    let overlays = overlay(&workspace, &path, text);
+    let line = text.lines().nth(1).unwrap();
+    let cursor = line.find("ActionP").unwrap() + "ActionP".len();
+    let position = Position {
+        line: 1,
+        character: u32::try_from(cursor).unwrap(),
+    };
+
+    let completion = workspace.completion(&path, position, &overlays, false);
+    assert!(
+        completion
+            .items
+            .iter()
+            .any(|item| item.label == "ActionPoint")
+    );
+    let function_cursor = line.find("ActionR").unwrap() + "ActionR".len();
+    let functions = workspace.completion(
+        &path,
+        Position {
+            line: 1,
+            character: u32::try_from(function_cursor).unwrap(),
+        },
+        &overlays,
+        false,
+    );
+    assert!(
+        functions
+            .items
+            .iter()
+            .any(|item| item.label == "ActionResource")
+    );
+    let signature = workspace
+        .signature_help(&path, position, &overlays)
+        .unwrap();
+    assert!(signature.label.starts_with("ActionResource(resource"));
+    let hover = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 1,
+                character: u32::try_from(line.find("ActionResource").unwrap()).unwrap(),
+            },
+            &overlays,
+        )
+        .unwrap();
+    assert!(hover.contains("**Function** `ActionResource`"));
+
+    let selector_line = text.lines().nth(4).unwrap();
+    let observed_hover = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 4,
+                character: u32::try_from(selector_line.find("SelectSpells").unwrap()).unwrap(),
+            },
+            &overlays,
+        )
+        .unwrap();
+    assert!(observed_hover.contains("**Observed function** `SelectSpells`"));
+
+    let passive_line = text.lines().nth(3).unwrap();
+    let passive_column =
+        u32::try_from(passive_line.find("CHAINED").unwrap() + "CHAINED".len() - 1).unwrap();
+    let passive_completion_column =
+        u32::try_from(passive_line.find("CHAI").unwrap() + "CHAI".len()).unwrap();
+    let passives = workspace.completion(
+        &path,
+        Position {
+            line: 3,
+            character: passive_completion_column,
+        },
+        &overlays,
+        false,
+    );
+    assert!(passives.items.iter().any(|item| item.label == "CHAINED"));
+    let definitions = workspace.definitions_at(
+        &path,
+        Position {
+            line: 3,
+            character: passive_column,
+        },
+        &overlays,
+    );
+    assert_eq!(definitions.len(), 3);
+    assert!(
+        workspace
+            .diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning))
+            .is_empty()
+    );
 }
 
 #[test]

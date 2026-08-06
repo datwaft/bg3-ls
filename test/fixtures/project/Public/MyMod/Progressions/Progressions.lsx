@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<save>
+  <region id="Progressions">
+    <node id="root">
+      <children>
+        <node id="Progression">
+          <attribute id="Boosts" type="LSString" value="ActionResource(ActionPoint,1);UnlockSpell(Target_Test)"/>
+          <attribute id="Name" type="LSString" value="TestProgression"/>
+          <attribute id="PassivesAdded" type="LSString" value="CHAINED"/>
+          <attribute id="Selectors" type="LSString" value="SelectSpells(eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee,1,0)"/>
+          <attribute id="UUID" type="guid" value="99999999-9999-9999-9999-999999999999"/>
+        </node>
+      </children>
+    </node>
+  </region>
+</save>

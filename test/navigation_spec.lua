@@ -2,6 +2,7 @@ local root = assert(vim.env.BG3_LS_ROOT)
 local binary = root .. "/target/debug/bg3-ls"
 local project = root .. "/test/fixtures/project"
 local source = project .. "/Public/MyMod/Stats/Generated/Data/Passive.txt"
+local lsx_source = project .. "/Public/MyMod/Progressions/Progressions.lsx"
 local cache = assert(vim.env.BG3_LS_TEST_CACHE)
 local dependency = vim.fn.tempname()
 local dependency_file = dependency .. "/Public/Fixes/Stats/Generated/Data/Passive.txt"
@@ -172,6 +173,54 @@ assert(
   dependency_definition[client_id] and #dependency_definition[client_id].result >= 1,
   vim.inspect(dependency_definition)
 )
+
+vim.bo.modified = false
+vim.cmd("edit " .. vim.fn.fnameescape(lsx_source))
+vim.bo.filetype = "bg3_lsx"
+local lsx_client_id = assert(vim.lsp.start(lsp_config))
+assert(lsx_client_id == client_id, "the LSX buffer did not reuse the project client")
+assert(vim.wait(5000, function()
+  return vim.lsp.buf_is_attached(0, client_id)
+end, 10), "the project client did not attach to the LSX buffer")
+
+local lsx_completion_line = '<attribute id="Boosts" type="LSString" value="ActionResource(ActionPoint,1)"/>'
+local lsx_completion_column = assert(lsx_completion_line:find("ActionP", 1, true)) - 1 + #"ActionP"
+local lsx_passive_line = '<attribute id="PassivesAdded" type="LSString" value="CHAINED"/>'
+replace_buffer({
+  '<node id="Progression">',
+  lsx_completion_line,
+  '<attribute id="Name" type="LSString" value="UnsavedProgression"/>',
+  lsx_passive_line,
+  '<attribute id="UUID" type="guid" value="99999999-9999-9999-9999-999999999999"/>',
+  "</node>",
+})
+assert(vim.wait(5000, function()
+  local results = vim.lsp.buf_request_sync(0, "textDocument/completion", {
+    textDocument = { uri = vim.uri_from_bufnr(0) },
+    position = { line = 1, character = lsx_completion_column },
+  }, 1000)
+  local result = results and results[client_id] and results[client_id].result
+  local items = result and (result.items or result)
+  return items and vim.iter(items):any(function(item)
+    return item.label == "ActionPoint"
+  end)
+end, 50), "LSX completion did not include ActionPoint")
+
+local lsx_signature = vim.lsp.buf_request_sync(0, "textDocument/signatureHelp", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = { line = 1, character = lsx_completion_column },
+}, 5000)
+assert(lsx_signature[client_id] and lsx_signature[client_id].result, vim.inspect(lsx_signature))
+
+local lsx_passive_column = assert(lsx_passive_line:find("CHAINED", 1, true)) - 1
+local lsx_definition = vim.lsp.buf_request_sync(0, "textDocument/definition", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = { line = 3, character = lsx_passive_column },
+}, 5000)
+assert(lsx_definition[client_id] and #lsx_definition[client_id].result == 3, vim.inspect(lsx_definition))
+assert(vim.wait(1000, function()
+  return vim.tbl_isempty(vim.diagnostic.get(0))
+end, 50), "the server published legacy Stats diagnostics for LSX")
 
 assert(vim.tbl_contains(progress, "begin"), vim.inspect(progress))
 assert(vim.tbl_contains(progress, "end"), vim.inspect(progress))
