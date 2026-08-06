@@ -232,9 +232,17 @@ fn valid_translated_string(value: &str) -> bool {
     let (handle, version) = value
         .split_once(';')
         .map_or((value, None), |(handle, version)| (handle, Some(version)));
-    handle.len() == 37
-        && handle.starts_with('h')
-        && handle[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    let Some(body) = handle.strip_prefix('h') else {
+        return false;
+    };
+    let groups = body.split('g').collect::<Vec<_>>();
+    let valid_handle = body.len() == 36
+        && (body.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || (groups.len() == 5
+                && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, length)| {
+                    group.len() == length && group.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })));
+    valid_handle
         && version.is_none_or(|version| {
             !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
         })
@@ -271,5 +279,36 @@ fn target_name(target: &SymbolTarget) -> String {
     match target {
         SymbolTarget::Named { name, .. } => name.clone(),
         SymbolTarget::Uuid(uuid) => uuid.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_translated_string;
+
+    #[test]
+    fn accepts_bg3_localization_handle_forms() {
+        assert!(valid_translated_string(
+            "h0150eda0gf427g466agaaaage5523351d9ac"
+        ));
+        assert!(valid_translated_string(
+            "h0150EDA0gF427g466AgAAAAgE5523351D9AC;12"
+        ));
+        assert!(valid_translated_string(
+            "h000000000000000000000000000000000001;2"
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_bg3_localization_handles() {
+        assert!(!valid_translated_string(
+            "h0150eda0-f427-466a-aaaa-e5523351d9ac"
+        ));
+        assert!(!valid_translated_string(
+            "h0150eda0gf427g466agaaaage5523351d9a;1"
+        ));
+        assert!(!valid_translated_string(
+            "h0150eda0gf427g466agaaaage5523351d9ac;v1"
+        ));
     }
 }
