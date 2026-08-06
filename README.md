@@ -13,7 +13,7 @@ The server provides:
 
 - ordered Go to Definition results for complete override chains;
 - hover information for declarations, schema fields, enum values, functions,
-  resources, and localization;
+  resources, localization, and static game-text previews;
 - references, document symbols, and workspace symbols;
 - schema-aware completion with snippet support;
 - verified signature help for curated Stats functions;
@@ -34,7 +34,10 @@ for legacy Stats syntax and embedded value expressions. It streams XML with
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
-The server does not read `.pak`, `.loca`, `.lsf`, or other binary files.
+The server reads one narrow binary source: the canonical LOCA entry in the
+configured base-game `Localization/<Language>.pak`. It uses that text only for
+hover previews. It does not extract packages or read general `.pak`, `.loca`,
+`.lsf`, or other binary resources.
 
 ## Install
 
@@ -165,7 +168,17 @@ The server reads:
 - Toolkit `.stats` and `.tbl` files;
 - legacy `Public/*/Stats/Generated/Data/*.txt` files;
 - relevant loose `.lsx` resources below `Public` and `Mods`; and
-- loose localization XML for the configured language.
+- loose localization XML for the configured language;
+- the canonical configured-language LOCA catalog in the base-game localization
+  package.
+
+Declaration hover keeps the technical symbol information first. When an
+effective Stats declaration has `DisplayName`, `Description`, or
+`DescriptionParams`, hover adds a static game-text preview after a divider. The
+preview resolves `using` inheritance and module overrides. Loose localization
+uses normal module precedence and replaces packed base text. The preview shows
+unresolved description parameters as source text because the server does not
+run game logic.
 
 Open Stats files replace their disk records with unsaved overlays. Closing a
 buffer restores its disk record. XML resources remain readable navigation
@@ -261,10 +274,13 @@ repository.
 
 `bg3-ls` supports one active project per server process. It does not implement
 rename, formatting, semantic tokens, code actions, arbitrary full-text search,
-packed-file extraction, binary localization/resource formats, automatic
-dependency discovery, or native Windows releases. Packed base resources are
-not visible, so diagnostics intentionally skip generic expression identifiers,
-root-template UUID resolution, required fields, and inferred function arity.
+general packed-file extraction, dependency/mod package localization, binary
+resource formats, automatic dependency discovery, or native Windows releases.
+Packed base resources are not visible, so diagnostics intentionally skip
+generic expression identifiers, root-template UUID resolution, required
+fields, and inferred function arity. Static tooltip previews do not evaluate
+`DescriptionParams`, select runtime gender variants, or claim exact game UI
+rendering.
 
 ## License
 

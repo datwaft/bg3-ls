@@ -35,6 +35,9 @@
         <field_definition name="Name" type="Name" />
         <field_definition name="Using" type="BaseClass" />
         <field_definition name="Boosts" type="String" />
+        <field_definition name="DisplayName" type="TranslatedString" />
+        <field_definition name="Description" type="TranslatedString" />
+        <field_definition name="DescriptionParams" type="String" />
       </field_definitions>
     </stat_object_definition>
     <stat_object_definition id="66666666-6666-6666-6666-666666666666" name="Spell_Target" category="SpellData" export_type="SpellData">

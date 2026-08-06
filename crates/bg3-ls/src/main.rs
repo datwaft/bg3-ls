@@ -607,7 +607,27 @@ fn build_benchmark_workspace(
     modules: &[ModuleSpec],
     language: &str,
 ) -> Result<(WorkspaceSnapshot, CacheStats), Error> {
-    build_workspace(cache, game_data, modules, language, 200, 200, &[])
+    // Base localization does not depend on schemas or module records. Load it
+    // concurrently so this benchmark matches the LSP coordinator's startup.
+    let ((workspace, mut stats), localization) = std::thread::scope(|scope| {
+        let localization = scope.spawn(|| cache.load_base_localization(game_data, language));
+        let workspace = build_workspace(cache, game_data, modules, language, 200, 200, &[]);
+        let localization = localization
+            .join()
+            .map_err(|_| Error::Index("base-localization benchmark task panicked".into()))?;
+        Ok::<_, Error>((workspace?, localization?))
+    })?;
+    let workspace = if let Some((catalog, hit)) = localization {
+        if hit {
+            stats.hits += 1;
+        } else {
+            stats.misses += 1;
+        }
+        workspace.with_base_localization(Arc::new(catalog))
+    } else {
+        workspace
+    };
+    Ok((workspace, stats))
 }
 
 /// Builds one immutable workspace for non-LSP commands.

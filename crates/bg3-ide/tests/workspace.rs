@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use bg3_ide::{DiagnosticSeverity, OverlayDocument, OverlaySet, WorkspaceSnapshot};
 use bg3_index::{
-    ModuleIndex, ModuleRole, ModuleSpec, Position, SchemaCatalog, SourceFile, SourceKind,
-    SymbolTarget, discover_module, parse_source,
+    LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, Position, SchemaCatalog, SourceFile,
+    SourceKind, SymbolTarget, discover_module, parse_source,
 };
 
 fn fixtures() -> PathBuf {
@@ -728,4 +728,133 @@ fn hover_describes_enum_values_and_curated_functions() {
         )
         .unwrap();
     assert!(hover.contains("Applies a status"));
+}
+
+#[test]
+fn hover_previews_inherited_and_localized_game_text() {
+    let (workspace, path) = fixture_workspace(200);
+    let catalog = LocalizationCatalog::from_entries(
+        "English",
+        [
+            (
+                "h000000000000000000000000000000000001".into(),
+                2,
+                "Packed title".into(),
+            ),
+            (
+                "h000000000000000000000000000000000002".into(),
+                1,
+                "Synthetic <LSTag Type=\"Status\">description</LSTag><br>Second line".into(),
+            ),
+        ],
+    )
+    .unwrap();
+    let workspace = workspace.with_base_localization(Arc::new(catalog));
+    let status_path = path.with_file_name("Status_BOOST.txt");
+    let text = r#"new entry "ENLARGE"
+type "StatusData"
+data "StatusType" "BOOST"
+using "ENLARGE"
+data "Boosts" "ObjectSize(+2)"
+"#;
+    let overlays = overlay(&workspace, &status_path, text);
+    let hover = workspace
+        .hover(
+            &status_path,
+            Position {
+                line: 0,
+                character: 13,
+            },
+            &overlays,
+        )
+        .unwrap();
+
+    assert!(hover.contains("**Boosts:** `ObjectSize(+2)`"));
+    assert!(hover.contains("\n\n---\n\n### Game text preview"));
+    assert!(hover.contains("**Test action & label**"), "{hover}");
+    assert!(hover.contains("Synthetic description"));
+    assert!(!hover.contains("Second line"));
+    assert!(hover.contains("Description parameters: `Distance(3)`"));
+    assert!(hover.contains("Game logic and UI formatting are not evaluated"));
+    assert!(hover.contains("**Override chain**"));
+}
+
+#[test]
+fn hover_uses_packed_base_localization_as_fallback() {
+    let (workspace, path) = fixture_workspace(200);
+    let catalog = LocalizationCatalog::from_entries(
+        "English",
+        [
+            (
+                "h000000000000000000000000000000000003".into(),
+                1,
+                "Packed title".into(),
+            ),
+            (
+                "h000000000000000000000000000000000004".into(),
+                1,
+                "Packed <LSTag Type=\"Status\">description</LSTag><br>Second line".into(),
+            ),
+        ],
+    )
+    .unwrap();
+    let workspace = workspace.with_base_localization(Arc::new(catalog));
+    let status_path = path.with_file_name("Status_BOOST.txt");
+    let text = r#"new entry "PACKED_TOOLTIP"
+type "StatusData"
+data "DisplayName" "h000000000000000000000000000000000003;1"
+data "Description" "h000000000000000000000000000000000004;1"
+"#;
+    let overlays = overlay(&workspace, &status_path, text);
+    let hover = workspace
+        .hover(
+            &status_path,
+            Position {
+                line: 0,
+                character: 13,
+            },
+            &overlays,
+        )
+        .unwrap();
+
+    assert!(hover.contains("**Packed title**"));
+    assert!(hover.contains("Packed description\nSecond line"));
+}
+
+#[test]
+fn empty_override_fields_clear_the_localized_preview() {
+    let (workspace, path) = fixture_workspace(200);
+    let catalog = LocalizationCatalog::from_entries(
+        "English",
+        [(
+            "h000000000000000000000000000000000002".into(),
+            1,
+            "Synthetic description".into(),
+        )],
+    )
+    .unwrap();
+    let workspace = workspace.with_base_localization(Arc::new(catalog));
+    let status_path = path.with_file_name("Status_BOOST.txt");
+    let text = r#"new entry "ENLARGE"
+type "StatusData"
+data "StatusType" "BOOST"
+using "ENLARGE"
+data "DisplayName" ""
+data "Description" ""
+data "DescriptionParams" ""
+"#;
+    let overlays = overlay(&workspace, &status_path, text);
+    let hover = workspace
+        .hover(
+            &status_path,
+            Position {
+                line: 0,
+                character: 13,
+            },
+            &overlays,
+        )
+        .unwrap();
+
+    assert!(!hover.contains("In-game text preview"));
+    assert!(!hover.contains("Synthetic description"));
 }

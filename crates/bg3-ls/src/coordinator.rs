@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use bg3_ide::WorkspaceSnapshot;
-use bg3_index::{CacheStats, CacheStore, ModuleIndex, ModuleRole, discover_module};
+use bg3_index::{
+    CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, discover_module,
+};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, mpsc, watch};
 use tower_lsp_server::Client;
@@ -231,7 +233,20 @@ impl Coordinator {
         } else {
             CacheStore::xdg()?
         };
+        let mut cache_stats = CacheStats::default();
         let previous = self.snapshot.load_full();
+        // Package decoding is independent from schema and module parsing. Run
+        // it in parallel so packed tooltip text does not delay warm startup.
+        let localization_task = if affected.is_none() {
+            let localization_cache = cache.clone();
+            let game_data = config.game_data.clone();
+            let language = config.language.clone();
+            Some(tokio::task::spawn_blocking(move || {
+                localization_cache.load_base_localization(&game_data, &language)
+            }))
+        } else {
+            None
+        };
         let schema = if affected.is_some() {
             previous
                 .as_ref()
@@ -253,8 +268,56 @@ impl Coordinator {
                 .await;
         }
 
+        let base_localization = if affected.is_some() {
+            previous
+                .as_ref()
+                .map(|workspace| workspace.base_localization())
+                .ok_or_else(|| Error::Index("a scoped build has no previous snapshot".into()))?
+        } else {
+            if let Some(progress) = progress {
+                progress
+                    .report_with_message("Finishing base localization", 15)
+                    .await;
+            }
+            match localization_task
+                .expect("a full build starts a localization task")
+                .await
+            {
+                Ok(Ok(Some((catalog, hit)))) => {
+                    if hit {
+                        cache_stats.hits += 1;
+                    } else {
+                        cache_stats.misses += 1;
+                    }
+                    Arc::new(catalog)
+                }
+                Ok(Ok(None)) => Arc::new(LocalizationCatalog::new(config.language.clone())),
+                Ok(Err(error)) => {
+                    client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "BG3 base localization is unavailable; hover previews will use loose text only: {error}"
+                            ),
+                        )
+                        .await;
+                    Arc::new(LocalizationCatalog::new(config.language.clone()))
+                }
+                Err(error) => {
+                    client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "BG3 base-localization task failed; hover previews will use loose text only: {error}"
+                            ),
+                        )
+                        .await;
+                    Arc::new(LocalizationCatalog::new(config.language.clone()))
+                }
+            }
+        };
+
         let mut layers = Vec::new();
-        let mut cache_stats = CacheStats::default();
         let module_count = config.modules.len();
         for (index, module) in config.modules.iter().cloned().enumerate() {
             if affected
@@ -363,6 +426,7 @@ impl Coordinator {
             config.max_workspace_symbols,
             config.max_completion_items,
         )
+        .with_base_localization(base_localization)
         .with_incomplete_kinds(incomplete_kinds);
         let info = index_info(&workspace, cache_stats);
         Ok((workspace, info))
@@ -390,6 +454,10 @@ impl Coordinator {
         }
         for relative in ["Editor/Config/Stats", "Editor/Config/UuidObjects"] {
             watcher.watch(&config.game_data.join(relative), RecursiveMode::Recursive)?;
+        }
+        let localization_root = config.game_data.join("Localization");
+        if localization_root.is_dir() {
+            watcher.watch(&localization_root, RecursiveMode::Recursive)?;
         }
         *active = Some(watcher);
         drop(active);
@@ -424,11 +492,12 @@ impl Coordinator {
                     }
                 }
 
-                let schema_changed = paths.iter().any(|path| {
+                let full_rebuild_required = paths.iter().any(|path| {
                     path.starts_with(config.game_data.join("Editor/Config/Stats"))
                         || path.starts_with(config.game_data.join("Editor/Config/UuidObjects"))
+                        || path.starts_with(config.game_data.join("Localization"))
                 });
-                if schema_changed {
+                if full_rebuild_required {
                     coordinator.rebuild(Arc::clone(&config), &client).await;
                     continue;
                 }
@@ -456,6 +525,7 @@ fn index_info(workspace: &WorkspaceSnapshot, cache: CacheStats) -> IndexInfo {
         modules: workspace.layers.len(),
         schemas: workspace.schema.by_id.len(),
         enumerations: workspace.schema.enumerations.len(),
+        localizations: workspace.base_localization_count(),
         cache_hits: cache.hits,
         cache_misses: cache.misses,
         ..IndexInfo::default()

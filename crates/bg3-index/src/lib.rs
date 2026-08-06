@@ -4,6 +4,7 @@ mod cache;
 mod catalog;
 mod discovery;
 mod domain;
+mod localization;
 mod module;
 mod parser;
 mod schema;
@@ -22,6 +23,9 @@ pub use discovery::{discover_module, path_is_within, resolve_path};
 pub use domain::{
     Definition, LineMap, ObservedFunction, ParsedFile, Position, Reference, SourceFile,
     SourceIssue, SourceKind, SymbolTarget, TextRange,
+};
+pub use localization::{
+    LocalizationCatalog, LocalizedText, read_base_localization_package, read_localization_package,
 };
 pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
 pub use parser::{canonical_kind, is_uuid, parse_source, schema_for_toolkit, schemas_for_plain};
@@ -52,6 +56,10 @@ pub enum Error {
     Schema(String),
     #[error("parse error: {0}")]
     Parse(String),
+    #[error("package error: {0}")]
+    Package(String),
+    #[error("localization error: {0}")]
+    Localization(String),
     #[error("cache error: {0}")]
     Cache(String),
     #[error(transparent)]
