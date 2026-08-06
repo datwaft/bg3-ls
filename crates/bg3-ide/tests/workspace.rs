@@ -499,6 +499,44 @@ data "Boosts" "HasStatus('SG_Charmed');ApplyStatus(MISSING_STATUS,100,1)"
 }
 
 #[test]
+fn diagnoses_localization_only_when_visible_sources_are_complete() {
+    let handle = "hffffffffffffffffffffffffffffffffffff";
+    let text = format!(
+        "new entry \"LOCALIZATION\"\ntype \"PassiveData\"\ndata \"DisplayName\" \"{handle}\"\n"
+    );
+
+    let (complete, path) = fixture_workspace(200);
+    let complete_overlays = overlay(&complete, &path, &text);
+    let complete_diagnostics =
+        complete.diagnostics(&path, &complete_overlays, Some(DiagnosticSeverity::Warning));
+    assert!(complete_diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "unresolved-reference" && diagnostic.message.contains(handle)
+    }));
+
+    let (incomplete, path) = fixture_workspace(200);
+    let incomplete = incomplete.with_incomplete_kinds(["Localization"]);
+    let incomplete_overlays = overlay(&incomplete, &path, &text);
+    let incomplete_diagnostics = incomplete.diagnostics(
+        &path,
+        &incomplete_overlays,
+        Some(DiagnosticSeverity::Warning),
+    );
+    assert!(incomplete_diagnostics.iter().all(|diagnostic| {
+        diagnostic.code != "unresolved-reference" || !diagnostic.message.contains(handle)
+    }));
+
+    let known = SymbolTarget::Named {
+        kind: Some("Localization".into()),
+        name: "h000000000000000000000000000000000001".into(),
+    };
+    assert!(
+        !incomplete
+            .resolve(&known, &OverlaySet::default())
+            .is_empty()
+    );
+}
+
+#[test]
 fn syntax_diagnostics_can_disable_unresolved_references() {
     let (workspace, path) = fixture_workspace(200);
     let text = "new entry \"BROKEN\"\ntype \"PassiveData\"\ndata \"Boosts\" \"ApplyStatus(MISSING";

@@ -355,13 +355,26 @@ impl Coordinator {
         }
 
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut incomplete_kinds = Vec::new();
+        // A standard BG3 installation stores base localization in one language
+        // pack. Loose XML remains useful for navigation, but it cannot prove
+        // that a handle is absent while this pack exists.
+        if config
+            .game_data
+            .join("Localization")
+            .join(format!("{}.pak", config.language))
+            .is_file()
+        {
+            incomplete_kinds.push("Localization");
+        }
         let workspace = WorkspaceSnapshot::new(
             schema,
             layers,
             generation,
             config.max_workspace_symbols,
             config.max_completion_items,
-        );
+        )
+        .with_incomplete_kinds(incomplete_kinds);
         let info = index_info(&workspace, cache_stats);
         Ok((workspace, info))
     }
