@@ -537,6 +537,48 @@ fn diagnoses_localization_only_when_visible_sources_are_complete() {
 }
 
 #[test]
+fn diagnoses_named_symbols_only_when_visible_layers_are_complete() {
+    let text = r#"new entry "PACKED_REFERENCES"
+type "PassiveData"
+data "Boosts" "ApplyStatus(BASE_STATUS,100,1);UnlockSpell(Target_BaseSpell)"
+"#;
+
+    let (complete, path) = fixture_workspace(200);
+    let complete_overlays = overlay(&complete, &path, text);
+    let complete_diagnostics =
+        complete.diagnostics(&path, &complete_overlays, Some(DiagnosticSeverity::Warning));
+    for name in ["BASE_STATUS", "Target_BaseSpell"] {
+        assert!(complete_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unresolved-reference" && diagnostic.message.contains(name)
+        }));
+    }
+
+    let (incomplete, path) = fixture_workspace(200);
+    let incomplete = incomplete.with_incomplete_kinds(["SpellData", "StatusData"]);
+    let incomplete_overlays = overlay(&incomplete, &path, text);
+    let incomplete_diagnostics = incomplete.diagnostics(
+        &path,
+        &incomplete_overlays,
+        Some(DiagnosticSeverity::Warning),
+    );
+    for name in ["BASE_STATUS", "Target_BaseSpell"] {
+        assert!(incomplete_diagnostics.iter().all(|diagnostic| {
+            diagnostic.code != "unresolved-reference" || !diagnostic.message.contains(name)
+        }));
+    }
+
+    let known = SymbolTarget::Named {
+        kind: Some("SpellData".into()),
+        name: "Target_Test".into(),
+    };
+    assert!(
+        !incomplete
+            .resolve(&known, &OverlaySet::default())
+            .is_empty()
+    );
+}
+
+#[test]
 fn syntax_diagnostics_can_disable_unresolved_references() {
     let (workspace, path) = fixture_workspace(200);
     let text = "new entry \"BROKEN\"\ntype \"PassiveData\"\ndata \"Boosts\" \"ApplyStatus(MISSING";
