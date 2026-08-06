@@ -29,5 +29,21 @@
         <field_definition name="Name" type="Name" />
       </field_definitions>
     </stat_object_definition>
+    <stat_object_definition id="55555555-5555-5555-5555-555555555555" name="Status_BOOST" category="StatusData" export_type="StatusData">
+      <field_definitions>
+        <field_definition name="UUID" type="Id" />
+        <field_definition name="Name" type="Name" />
+        <field_definition name="Using" type="BaseClass" />
+        <field_definition name="Boosts" type="String" />
+      </field_definitions>
+    </stat_object_definition>
+    <stat_object_definition id="66666666-6666-6666-6666-666666666666" name="Spell_Target" category="SpellData" export_type="SpellData">
+      <field_definitions>
+        <field_definition name="UUID" type="Id" />
+        <field_definition name="Name" type="Name" />
+        <field_definition name="Using" type="BaseClass" />
+        <field_definition name="SpellFlags" type="String" />
+      </field_definitions>
+    </stat_object_definition>
   </stat_object_definitions>
 </root>

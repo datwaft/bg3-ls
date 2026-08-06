@@ -660,7 +660,9 @@ fn schemas_for_definition<'a>(
     if let Some(schema_id) = &definition.schema_id {
         workspace.schema.by_id.get(schema_id).into_iter().collect()
     } else {
-        workspace.schema.infer(path, Some(&definition.kind))
+        workspace
+            .schema
+            .infer_legacy(path, Some(&definition.kind), &definition.fields)
     }
 }
 

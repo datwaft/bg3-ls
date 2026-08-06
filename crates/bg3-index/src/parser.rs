@@ -654,7 +654,7 @@ fn apply_schema_reference_kinds(
     references: &mut [Reference],
     schema: &SchemaCatalog,
 ) {
-    let candidates = schema.infer(path, Some(&definition.kind));
+    let candidates = schema.infer_legacy(path, Some(&definition.kind), &definition.fields);
     for reference in references {
         let SymbolTarget::Named { kind: None, .. } = &reference.target else {
             continue;

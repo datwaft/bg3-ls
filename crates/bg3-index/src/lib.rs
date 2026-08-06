@@ -25,7 +25,7 @@ pub use domain::{
 };
 pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
 pub use parser::{canonical_kind, is_uuid, parse_source, schema_for_toolkit, schemas_for_plain};
-pub use schema::{SchemaCatalog, SchemaDefinition, SchemaField};
+pub use schema::{SchemaCatalog, SchemaDefinition, SchemaField, is_schema_discriminator};
 
 /// The role of a module in the configured BG3 load order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
