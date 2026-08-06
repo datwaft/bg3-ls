@@ -367,6 +367,17 @@ impl Coordinator {
         {
             incomplete_kinds.push("Localization");
         }
+        if config.modules.iter().any(|module| {
+            module.role == ModuleRole::Base
+                && config
+                    .game_data
+                    .join(format!("{}.pak", module.name))
+                    .is_file()
+        }) {
+            // These declarations normally live in the configured module packs.
+            // The loose Toolkit export is useful but is not an absence proof.
+            incomplete_kinds.extend(["SpellData", "StatusData", "PassiveData", "InterruptData"]);
+        }
         let workspace = WorkspaceSnapshot::new(
             schema,
             layers,
