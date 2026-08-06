@@ -23,7 +23,7 @@ pub use catalog::{
 pub use discovery::{discover_module, path_is_within, resolve_path};
 pub use domain::{
     Definition, LineMap, ObservedFunction, ParsedFile, Position, Reference, SourceFile,
-    SourceIssue, SourceKind, SymbolTarget, TextRange,
+    SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
 };
 pub use localization::{
     LocalizationCatalog, LocalizedText, read_base_localization_package, read_localization_package,

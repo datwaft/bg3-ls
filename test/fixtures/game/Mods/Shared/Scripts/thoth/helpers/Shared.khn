@@ -1,0 +1,7 @@
+function OverrideHelper(baseValue)
+  return baseValue
+end
+
+function SharedOnly(value)
+  return value
+end

@@ -196,6 +196,7 @@ fn open_document_kind(path: &Path) -> Result<SourceKind, Error> {
     {
         Some("txt") => Ok(SourceKind::PlainStats),
         Some("lsx") => Ok(SourceKind::Lsx),
+        Some("khn") => Ok(SourceKind::Thoth),
         _ => Err(Error::Config(format!(
             "the server cannot attach to this source format: {}",
             path.display()
@@ -591,6 +592,7 @@ fn to_bg3_position(position: Position) -> Bg3Position {
 fn symbol_kind(kind: &str) -> SymbolKind {
     match kind {
         "Equipment" | "ItemGroup" | "NameGroup" | "SpellSet" | "TreasureTable" => SymbolKind::ARRAY,
+        "ThothFunction" => SymbolKind::FUNCTION,
         _ => SymbolKind::OBJECT,
     }
 }

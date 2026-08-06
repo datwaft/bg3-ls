@@ -1,0 +1,7 @@
+function OverrideHelper(projectValue, fallback)
+  return projectValue or fallback
+end
+
+function ProjectOnly(value)
+  return OverrideHelper(DependencyOnly(value), 0)
+end

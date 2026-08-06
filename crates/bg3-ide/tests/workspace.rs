@@ -80,10 +80,10 @@ fn overlay(workspace: &WorkspaceSnapshot, path: &Path, text: &str) -> OverlaySet
     let parsed = parse_source(
         SourceFile {
             path: path.to_owned(),
-            kind: if path.extension().is_some_and(|extension| extension == "lsx") {
-                SourceKind::Lsx
-            } else {
-                SourceKind::PlainStats
+            kind: match path.extension().and_then(|extension| extension.to_str()) {
+                Some("lsx") => SourceKind::Lsx,
+                Some("khn") => SourceKind::Thoth,
+                _ => SourceKind::PlainStats,
             },
         },
         text,
@@ -101,6 +101,183 @@ fn overlay(workspace: &WorkspaceSnapshot, path: &Path, text: &str) -> OverlaySet
         },
     );
     overlays
+}
+
+#[test]
+fn resolves_thoth_overrides_and_cross_format_calls() {
+    let (workspace, stats_path) = fixture_workspace(200);
+    let overlays = OverlaySet::default();
+    let target = SymbolTarget::Named {
+        kind: Some(bg3_index::THOTH_FUNCTION_KIND.into()),
+        name: "OverrideHelper".into(),
+    };
+    let definitions = workspace.resolve(&target, &overlays);
+    assert_eq!(
+        definitions
+            .iter()
+            .map(|definition| definition.module.as_str())
+            .collect::<Vec<_>>(),
+        ["MyMod", "Item and Spell Bug Fixes", "Shared"]
+    );
+    assert_eq!(
+        definitions[0].definition.fields["Parameters"],
+        "projectValue, fallback"
+    );
+
+    let stats = fs::read_to_string(&stats_path).unwrap();
+    let line = stats.lines().nth(7).unwrap();
+    let column = line.find("OverrideHelper").unwrap();
+    let from_stats = workspace.definitions_at(
+        &stats_path,
+        Position {
+            line: 7,
+            character: u32::try_from(column).unwrap(),
+        },
+        &overlays,
+    );
+    assert_eq!(from_stats.len(), 3);
+
+    let thoth_path = fixtures().join("project/Mods/MyMod/Scripts/thoth/helpers/MyMod.khn");
+    let thoth = fs::read_to_string(&thoth_path).unwrap();
+    let call_line = thoth.lines().nth(5).unwrap();
+    let call_column = call_line.find("DependencyOnly").unwrap();
+    let from_thoth = workspace.definitions_at(
+        &thoth_path,
+        Position {
+            line: 5,
+            character: u32::try_from(call_column).unwrap(),
+        },
+        &overlays,
+    );
+    assert_eq!(from_thoth.len(), 1);
+    assert_eq!(from_thoth[0].module, "Item and Spell Bug Fixes");
+
+    let references = workspace.references_at(
+        &definitions[0].path,
+        definitions[0].definition.selection_range.start,
+        false,
+        &overlays,
+    );
+    assert_eq!(references.len(), 3);
+    assert!(
+        references
+            .iter()
+            .any(|reference| reference.path == stats_path)
+    );
+    assert!(references.iter().any(|reference| {
+        reference
+            .path
+            .ends_with("Public/MyMod/Progressions/Progressions.lsx")
+    }));
+    assert!(
+        references
+            .iter()
+            .any(|reference| reference.path == thoth_path)
+    );
+}
+
+#[test]
+fn completes_and_describes_declared_thoth_helpers() {
+    let (workspace, stats_path) = fixture_workspace(200);
+    let stats_text = "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"Over";
+    let stats_overlays = overlay(&workspace, &stats_path, stats_text);
+    let completion = workspace.completion(
+        &stats_path,
+        Position {
+            line: 2,
+            character: 20,
+        },
+        &stats_overlays,
+        true,
+    );
+    let helper = completion
+        .items
+        .iter()
+        .find(|item| item.label == "OverrideHelper")
+        .unwrap();
+    assert_eq!(helper.detail.as_deref(), Some("MyMod"));
+    assert_eq!(
+        helper.new_text,
+        "OverrideHelper(${1:projectValue}, ${2:fallback})"
+    );
+    assert!(helper.snippet);
+
+    let signature_text =
+        "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"OverrideHelper(value,";
+    let signature_overlays = overlay(&workspace, &stats_path, signature_text);
+    let signature = workspace
+        .signature_help(
+            &stats_path,
+            Position {
+                line: 2,
+                character: u32::try_from(signature_text.lines().nth(2).unwrap().len()).unwrap(),
+            },
+            &signature_overlays,
+        )
+        .unwrap();
+    assert_eq!(signature.label, "OverrideHelper(projectValue, fallback)");
+    assert_eq!(signature.active_parameter, 1);
+
+    let thoth_path = fixtures().join("project/Mods/MyMod/Scripts/thoth/helpers/MyMod.khn");
+    let thoth_text = "function Caller(value)\n  return Dep\nend\n";
+    let thoth_overlays = overlay(&workspace, &thoth_path, thoth_text);
+    let thoth_completion = workspace.completion(
+        &thoth_path,
+        Position {
+            line: 1,
+            character: 12,
+        },
+        &thoth_overlays,
+        false,
+    );
+    assert!(
+        thoth_completion
+            .items
+            .iter()
+            .any(|item| item.label == "DependencyOnly")
+    );
+
+    let definitions = workspace.resolve(
+        &SymbolTarget::Named {
+            kind: Some(bg3_index::THOTH_FUNCTION_KIND.into()),
+            name: "OverrideHelper".into(),
+        },
+        &OverlaySet::default(),
+    );
+    let hover = workspace
+        .hover(
+            &definitions[0].path,
+            definitions[0].definition.selection_range.start,
+            &OverlaySet::default(),
+        )
+        .unwrap();
+    assert!(hover.contains("**Thoth function** `OverrideHelper`"));
+    assert!(hover.contains("Signature: `OverrideHelper(projectValue, fallback)`"));
+}
+
+#[test]
+fn thoth_overlays_replace_and_restore_disk_declarations() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Scripts/thoth/helpers/MyMod.khn");
+    let target = SymbolTarget::Named {
+        kind: Some(bg3_index::THOTH_FUNCTION_KIND.into()),
+        name: "OverrideHelper".into(),
+    };
+    let overlays = overlay(
+        &workspace,
+        &path,
+        "function UnsavedHelper(value)\n  return value\nend\n",
+    );
+
+    let with_overlay = workspace.resolve(&target, &overlays);
+    assert_eq!(
+        with_overlay
+            .iter()
+            .map(|definition| definition.module.as_str())
+            .collect::<Vec<_>>(),
+        ["Item and Spell Bug Fixes", "Shared"]
+    );
+    assert_eq!(workspace.resolve(&target, &OverlaySet::default()).len(), 3);
 }
 
 #[test]

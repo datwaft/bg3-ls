@@ -5,9 +5,10 @@
 > make some BG3 mods using Neovim, and I didn't want to spend my time on
 > non-modding things.
 
-`bg3-ls` is a standalone language server for Baldur's Gate 3 Stats files. It
-indexes loose Toolkit and mod data outside the editor process. Neovim stays
-responsive while the server builds or refreshes its index.
+`bg3-ls` is a standalone language server for Baldur's Gate 3 Stats, LSX, and
+Thoth helper files. It indexes loose Toolkit and mod data outside the editor
+process. Neovim stays responsive while the server builds or refreshes its
+index.
 
 The server provides:
 
@@ -16,7 +17,7 @@ The server provides:
   resources, localization, and static game-text previews;
 - references, document symbols, and workspace symbols;
 - schema-aware completion with snippet support;
-- verified signature help for curated Stats functions;
+- verified signature help for curated Stats functions and declared Thoth helpers;
 - high-confidence syntax, schema, value, and typed-reference diagnostics;
 - full-document overlays for unsaved files;
 - recursive file watching and scoped module rebuilds;
@@ -24,13 +25,13 @@ The server provides:
 - disposable XDG caches for fast warm starts.
 
 The server uses [tree-sitter-bg3](https://github.com/datwaft/tree-sitter-bg3)
-for legacy Stats syntax and embedded value expressions. It streams XML with
-`quick-xml`; it does not require a Neovim XML parser.
+for legacy Stats syntax, embedded value expressions, and Thoth helpers. It
+streams XML with `quick-xml`; it does not require a Neovim XML parser.
 
 ## Requirements
 
 - Neovim nightly or Neovim 0.12+
-- the `bg3_stats` filetype from `tree-sitter-bg3`
+- the `bg3_stats`, `bg3_lsx`, and `bg3_thoth` filetypes from `tree-sitter-bg3`
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
@@ -49,7 +50,7 @@ CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
 git clone https://github.com/datwaft/bg3-ls
-git clone --branch v0.1.0 https://github.com/datwaft/tree-sitter-bg3
+git clone --branch v0.2.0 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```
@@ -108,7 +109,7 @@ local project_root = assert(vim.fs.root(vim.uv.cwd(), ".nvim.lua"))
 
 vim.lsp.config("bg3", {
 	cmd = { "bg3-ls" },
-	filetypes = { "bg3_stats", "bg3_lsx" },
+	filetypes = { "bg3_stats", "bg3_lsx", "bg3_thoth" },
 	workspace_required = true,
 
 	-- Dependency files can be outside the project ancestor tree. Always return
@@ -142,9 +143,10 @@ Standard LSP completion works with Blink's LSP source without extra setup.
 Fidget displays the server's standard schema, discovery, parsing, module-build,
 and publication progress.
 
-Install `tree-sitter-bg3` as a Neovim plugin to detect `bg3_lsx` files. The
-plugin keeps XML as the outer parser and injects `bg3_stats_value` into selected
-`LSString` fields.
+Install `tree-sitter-bg3` as a Neovim plugin to detect `bg3_lsx` and
+`bg3_thoth` files. The plugin keeps XML as the outer LSX parser, injects
+`bg3_stats_value` into selected `LSString` fields, and parses `.khn` helpers
+with the dedicated Thoth grammar.
 
 ## Load order
 
@@ -171,7 +173,8 @@ The server reads:
 - Stats and UUID-object enumeration catalogs;
 - Toolkit `.stats` and `.tbl` files;
 - legacy `Public/*/Stats/Generated/Data/*.txt` files;
-- relevant loose `.lsx` resources below `Public` and `Mods`; and
+- relevant loose `.lsx` resources below `Public` and `Mods`;
+- loose `Mods/<module>/Scripts/thoth/**/*.khn` helpers; and
 - loose localization XML for the configured language;
 - the canonical configured-language LOCA catalog in the base-game localization
   package.
@@ -184,11 +187,16 @@ uses normal module precedence and replaces packed base text. The preview shows
 unresolved description parameters as source text because the server does not
 run game logic.
 
-Open Stats and LSX files replace their disk records with unsaved overlays.
-Closing a buffer restores its disk record. In supported LSX values, the server
-provides definition, hover, references, function completion, typed symbol
-completion, and signature help. It does not apply legacy Stats schema
-diagnostics to LSX documents.
+Open Stats, LSX, and Thoth files replace their disk records with unsaved
+overlays. Closing a buffer restores its disk record. Thoth helper declarations
+provide definition, hover, references, function completion, declared-parameter
+signature help, document symbols, and workspace symbols. The server applies
+the configured module precedence to helper overrides. It does not infer Thoth
+parameter or return types and does not publish Thoth diagnostics.
+
+In supported LSX values, the server provides definition, hover, references,
+function completion, typed symbol completion, and signature help. It does not
+apply legacy Stats schema diagnostics to LSX documents.
 
 Toolkit `.stats` and `.tbl` files and localization XML remain readable
 navigation targets. The BG3 client does not attach to those XML documents.

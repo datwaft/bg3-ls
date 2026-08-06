@@ -11,7 +11,7 @@ use crate::Error;
 use crate::catalog::{field_kind, function_spec, is_lsx_value_field};
 use crate::domain::{
     Definition, LineMap, ObservedFunction, ParsedFile, Position, Reference, SourceFile,
-    SourceIssue, SourceKind, SymbolTarget, TextRange,
+    SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
 };
 use crate::schema::{SchemaCatalog, SchemaDefinition};
 use crate::xml::{attribute_range, attributes};
@@ -29,8 +29,98 @@ pub fn parse_source(
         SourceKind::PlainStats => parse_plain(source, text, schema),
         SourceKind::ToolkitStats | SourceKind::Table => parse_toolkit(source, text, schema),
         SourceKind::Lsx => parse_lsx(source, text),
+        SourceKind::Thoth => parse_thoth(source, text),
         SourceKind::Localization => parse_localization(source, text, language),
     }
+}
+
+/// Extracts top-level helper declarations and call references from Thoth source.
+fn parse_thoth(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
+    let mut parser = Parser::new();
+    parser.set_language(&tree_sitter_bg3::BG3_THOTH_LANGUAGE.into())?;
+    let tree = parser
+        .parse(text, None)
+        .ok_or_else(|| Error::Parse("the Thoth parser returned no tree".into()))?;
+    let root = tree.root_node();
+    let mut definitions = Vec::new();
+    let mut cursor = root.walk();
+    for node in root.named_children(&mut cursor) {
+        if node.kind() != "function_declaration" {
+            continue;
+        }
+        let Some(name_node) = field(node, "name") else {
+            continue;
+        };
+        let name = name_node.utf8_text(text.as_bytes())?.to_owned();
+        let parameters = field(node, "parameters")
+            .map(|parameters| thoth_parameters(parameters, text))
+            .unwrap_or_default();
+        let mut fields = BTreeMap::new();
+        fields.insert("Parameters".into(), parameters.join(", "));
+        definitions.push(Definition {
+            kind: THOTH_FUNCTION_KIND.into(),
+            name,
+            range: node_range(node),
+            selection_range: node_range(name_node),
+            fields,
+            field_ranges: BTreeMap::new(),
+            aliases: Vec::new(),
+            uuid: None,
+            parent: None,
+            schema_id: None,
+        });
+    }
+
+    let references = thoth_call_references(root, text)?;
+    Ok(ParsedFile {
+        source,
+        definitions,
+        references,
+        observed_functions: Vec::new(),
+        // Thoth syntax diagnostics are intentionally outside the first indexing scope.
+        issues: Vec::new(),
+    })
+}
+
+/// Returns declared parameter names without inventing types from function bodies.
+fn thoth_parameters(node: Node<'_>, text: &str) -> Vec<String> {
+    let mut parameters = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "identifier" | "vararg_expression" => parameters.push(
+                child
+                    .utf8_text(text.as_bytes())
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            _ => {}
+        }
+    }
+    parameters
+}
+
+/// Collects every call name, including nested calls, as a semantic helper target.
+fn thoth_call_references(root: Node<'_>, text: &str) -> Result<Vec<Reference>, Error> {
+    let mut references = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "function_call"
+            && let Some(name) = field(node, "name")
+        {
+            references.push(Reference {
+                target: SymbolTarget::Named {
+                    kind: Some(THOTH_FUNCTION_KIND.into()),
+                    name: name.utf8_text(text.as_bytes())?.to_owned(),
+                },
+                range: node_range(name),
+                context: "function-call".into(),
+            });
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    Ok(references)
 }
 
 /// Parses legacy plain-text Stats with the generated Tree-sitter grammar.
@@ -619,6 +709,23 @@ fn parse_value(
     let mut pending = vec![tree.root_node()];
     while let Some(node) = pending.pop() {
         match node.kind() {
+            "call_expression" => {
+                if let Some(function) = field(node, "function") {
+                    let name = function.utf8_text(value.as_bytes())?;
+                    // Curated functions already have hover, completion, and signature
+                    // contracts. Only unknown calls can resolve to a mod helper.
+                    if function_spec(name).is_none() {
+                        references.push(Reference {
+                            target: SymbolTarget::Named {
+                                kind: Some(THOTH_FUNCTION_KIND.into()),
+                                name: name.to_owned(),
+                            },
+                            range: translate_range(node_range(function), origin),
+                            context: "function-call".into(),
+                        });
+                    }
+                }
+            }
             "identifier" if !is_function_name(node) => {
                 let name = node.utf8_text(value.as_bytes())?.to_owned();
                 let call_kind = call_context(node, value);

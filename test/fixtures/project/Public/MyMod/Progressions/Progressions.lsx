@@ -4,7 +4,7 @@
     <node id="root">
       <children>
         <node id="Progression">
-          <attribute id="Boosts" type="LSString" value="ActionResource(ActionPoint,1);UnlockSpell(Target_Test)"/>
+          <attribute id="Boosts" type="LSString" value="ActionResource(ActionPoint,1);UnlockSpell(Target_Test);OverrideHelper(context.Source,0)"/>
           <attribute id="Name" type="LSString" value="TestProgression"/>
           <attribute id="PassivesAdded" type="LSString" value="CHAINED"/>
           <attribute id="Selectors" type="LSString" value="SelectSpells(eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee,1,0)"/>
