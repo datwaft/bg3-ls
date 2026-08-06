@@ -390,6 +390,36 @@ data "DisplayName" ""
 }
 
 #[test]
+fn validates_each_enumeration_list_member() {
+    let (workspace, path) = fixture_workspace(200);
+    let valid_text = r#"new entry "VALID_LISTS"
+type "PassiveData"
+data "Modes" "Yes;No"
+data "ImplicitModes" "No; Yes"
+"#;
+    let valid_overlays = overlay(&workspace, &path, valid_text);
+    let valid_diagnostics =
+        workspace.diagnostics(&path, &valid_overlays, Some(DiagnosticSeverity::Warning));
+    assert!(
+        valid_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "invalid-enum"),
+        "valid list members must pass enum validation: {valid_diagnostics:?}"
+    );
+
+    let invalid_text = r#"new entry "INVALID_LIST"
+type "PassiveData"
+data "Modes" "Yes;Maybe;No"
+"#;
+    let invalid_overlays = overlay(&workspace, &path, invalid_text);
+    let invalid_diagnostics =
+        workspace.diagnostics(&path, &invalid_overlays, Some(DiagnosticSeverity::Warning));
+    assert!(invalid_diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "invalid-enum" && diagnostic.message.contains("`Maybe`")
+    }));
+}
+
+#[test]
 fn syntax_diagnostics_can_disable_unresolved_references() {
     let (workspace, path) = fixture_workspace(200);
     let text = "new entry \"BROKEN\"\ntype \"PassiveData\"\ndata \"Boosts\" \"ApplyStatus(MISSING";

@@ -162,12 +162,29 @@ fn field_value_error(
     }
     if let Some(enumeration) = field.enumeration_type_name.as_ref()
         && let Some(values) = workspace.schema.enumerations.get(enumeration)
-        && !values.iter().any(|candidate| candidate == value)
     {
-        return Some((
-            "invalid-enum",
-            format!("`{value}` is not a member of enumeration `{enumeration}`."),
-        ));
+        let invalid_member = if field
+            .field_type
+            .as_deref()
+            .is_some_and(|field_type| field_type.eq_ignore_ascii_case("EnumerationList"))
+        {
+            let delimiter = field
+                .delimiter
+                .as_deref()
+                .filter(|delimiter| !delimiter.is_empty())
+                .unwrap_or(";");
+            value.split(delimiter).map(str::trim).find(|member| {
+                !member.is_empty() && !values.iter().any(|candidate| candidate == member)
+            })
+        } else {
+            (!values.iter().any(|candidate| candidate == value)).then_some(value)
+        };
+        if let Some(invalid_member) = invalid_member {
+            return Some((
+                "invalid-enum",
+                format!("`{invalid_member}` is not a member of enumeration `{enumeration}`."),
+            ));
+        }
     }
     let field_type = field.field_type.as_deref()?.to_ascii_lowercase();
     match field_type.as_str() {

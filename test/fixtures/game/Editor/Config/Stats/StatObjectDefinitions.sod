@@ -9,6 +9,8 @@
         <field_definition name="Boosts" type="String" autocomplete_type="Boosts" description="Passive effects" />
         <field_definition name="Enabled" type="Boolean" enumeration_type_name="YesNo" />
         <field_definition name="Flag" type="Boolean" />
+        <field_definition name="Modes" type="EnumerationList" enumeration_type_name="YesNo" delimiter=";" />
+        <field_definition name="ImplicitModes" type="EnumerationList" enumeration_type_name="YesNo" />
         <field_definition name="DisplayName" type="TranslatedString" description="Visible passive name" />
         <field_definition name="ResourceId" type="Id" object_type="ActionResource" />
         <field_definition name="Amount" type="Integer" min_value="0" max_value="2" />
