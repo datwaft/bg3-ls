@@ -314,6 +314,37 @@ fn reports_curated_signatures_and_caps_completion() {
 }
 
 #[test]
+fn completes_and_describes_explicit_target_overloads() {
+    let (workspace, path) = fixture_workspace(200);
+    let text = r#"new entry "SHIELD"
+type "StatusData"
+
+new entry "TEST"
+type "PassiveData"
+data "Boosts" "ApplyStatus(OBSERVER_OBSERVER,SHI"#;
+    let overlays = overlay(&workspace, &path, text);
+    let line = text.lines().nth(5).unwrap();
+    let position = Position {
+        line: 5,
+        character: u32::try_from(line.len()).unwrap(),
+    };
+    let completion = workspace.completion(&path, position, &overlays, false);
+    assert!(completion.items.iter().any(|item| item.label == "SHIELD"));
+
+    let help = workspace
+        .signature_help(&path, position, &overlays)
+        .unwrap();
+    assert_eq!(help.active_parameter, 1);
+    assert!(help.label.starts_with("ApplyStatus(target, status"));
+
+    let diagnostics = workspace.diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning));
+    assert!(diagnostics.iter().all(|diagnostic| {
+        diagnostic.code != "unresolved-reference"
+            || !diagnostic.message.contains("OBSERVER_OBSERVER")
+    }));
+}
+
+#[test]
 fn reports_verified_schema_and_reference_problems() {
     let (workspace, path) = fixture_workspace(200);
     let text = r#"new entry "BROKEN"

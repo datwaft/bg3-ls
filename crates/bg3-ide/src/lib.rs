@@ -1,6 +1,5 @@
 //! Editor-neutral language operations over immutable BG3 module indexes.
 
-mod catalog;
 mod diagnostics;
 mod language;
 

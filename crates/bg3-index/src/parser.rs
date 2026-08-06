@@ -8,6 +8,7 @@ use tree_sitter::{Node, Parser};
 use uuid::Uuid;
 
 use crate::Error;
+use crate::catalog::{field_kind, function_spec};
 use crate::domain::{
     Definition, LineMap, ObservedFunction, ParsedFile, Position, Reference, SourceFile,
     SourceIssue, SourceKind, SymbolTarget, TextRange,
@@ -573,10 +574,16 @@ fn parse_value(
         match node.kind() {
             "identifier" if !is_function_name(node) => {
                 let name = node.utf8_text(value.as_bytes())?.to_owned();
+                let call_kind = call_context(node, value);
+                if call_kind == Some(None) {
+                    continue;
+                }
                 references.push(Reference {
                     target: named_target(
                         name,
-                        call_context(node, value).or_else(|| field_kind(field_name)),
+                        call_kind
+                            .flatten()
+                            .or_else(|| field_kind(field_name).map(str::to_owned)),
                     ),
                     range: translate_range(node_range(node), origin),
                     context: format!("field:{field_name}"),
@@ -607,10 +614,16 @@ fn parse_value(
                     .is_some_and(|parent| parent.kind() == "string_literal") =>
             {
                 let name = node.utf8_text(value.as_bytes())?.to_owned();
+                let call_kind = call_context(node, value);
+                if call_kind == Some(None) {
+                    continue;
+                }
                 references.push(Reference {
                     target: named_target(
                         name,
-                        call_context(node, value).or_else(|| field_kind(field_name)),
+                        call_kind
+                            .flatten()
+                            .or_else(|| field_kind(field_name).map(str::to_owned)),
                     ),
                     range: translate_range(node_range(node), origin),
                     context: format!("field:{field_name}"),
@@ -664,7 +677,7 @@ fn apply_schema_reference_kinds(
 }
 
 /// Determines the typed symbol kind for a reference inside a function argument.
-fn call_context(node: Node<'_>, source: &str) -> Option<String> {
+fn call_context(node: Node<'_>, source: &str) -> Option<Option<String>> {
     let mut current = Some(node);
     while let Some(candidate) = current {
         if candidate.kind() == "call_expression" {
@@ -674,10 +687,18 @@ fn call_context(node: Node<'_>, source: &str) -> Option<String> {
                 return None;
             }
             let mut cursor = arguments.walk();
+            let argument_count = arguments.named_child_count();
+            let first_argument = arguments
+                .named_child(0)
+                .and_then(|argument| argument.utf8_text(source.as_bytes()).ok());
             for (index, argument) in arguments.named_children(&mut cursor).enumerate() {
                 if is_descendant(node, argument) {
                     let name = function.utf8_text(source.as_bytes()).ok()?;
-                    return parameter_kind(name, index);
+                    let form = function_spec(name)?.form_for_call(argument_count, first_argument);
+                    return form
+                        .parameters
+                        .get(index)
+                        .map(|parameter| parameter.kind.map(str::to_owned));
                 }
             }
             return None;
@@ -685,37 +706,6 @@ fn call_context(node: Node<'_>, source: &str) -> Option<String> {
         current = candidate.parent();
     }
     None
-}
-
-/// Returns the symbol kind assigned to a curated function parameter.
-fn parameter_kind(name: &str, index: usize) -> Option<String> {
-    if index != 0 {
-        return None;
-    }
-    let kind = match name {
-        "AddPassive" | "HasPassive" | "RemovePassive" | "UnlockPassive" => "PassiveData",
-        "ApplyStatus" | "ForceStatus" | "HasAnyStatus" | "HasStatus" | "IsImmuneToStatus"
-        | "RemoveStatus" => "StatusData",
-        "RemoveSpell" | "UnlockSpell" | "UseSpell" => "SpellData",
-        "UnlockInterrupt" => "InterruptData",
-        "ActionResource" => "ActionResource",
-        _ => return None,
-    };
-    Some(kind.into())
-}
-
-/// Returns the typed symbol kind assigned to a known Stats field.
-fn field_kind(name: &str) -> Option<String> {
-    let kind = match name {
-        "ContainerSpells" | "Spells" => "SpellData",
-        "InterruptPrototype" => "InterruptData",
-        "Passives" | "PassivesAdded" | "PassivesOnEquip" => "PassiveData",
-        "PersonalStatusImmunities" | "StatusImmunities" | "StatusInInventory" | "StatusOnEquip" => {
-            "StatusData"
-        }
-        _ => return None,
-    };
-    Some(kind.into())
 }
 
 /// Discovers function names and argument-count ranges without inventing signatures.
