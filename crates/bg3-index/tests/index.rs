@@ -141,6 +141,40 @@ fn classifies_status_groups_separately_from_status_declarations() {
 }
 
 #[test]
+fn classifies_explicit_target_function_overloads() {
+    let root = fixtures();
+    let parsed = parse_source(
+        SourceFile {
+            path: root.join("project/Public/MyMod/Stats/Generated/Data/Passive.txt"),
+            kind: SourceKind::PlainStats,
+        },
+        "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"ApplyStatus(OBSERVER_OBSERVER,SHIELD,100,1);UseSpell(OBSERVER_SOURCE,Target_Test,true,true,true);ApplyStatus(TEST_STATUS,100,1)\"\n",
+        &load_schema(&root),
+        "English",
+    )
+    .unwrap();
+
+    for (name, kind) in [
+        ("SHIELD", "StatusData"),
+        ("Target_Test", "SpellData"),
+        ("TEST_STATUS", "StatusData"),
+    ] {
+        assert!(parsed.references.iter().any(|reference| {
+            reference.target
+                == SymbolTarget::Named {
+                    kind: Some(kind.into()),
+                    name: name.into(),
+                }
+        }));
+    }
+    for selector in ["OBSERVER_OBSERVER", "OBSERVER_SOURCE"] {
+        assert!(parsed.references.iter().all(|reference| {
+            !matches!(&reference.target, SymbolTarget::Named { name, .. } if name == selector)
+        }));
+    }
+}
+
+#[test]
 fn indexes_tables_lsx_and_localization() {
     let root = fixtures();
     let game = root.join("game");

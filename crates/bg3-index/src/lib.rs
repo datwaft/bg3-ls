@@ -1,6 +1,7 @@
 //! BG3 source extraction, schema metadata, module indexes, and persistent caches.
 
 mod cache;
+mod catalog;
 mod discovery;
 mod domain;
 mod module;
@@ -14,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use cache::{CacheStats, CacheStore};
+pub use catalog::{
+    FUNCTIONS, FunctionForm, FunctionSpec, ParameterSpec, field_kind, function_spec,
+};
 pub use discovery::{discover_module, path_is_within, resolve_path};
 pub use domain::{
     Definition, LineMap, ObservedFunction, ParsedFile, Position, Reference, SourceFile,

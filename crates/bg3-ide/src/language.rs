@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use bg3_index::{Definition, Position, SchemaDefinition, SchemaField, SymbolTarget, TextRange};
-
-use crate::catalog::{FUNCTIONS, field_kind, function_spec};
 use crate::{OverlaySet, WorkspaceSnapshot, range_contains};
+use bg3_index::{
+    Definition, FUNCTIONS, Position, SchemaDefinition, SchemaField, SymbolTarget, TextRange,
+    field_kind, function_spec,
+};
 
 /// The semantic category of one completion result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,17 +126,18 @@ impl WorkspaceSnapshot {
             .unwrap_or(before);
         let context = call_context(expression)?;
         let function = function_spec(&context.function)?;
+        let form = function.form_for_call(context.argument + 1, context.first_argument.as_deref());
         let mut label = format!("{}(", function.name);
         label.push_str(
-            &function
+            &form
                 .parameters
                 .iter()
                 .map(|parameter| parameter.label)
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        if function.variadic {
-            if !function.parameters.is_empty() {
+        if form.variadic {
+            if !form.parameters.is_empty() {
                 label.push_str(", ");
             }
             label.push_str("...");
@@ -144,7 +146,7 @@ impl WorkspaceSnapshot {
         Some(SignatureHelp {
             label,
             documentation: function.documentation.into(),
-            parameters: function
+            parameters: form
                 .parameters
                 .iter()
                 .map(|parameter| parameter.label.into())
@@ -325,10 +327,11 @@ impl WorkspaceSnapshot {
 
         if let Some(call) = call_context(value_before_cursor)
             && let Some(function) = function_spec(&call.function)
-            && let Some(kind) = function
-                .parameters
-                .get(call.argument)
-                .and_then(|parameter| parameter.kind)
+            && let Some(kind) = function.parameter_kind(
+                call.argument,
+                call.argument + 1,
+                call.first_argument.as_deref(),
+            )
         {
             return self.complete_symbols(kind, prefix, position, overlays);
         }
@@ -342,8 +345,9 @@ impl WorkspaceSnapshot {
                 let mut item =
                     basic_item(function.name, prefix, position, CompletionKind::Function);
                 item.documentation = Some(function.documentation.into());
-                if snippets && !function.parameters.is_empty() {
-                    let parameters = function
+                let form = function.default_form;
+                if snippets && !form.parameters.is_empty() {
+                    let parameters = form
                         .parameters
                         .iter()
                         .enumerate()
@@ -476,6 +480,7 @@ struct DataContext<'a> {
 struct CallContext {
     function: String,
     argument: usize,
+    first_argument: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -562,7 +567,7 @@ fn data_context(line: &str) -> Option<DataContext<'_>> {
 /// Finds the innermost incomplete function call and active argument.
 fn call_context(value: &str) -> Option<CallContext> {
     let bytes = value.as_bytes();
-    let mut stack = Vec::<(String, usize)>::new();
+    let mut stack = Vec::<(String, usize, usize)>::new();
     let mut quote = None;
     let mut cursor = 0;
     while cursor < bytes.len() {
@@ -588,11 +593,11 @@ fn call_context(value: &str) -> Option<CallContext> {
                     start -= 1;
                 }
                 if start < end {
-                    stack.push((value[start..end].to_owned(), 0));
+                    stack.push((value[start..end].to_owned(), 0, cursor + 1));
                 }
             }
             b',' => {
-                if let Some((_, argument)) = stack.last_mut() {
+                if let Some((_, argument, _)) = stack.last_mut() {
                     *argument += 1;
                 }
             }
@@ -605,7 +610,38 @@ fn call_context(value: &str) -> Option<CallContext> {
     }
     stack
         .pop()
-        .map(|(function, argument)| CallContext { function, argument })
+        .map(|(function, argument, arguments_start)| CallContext {
+            function,
+            argument,
+            first_argument: first_call_argument(&value[arguments_start..]),
+        })
+}
+
+/// Extracts the first top-level argument from an incomplete call.
+fn first_call_argument(arguments: &str) -> Option<String> {
+    let bytes = arguments.as_bytes();
+    let mut depth = 0_u16;
+    let mut quote = None;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if let Some(active) = quote {
+            if byte == active && bytes.get(index.wrapping_sub(1)) != Some(&b'\\') {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'(' => depth += 1,
+            b')' if depth > 0 => depth -= 1,
+            b',' | b')' if depth == 0 => {
+                let value = arguments[..index].trim();
+                return (!value.is_empty()).then(|| value.to_owned());
+            }
+            _ => {}
+        }
+    }
+    let value = arguments.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 /// Returns the last declaration that starts before the cursor and still contains it.
