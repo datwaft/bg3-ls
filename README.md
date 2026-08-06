@@ -57,6 +57,44 @@ Confirm that `bg3-ls` is on `PATH`:
 bg3-ls --version
 ```
 
+## Configuration
+
+Put shared workspace configuration in `bg3-ls.json` at the project root:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/datwaft/bg3-ls/main/schemas/bg3-ls.schema.json",
+  "game_data": "/path/to/Baldurs Gate 3/Data",
+  "base_modules": ["Shared", "SharedDev", "Gustav", "GustavDev", "GustavX"],
+  "project": {
+    "name": "MyMod",
+    "dependencies": [
+      {
+        "name": "Item and Spell Bug Fixes",
+        "path": "../ItemAndSpellBugFixes"
+      }
+    ],
+    "diagnostics": {
+      "unresolved_references": "warning"
+    }
+  },
+  "localization": {
+    "language": "English"
+  },
+  "max_workspace_symbols": 200,
+  "max_completion_items": 200
+}
+```
+
+Inline LSP options override JSON fields. JSON fields override built-in defaults.
+Nested objects merge by field, while an inline list replaces the complete JSON
+list. The server rejects `null` values because configuration deletion has no
+defined meaning.
+
+Relative dependency paths resolve against the workspace root. `game_data` must
+be absolute. The server rejects unknown keys, duplicate modules, missing roots,
+and unsupported diagnostic severities.
+
 ## Neovim configuration
 
 No Neovim integration plugin is required. Put the complete machine and project
@@ -76,33 +114,6 @@ vim.lsp.config("bg3", {
 		on_dir(project_root)
 	end,
 
-	init_options = {
-		game_data = "/path/to/Baldurs Gate 3/Data",
-		base_modules = {
-			"Shared",
-			"SharedDev",
-			"Gustav",
-			"GustavDev",
-			"GustavX",
-		},
-		project = {
-			name = "MyMod",
-			dependencies = {
-				{
-					name = "Item and Spell Bug Fixes",
-					path = "../ItemAndSpellBugFixes",
-				},
-			},
-			diagnostics = {
-				unresolved_references = "warning",
-			},
-		},
-		localization = {
-			language = "English",
-		},
-		max_workspace_symbols = 200,
-		max_completion_items = 200,
-	},
 })
 
 vim.lsp.enable("bg3")
@@ -118,10 +129,11 @@ Open the project and use `:trust` to approve its `.nvim.lua`. Relative
 dependency paths resolve against `project_root`. Dependencies do not need their
 own `.nvim.lua`.
 
+`vim.lsp.config` can supply partial `init_options` when a project needs a local
+override. Current inline-only configurations continue to work.
+
 `unresolved_references` accepts `false`, `"error"`, `"warning"`,
-`"information"`, or `"hint"`. All option tables reject unknown keys. The
-server also rejects duplicate module names, relative `game_data` paths, missing
-module roots, and missing schema catalogs during initialization.
+`"information"`, or `"hint"`.
 
 Standard LSP completion works with Blink's LSP source without extra setup.
 Fidget displays the server's standard schema, discovery, parsing, module-build,

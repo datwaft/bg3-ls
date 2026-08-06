@@ -17,7 +17,7 @@ use tower_lsp_server::{Client, LanguageServer};
 use url::Url;
 
 use crate::Error;
-use crate::config::{InitOptions, ResolvedConfig};
+use crate::config::ResolvedConfig;
 use crate::coordinator::{BuildState, Coordinator};
 
 /// A cloneable protocol adapter around shared server state.
@@ -201,19 +201,16 @@ impl LanguageServer for Backend {
         self.inner
             .snippet_support
             .store(snippet_support, Ordering::Release);
-        let options: InitOptions =
-            serde_json::from_value(params.initialization_options.ok_or_else(|| {
-                jsonrpc::Error::invalid_params("initializationOptions are required")
-            })?)
-            .map_err(|error| jsonrpc::Error::invalid_params(error.to_string()))?;
         let root_uri = params
             .workspace_folders
             .as_ref()
             .and_then(|folders| folders.first().map(|folder| &folder.uri))
             .or(params.root_uri.as_ref())
             .ok_or_else(|| jsonrpc::Error::invalid_params("a workspace root is required"))?;
-        let config =
-            Arc::new(ResolvedConfig::resolve(options, root_uri.as_str()).map_err(rpc_error)?);
+        let config = Arc::new(
+            ResolvedConfig::load(params.initialization_options, root_uri.as_str())
+                .map_err(rpc_error)?,
+        );
         *self.inner.config.write().await = Some(config);
 
         Ok(InitializeResult {

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/datwaft/bg3-ls/main/schemas/bg3-ls.schema.json",
+  "title": "bg3-ls workspace configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "game_data": {
+      "type": "string",
+      "description": "Absolute path to the Baldur's Gate 3 Data directory."
+    },
+    "base_modules": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "project": {
+      "$ref": "#/$defs/project"
+    },
+    "localization": {
+      "$ref": "#/$defs/localization"
+    },
+    "max_workspace_symbols": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 200
+    },
+    "max_completion_items": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 200
+    }
+  },
+  "$defs": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependency"
+          },
+          "default": []
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/diagnostics"
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unresolved_references": {
+          "oneOf": [
+            {
+              "const": false
+            },
+            {
+              "enum": ["error", "warning", "information", "hint"]
+            }
+          ],
+          "default": "warning"
+        }
+      }
+    },
+    "localization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "type": "string",
+          "minLength": 1,
+          "default": "English"
+        }
+      }
+    }
+  }
+}
