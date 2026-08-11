@@ -32,15 +32,15 @@ parser.
 ## Requirements
 
 - Neovim nightly or Neovim 0.12+
-- the `bg3_stats`, `bg3_lsx`, `bg3_thoth`, and `bg3_osiris` filetypes from
-  `tree-sitter-bg3` 0.3.0
+- the `bg3_stats`, `bg3_lsx`, `bg3_localization`, `bg3_thoth`, and
+  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.3.0
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
-The server reads one narrow binary source: the canonical LOCA entry in the
-configured base-game `Localization/<Language>.pak`. It uses that text only for
-hover previews. It does not extract packages or read general `.pak`, `.loca`,
-`.lsf`, or other binary resources.
+The server reads two narrow binary sources for hover previews: the canonical
+LOCA entry in `Localization/<Language>.pak` and the static `LSTag` glossary in
+`Game.pak`. It reads only those selected package entries. It does not extract
+packages or index general `.pak`, `.loca`, `.lsf`, or other binary resources.
 
 ## Install
 
@@ -139,7 +139,7 @@ local project_root = assert(vim.fs.root(vim.uv.cwd(), ".nvim.lua"))
 
 vim.lsp.config("bg3", {
 	cmd = { "bg3-ls" },
-	filetypes = { "bg3_stats", "bg3_lsx", "bg3_thoth", "bg3_osiris" },
+	filetypes = { "bg3_stats", "bg3_lsx", "bg3_localization", "bg3_thoth", "bg3_osiris" },
 	workspace_required = true,
 
 	-- Dependency files can be outside the project ancestor tree. Always return
@@ -209,7 +209,8 @@ The server reads:
 - loose `Mods/<module>/Story/RawFiles/Goals/*.txt` Osiris goals;
 - loose localization XML for the configured language;
 - the canonical configured-language LOCA catalog in the base-game localization
-  package.
+  package; and
+- static tooltip-key localization handles from the canonical game UI glossary.
 
 Declaration hover keeps the technical symbol information first. When an
 effective Stats declaration has `DisplayName`, `Description`, or
@@ -218,6 +219,13 @@ preview resolves `using` inheritance and module overrides. Loose localization
 uses normal module precedence and replaces packed base text. The preview shows
 unresolved description parameters as source text because the server does not
 run game logic.
+
+Hover on a localization `LSTag` `Tooltip` value supports encoded
+`&lt;...&gt;`, mixed `&lt;...>`, and literal `<...>` opening tags. Untyped
+keys resolve static glossary title and description handles through the
+configured language. Supported `Type` values resolve through the existing
+load-order-aware Stats and resource indexes. Glossary entries that depend on
+live UI or character state do not produce a preview.
 
 Open Stats, LSX, Thoth, and Osiris files replace their disk records with
 unsaved overlays. Closing a buffer restores its disk record. Thoth helper
@@ -241,8 +249,9 @@ In supported LSX values, the server provides definition, hover, references,
 function completion, typed symbol completion, and signature help. It does not
 apply legacy Stats schema diagnostics to LSX documents.
 
-Toolkit `.stats` and `.tbl` files and localization XML remain readable
-navigation targets. The BG3 client does not attach to those XML documents.
+Toolkit `.stats` and `.tbl` files remain readable navigation targets. The BG3
+client attaches to localization XML for tooltip hover and references. It does
+not attach to Toolkit Stats XML documents.
 
 The watcher coalesces events for 250 ms. It rebuilds only affected modules and
 publishes a complete immutable snapshot atomically. Queries continue to use the
@@ -341,11 +350,11 @@ resource formats, automatic dependency discovery, Intel macOS, or native Windows
 LSX support uses a conservative field list. It does not provide an LSX schema,
 field-name completion, LSX diagnostics, or XML entity transformation for
 injected highlighting.
-Packed base resources are not visible, so diagnostics intentionally skip
+Most packed base resources are not visible, so diagnostics intentionally skip
 generic expression identifiers, root-template UUID resolution, required
 fields, and inferred function arity. Static tooltip previews do not evaluate
-`DescriptionParams`, select runtime gender variants, or claim exact game UI
-rendering.
+`DescriptionParams`, live data bindings, runtime values, gender variants, or
+BG3 UI rendering.
 
 Osiris support does not execute or compile Story, provide control-flow
 analysis, load a complete engine API catalog, or infer aliases from

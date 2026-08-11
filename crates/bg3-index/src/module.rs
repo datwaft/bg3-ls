@@ -198,6 +198,7 @@ impl ModuleIndex {
             SymbolTarget::Named { kind: None, name } => {
                 self.by_name.get(name).or_else(|| self.by_alias.get(name))
             }
+            SymbolTarget::Tooltip { .. } => None,
             SymbolTarget::Uuid(uuid) => self.by_uuid.get(uuid),
             SymbolTarget::OsirisGoal { name } => self.by_osiris_goal.get(name),
             SymbolTarget::OsirisCallable { name, arity } => {

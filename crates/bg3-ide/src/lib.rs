@@ -11,7 +11,7 @@ use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, OSIRIS_DATABASE_KIND,
     OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, ParsedFile,
     Position, Reference, SchemaCatalog, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
-    canonical_kind,
+    TooltipCatalog, canonical_kind,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -107,6 +107,7 @@ pub struct WorkspaceSnapshot {
     pub max_workspace_symbols: usize,
     pub max_completion_items: usize,
     base_localization: Arc<LocalizationCatalog>,
+    tooltips: Arc<TooltipCatalog>,
     incomplete_kinds: BTreeSet<String>,
 }
 
@@ -126,6 +127,7 @@ impl WorkspaceSnapshot {
             max_workspace_symbols,
             max_completion_items,
             base_localization: Arc::new(LocalizationCatalog::default()),
+            tooltips: Arc::new(TooltipCatalog::default()),
             incomplete_kinds: BTreeSet::new(),
         }
     }
@@ -144,6 +146,22 @@ impl WorkspaceSnapshot {
     /// Shares the immutable packed catalog with a scoped workspace rebuild.
     pub fn base_localization(&self) -> Arc<LocalizationCatalog> {
         Arc::clone(&self.base_localization)
+    }
+
+    /// Adds the static game tooltip glossary that has no navigable source location.
+    pub fn with_tooltips(mut self, catalog: Arc<TooltipCatalog>) -> Self {
+        self.tooltips = catalog;
+        self
+    }
+
+    /// Returns the number of static game tooltip keys.
+    pub fn tooltip_count(&self) -> usize {
+        self.tooltips.len()
+    }
+
+    /// Shares the immutable static tooltip glossary with a scoped workspace rebuild.
+    pub fn tooltips(&self) -> Arc<TooltipCatalog> {
+        Arc::clone(&self.tooltips)
     }
 
     /// Marks symbol kinds whose visible loose sources omit packed data.
@@ -241,6 +259,9 @@ impl WorkspaceSnapshot {
             return Some(field);
         }
         let target = self.target_at(path, position, overlays)?;
+        if let SymbolTarget::Tooltip { name } = &target {
+            return self.tooltip_tag_hover(name, overlays);
+        }
         if let SymbolTarget::OsirisDatabase { .. } = &target {
             return self.osiris_database_hover(&target, overlays);
         }
@@ -428,6 +449,34 @@ impl WorkspaceSnapshot {
             ));
         }
         markdown.push_str("\n\n*Static preview. Game logic and UI formatting are not evaluated.*");
+        Some(markdown)
+    }
+
+    /// Renders one static game glossary entry without evaluating UI data bindings.
+    fn tooltip_tag_hover(&self, name: &str, overlays: &OverlaySet) -> Option<String> {
+        let tooltip = self.tooltips.get(name)?;
+        let title = tooltip
+            .title
+            .as_deref()
+            .and_then(|handle| self.localized_value(handle, overlays));
+        let description = tooltip
+            .description
+            .as_deref()
+            .and_then(|handle| self.localized_value(handle, overlays));
+        if title.is_none() && description.is_none() {
+            return None;
+        }
+
+        let mut markdown = format!("**Game tooltip** `{name}`");
+        if let Some(title) = title {
+            markdown.push_str(&format!("\n\n**{}**", render_localized_text(&title)));
+        }
+        if let Some(description) = description {
+            markdown.push_str(&format!("\n\n{}", render_localized_text(&description)));
+        }
+        markdown.push_str(
+            "\n\n*Static game text. Runtime values and UI formatting are not evaluated.*",
+        );
         Some(markdown)
     }
 
@@ -751,6 +800,7 @@ fn definition_matches(definition: &Definition, target: &SymbolTarget) -> bool {
         SymbolTarget::Named { kind: None, name } => {
             definition.name == *name || definition.aliases.contains(name)
         }
+        SymbolTarget::Tooltip { .. } => false,
         SymbolTarget::Uuid(uuid) => definition.uuid == Some(*uuid),
         SymbolTarget::OsirisGoal { name } => {
             definition.kind == OSIRIS_GOAL_KIND && definition.name == *name

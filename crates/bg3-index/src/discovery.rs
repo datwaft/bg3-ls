@@ -89,6 +89,7 @@ pub fn source_kind_for_document(path: &Path) -> Option<SourceKind> {
         "khn" if normalized.contains("/mods/") && normalized.contains("/scripts/thoth/") => {
             Some(SourceKind::Thoth)
         }
+        "xml" if normalized.contains("/localization/") => Some(SourceKind::Localization),
         _ => None,
     }
 }

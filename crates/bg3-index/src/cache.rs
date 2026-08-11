@@ -15,12 +15,14 @@ use crate::localization::{
 };
 use crate::parser::parse_source;
 use crate::schema::SchemaCatalog;
+use crate::tooltip::{TooltipCatalog, base_tooltip_package_path, read_base_tooltip_catalog};
 use crate::{Error, ModuleSpec};
 
 const CACHE_MAGIC: &[u8; 8] = b"BG3LSIDX";
 const CACHE_VERSION: u32 = 2;
-const EXTRACTOR_VERSION: &str = "bg3-ls-index-v2";
+const EXTRACTOR_VERSION: &str = "bg3-ls-index-v3";
 const LOCALIZATION_EXTRACTOR_VERSION: &str = "bg3-ls-localization-v1";
+const TOOLTIP_EXTRACTOR_VERSION: &str = "bg3-ls-tooltips-v1";
 const ABANDONED_OBJECT_AGE: Duration = Duration::from_hours(720);
 
 /// Summary of cache use during one module build.
@@ -40,7 +42,13 @@ pub struct CacheStore {
 impl CacheStore {
     /// Opens a cache at an explicit path and creates its directories.
     pub fn new(root: PathBuf) -> Result<Self, Error> {
-        for child in ["objects", "manifests", "schemas", "localizations"] {
+        for child in [
+            "objects",
+            "manifests",
+            "schemas",
+            "localizations",
+            "tooltips",
+        ] {
             fs::create_dir_all(root.join(child))?;
         }
         let threads = std::thread::available_parallelism()
@@ -159,6 +167,50 @@ impl CacheStore {
         Ok(Some((catalog, false)))
     }
 
+    /// Loads the optional static game tooltip glossary and reuses its decoded catalog.
+    pub fn load_base_tooltips(
+        &self,
+        game_data: &Path,
+    ) -> Result<Option<(TooltipCatalog, bool)>, Error> {
+        let package = base_tooltip_package_path(game_data);
+        if !package.is_file() {
+            return Ok(None);
+        }
+        let metadata = fs::metadata(&package)?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |value| value.as_nanos());
+        let mut key = blake3::Hasher::new();
+        key.update(package.to_string_lossy().as_bytes());
+        let cache_path = self
+            .root
+            .join("tooltips")
+            .join(format!("{}.cache", key.finalize().to_hex()));
+        if let Ok(cached) = self.read_envelope::<CachedTooltips>(&cache_path)
+            && cached.size == metadata.len()
+            && cached.modified == modified
+            && cached.extractor_version == TOOLTIP_EXTRACTOR_VERSION
+        {
+            return Ok(Some((cached.catalog, true)));
+        }
+
+        let Some(catalog) = read_base_tooltip_catalog(game_data)? else {
+            return Ok(None);
+        };
+        self.write_envelope(
+            &cache_path,
+            &CachedTooltips {
+                size: metadata.len(),
+                modified,
+                extractor_version: TOOLTIP_EXTRACTOR_VERSION.into(),
+                catalog: catalog.clone(),
+            },
+        )?;
+        Ok(Some((catalog, false)))
+    }
+
     /// Parses a module in parallel and reuses unchanged cached file records.
     pub fn build_module(
         &self,
@@ -248,7 +300,13 @@ impl CacheStore {
         if self.root.exists() {
             fs::remove_dir_all(&self.root)?;
         }
-        for child in ["objects", "manifests", "schemas", "localizations"] {
+        for child in [
+            "objects",
+            "manifests",
+            "schemas",
+            "localizations",
+            "tooltips",
+        ] {
             fs::create_dir_all(self.root.join(child))?;
         }
         Ok(())
@@ -410,6 +468,14 @@ struct CachedLocalization {
     modified: u128,
     extractor_version: String,
     catalog: LocalizationCatalog,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CachedTooltips {
+    size: u64,
+    modified: u128,
+    extractor_version: String,
+    catalog: TooltipCatalog,
 }
 
 /// Includes every semantic input that can change a cached parsed file.

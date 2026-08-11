@@ -6,8 +6,10 @@ mod discovery;
 mod domain;
 mod localization;
 mod module;
+mod package;
 mod parser;
 mod schema;
+mod tooltip;
 mod xml;
 
 use std::path::PathBuf;
@@ -35,6 +37,10 @@ pub use localization::{
 pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
 pub use parser::{canonical_kind, is_uuid, parse_source, schema_for_toolkit, schemas_for_plain};
 pub use schema::{SchemaCatalog, SchemaDefinition, SchemaField, is_schema_discriminator};
+pub use tooltip::{
+    TooltipCatalog, TooltipText, base_tooltip_package_path, parse_tooltip_catalog,
+    read_base_tooltip_catalog,
+};
 
 /// The role of a module in the configured BG3 load order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -72,6 +72,7 @@ pub struct Definition {
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum SymbolTarget {
     Named { kind: Option<String>, name: String },
+    Tooltip { name: String },
     Uuid(Uuid),
     OsirisGoal { name: String },
     OsirisCallable { name: String, arity: u16 },
