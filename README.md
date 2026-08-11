@@ -33,7 +33,7 @@ parser.
 
 - Neovim nightly or Neovim 0.12+
 - the `bg3_stats`, `bg3_lsx`, `bg3_localization`, `bg3_thoth`, and
-  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.3.0
+  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.4.1
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
@@ -51,8 +51,8 @@ directories. The colocated path keeps local grammar work testable, and release
 CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
-git clone --branch v0.8.0 https://github.com/datwaft/bg3-ls
-git clone --branch v0.3.0 https://github.com/datwaft/tree-sitter-bg3
+git clone --branch v0.9.0 https://github.com/datwaft/bg3-ls
+git clone --branch v0.4.1 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```
@@ -86,10 +86,14 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
-Version 0.8.0 adds the native `bg3-ls convert` command for loose LSF and LSX
-resources. Existing LSP configuration remains compatible, and the release
-continues to use `tree-sitter-bg3` 0.3.0. Native LSF output is uncompressed, so
-compiled files can be larger than their source resources.
+Version 0.9.0 adds resolved hover for static game tooltip text and supported
+typed `LSTag` resources in localization XML. Runtime-bound tooltip values stay
+unresolved. Existing LSP configuration remains compatible, and this release
+uses `tree-sitter-bg3` 0.4.1.
+
+Version 0.8.0 added the native `bg3-ls convert` command for loose LSF and LSX
+resources. Native LSF output is uncompressed, so compiled files can be larger
+than their source resources.
 
 ## Configuration
 
