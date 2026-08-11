@@ -1,11 +1,16 @@
 [advisories]
 yanked = "deny"
+# larian-formats 0.8.1 uses quick-xml 0.39 for LSX input. The convert command
+# fully pre-validates that input with quick-xml 0.41 before the older parser is
+# reachable. Remove these exceptions when larian-formats upgrades quick-xml.
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
 
 [licenses]
 confidence-threshold = 0.8
 allow = [
   "Apache-2.0",
   "BSD-2-Clause",
+  "BSD-3-Clause",
   "CC0-1.0",
   "ISC",
   "MIT",

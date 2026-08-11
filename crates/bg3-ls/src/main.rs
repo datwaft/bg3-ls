@@ -1,4 +1,5 @@
 mod config;
+mod conversion;
 mod coordinator;
 mod server;
 
@@ -47,6 +48,8 @@ enum Command {
     Benchmark(BenchmarkOptions),
     /// Checks project Stats files and Osiris goals without an LSP client.
     Check(CheckOptions),
+    /// Converts one loose BG3 resource between binary LSF and textual LSX.
+    Convert(conversion::Options),
 }
 
 /// Inputs for one standalone diagnostic pass.
@@ -150,6 +153,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Notify(#[from] notify::Error),
+    #[error(transparent)]
+    Conversion(#[from] conversion::Error),
 }
 
 /// Runs cache maintenance or serves LSP messages over stdio by default.
@@ -218,6 +223,10 @@ fn run_command(command: Command, cache_dir: Option<PathBuf>) -> Result<ExitCode,
             Ok(ExitCode::SUCCESS)
         }
         Command::Check(options) => run_check(options, open_cache(cache_dir)?),
+        Command::Convert(options) => {
+            conversion::convert(&options)?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
