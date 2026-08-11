@@ -13,6 +13,7 @@ rust-version = "1.95"
 arc-swap = "1.8"
 blake3 = "1.8"
 clap = { version = "4.5", features = ["derive"] }
+larian-formats = "=0.8.1"
 lz4_flex = { version = "0.14", default-features = false, features = [
   "checked-decode",
   "safe-decode",

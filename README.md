@@ -63,6 +63,29 @@ Confirm that `bg3-ls` is on `PATH`:
 bg3-ls --version
 ```
 
+## Native LSF conversion
+
+Convert a loose binary LSF resource to editable LSX without Wine, CrossOver,
+or game data:
+
+```sh
+bg3-ls convert metadata.lsf metadata.lsx
+```
+
+Compile the edited LSX back to LSF:
+
+```sh
+bg3-ls convert metadata.lsx metadata.lsf --force
+```
+
+The command infers the direction from the extensions. It refuses to replace an
+existing destination unless `--force` is present. Conversion writes a temporary
+file beside the destination and publishes it only after the complete output is
+written. A failed conversion does not change an existing destination.
+
+Native LSF output is currently uncompressed. It remains valid BG3 data, but a
+converted resource can be larger than its compressed source.
+
 Version 0.7.0 adds loose Osiris goal support and requires `tree-sitter-bg3`
 0.3.0. Existing configuration remains compatible. Add `bg3_osiris` to the LSP
 `filetypes` list to attach the server to goal buffers. `bg3-ls check` now also

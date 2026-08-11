@@ -15,10 +15,13 @@ arc-swap.workspace = true
 bg3-ide = { version = "=0.7.0", path = "../bg3-ide" }
 bg3-index = { version = "=0.7.0", path = "../bg3-index" }
 clap.workspace = true
+larian-formats.workspace = true
 notify.workspace = true
+quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tower-lsp-server.workspace = true
 tracing.workspace = true
@@ -27,9 +30,6 @@ tree-sitter.workspace = true
 tree-sitter-bg3.workspace = true
 url.workspace = true
 walkdir.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true
