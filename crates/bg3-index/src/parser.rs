@@ -10,8 +10,10 @@ use uuid::Uuid;
 use crate::Error;
 use crate::catalog::{field_kind, function_spec, is_lsx_value_field};
 use crate::domain::{
-    Definition, LineMap, ObservedFunction, ParsedFile, Position, Reference, SourceFile,
-    SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
+    OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
+    OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference, SourceFile, SourceIssue,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
 };
 use crate::schema::{SchemaCatalog, SchemaDefinition};
 use crate::xml::{attribute_range, attributes};
@@ -30,6 +32,7 @@ pub fn parse_source(
         SourceKind::ToolkitStats | SourceKind::Table => parse_toolkit(source, text, schema),
         SourceKind::Lsx => parse_lsx(source, text),
         SourceKind::Thoth => parse_thoth(source, text),
+        SourceKind::Osiris => parse_osiris(source, text),
         SourceKind::Localization => parse_localization(source, text, language),
     }
 }
@@ -68,6 +71,7 @@ fn parse_thoth(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
             uuid: None,
             parent: None,
             schema_id: None,
+            arity: None,
         });
     }
 
@@ -79,6 +83,7 @@ fn parse_thoth(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         observed_functions: Vec::new(),
         // Thoth syntax diagnostics are intentionally outside the first indexing scope.
         issues: Vec::new(),
+        osiris: None,
     })
 }
 
@@ -121,6 +126,448 @@ fn thoth_call_references(root: Node<'_>, text: &str) -> Result<Vec<Reference>, E
         pending.extend(node.named_children(&mut cursor));
     }
     Ok(references)
+}
+
+/// Extracts declarations, calls, database evidence, and syntax issues from one Osiris goal.
+fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
+    let mut parser = Parser::new();
+    parser.set_language(&tree_sitter_bg3::BG3_OSIRIS_LANGUAGE.into())?;
+    let tree = parser
+        .parse(text, None)
+        .ok_or_else(|| Error::Parse("the Osiris parser returned no tree".into()))?;
+    let root = tree.root_node();
+    let goal = source
+        .path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| Error::Parse("an Osiris goal path has no UTF-8 file stem".into()))?
+        .to_owned();
+    let mut issues = Vec::new();
+    collect_tree_syntax_issues(
+        root,
+        &mut issues,
+        "osiris-syntax-error",
+        "The Osiris goal syntax is not valid.",
+    );
+
+    let mut goal_fields = BTreeMap::new();
+    if let Some(version) = direct_child(root, "version_declaration")
+        && let Some(value) = field(version, "value")
+    {
+        goal_fields.insert(
+            "Version".into(),
+            value.utf8_text(text.as_bytes())?.to_owned(),
+        );
+    }
+    let goal_selection = direct_child(root, "version_declaration")
+        .map(node_range)
+        .unwrap_or_else(|| node_range(root));
+    let mut definitions = vec![Definition {
+        kind: OSIRIS_GOAL_KIND.into(),
+        name: goal.clone(),
+        range: node_range(root),
+        selection_range: goal_selection,
+        fields: goal_fields,
+        field_ranges: BTreeMap::new(),
+        aliases: Vec::new(),
+        uuid: None,
+        parent: None,
+        schema_id: None,
+        arity: None,
+    }];
+    let mut references = Vec::new();
+    let mut occurrences = Vec::new();
+    let mut cursor = root.walk();
+    for node in root.named_children(&mut cursor) {
+        match node.kind() {
+            "init_section" | "exit_section" => {
+                let mut section_cursor = node.walk();
+                for statement in node.named_children(&mut section_cursor) {
+                    if statement.kind() == "fact_statement"
+                        && let Some(call) = field(statement, "call")
+                    {
+                        collect_osiris_call(
+                            call,
+                            text,
+                            OsirisCallRole::Write,
+                            &HashMap::new(),
+                            &mut references,
+                            &mut occurrences,
+                        )?;
+                    }
+                }
+            }
+            "kb_section" => {
+                let mut section_cursor = node.walk();
+                for rule in node.named_children(&mut section_cursor) {
+                    if rule.kind() == "rule" {
+                        parse_osiris_rule(
+                            rule,
+                            text,
+                            &goal,
+                            &mut definitions,
+                            &mut references,
+                            &mut occurrences,
+                        )?;
+                    }
+                }
+            }
+            "parent_target_edge" => {
+                if let Some(parent) = field(node, "goal") {
+                    let (name, range) = quoted(parent, text);
+                    references.push(Reference {
+                        target: SymbolTarget::OsirisGoal { name },
+                        range,
+                        context: "osiris-parent-goal".into(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    add_osiris_database_anchors(&goal, &occurrences, &mut definitions);
+    Ok(ParsedFile {
+        source,
+        definitions,
+        references,
+        observed_functions: Vec::new(),
+        issues,
+        osiris: Some(OsirisFile { goal, occurrences }),
+    })
+}
+
+/// Extracts one complete rule and its rule-local explicit variable types.
+fn parse_osiris_rule(
+    rule: Node<'_>,
+    text: &str,
+    goal: &str,
+    definitions: &mut Vec<Definition>,
+    references: &mut Vec<Reference>,
+    occurrences: &mut Vec<OsirisDatabaseOccurrence>,
+) -> Result<(), Error> {
+    let variable_types = osiris_rule_variable_types(rule, text)?;
+    let Some(head) = field(rule, "head") else {
+        return Ok(());
+    };
+    let Some(name_node) = field(head, "name") else {
+        return Ok(());
+    };
+    let Some(arguments) = field(head, "arguments") else {
+        return Ok(());
+    };
+    let name = name_node.utf8_text(text.as_bytes())?.to_owned();
+    let arity = osiris_arity(arguments)?;
+    let kind = field(rule, "kind")
+        .and_then(|kind| kind.utf8_text(text.as_bytes()).ok())
+        .unwrap_or("IF");
+    match kind {
+        "PROC" | "QRY" => {
+            let parameters = osiris_parameter_labels(arguments, text, &variable_types)?;
+            definitions.push(Definition {
+                kind: if kind == "PROC" {
+                    OSIRIS_PROCEDURE_KIND.into()
+                } else {
+                    OSIRIS_QUERY_KIND.into()
+                },
+                name,
+                range: node_range(rule),
+                selection_range: node_range(name_node),
+                fields: BTreeMap::from([
+                    ("Goal".into(), goal.into()),
+                    ("Parameters".into(), parameters.join(", ")),
+                ]),
+                field_ranges: BTreeMap::new(),
+                aliases: Vec::new(),
+                uuid: None,
+                parent: None,
+                schema_id: None,
+                arity: Some(arity),
+            });
+        }
+        _ => collect_osiris_call(
+            head,
+            text,
+            OsirisCallRole::Read,
+            &variable_types,
+            references,
+            occurrences,
+        )?,
+    }
+
+    let mut cursor = rule.walk();
+    for child in rule.named_children(&mut cursor) {
+        match child.kind() {
+            "condition" => {
+                if let Some(call) = direct_child(child, "call_expression") {
+                    collect_osiris_call(
+                        call,
+                        text,
+                        OsirisCallRole::Read,
+                        &variable_types,
+                        references,
+                        occurrences,
+                    )?;
+                }
+            }
+            "action_statement" => {
+                if let Some(call) = field(child, "call") {
+                    collect_osiris_call(
+                        call,
+                        text,
+                        OsirisCallRole::Write,
+                        &variable_types,
+                        references,
+                        occurrences,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Adds one call reference and retains structured evidence for user databases.
+fn collect_osiris_call(
+    call: Node<'_>,
+    text: &str,
+    role: OsirisCallRole,
+    variable_types: &HashMap<String, OsirisTypeEvidence>,
+    references: &mut Vec<Reference>,
+    occurrences: &mut Vec<OsirisDatabaseOccurrence>,
+) -> Result<(), Error> {
+    let Some(name_node) = field(call, "name") else {
+        return Ok(());
+    };
+    let Some(arguments_node) = field(call, "arguments") else {
+        return Ok(());
+    };
+    let name = name_node.utf8_text(text.as_bytes())?.to_owned();
+    let arity = osiris_arity(arguments_node)?;
+    let target = if name.starts_with("DB_") {
+        SymbolTarget::OsirisDatabase {
+            name: name.clone(),
+            arity,
+        }
+    } else {
+        SymbolTarget::OsirisCallable {
+            name: name.clone(),
+            arity,
+        }
+    };
+    references.push(Reference {
+        target,
+        range: node_range(name_node),
+        context: match role {
+            OsirisCallRole::Read => "osiris-read",
+            OsirisCallRole::Write => "osiris-write",
+        }
+        .into(),
+    });
+    if !name.starts_with("DB_") {
+        return Ok(());
+    }
+
+    let mut arguments = Vec::new();
+    let mut cursor = arguments_node.walk();
+    for argument in arguments_node.named_children(&mut cursor) {
+        arguments.push(OsirisArgument {
+            range: node_range(argument),
+            evidence: osiris_argument_evidence(argument, text, variable_types)?,
+        });
+    }
+    occurrences.push(OsirisDatabaseOccurrence {
+        name,
+        arity,
+        range: node_range(call),
+        selection_range: node_range(name_node),
+        role,
+        arguments,
+    });
+    Ok(())
+}
+
+/// Converts a grammar argument count into the stable symbol-key width.
+fn osiris_arity(arguments: Node<'_>) -> Result<u16, Error> {
+    u16::try_from(arguments.named_child_count())
+        .map_err(|_| Error::Parse("an Osiris call has more than 65,535 arguments".into()))
+}
+
+/// Records one navigation anchor for each database written by this goal.
+fn add_osiris_database_anchors(
+    goal: &str,
+    occurrences: &[OsirisDatabaseOccurrence],
+    definitions: &mut Vec<Definition>,
+) {
+    let mut databases = BTreeMap::<(String, u16), OsirisDatabaseAggregate>::new();
+    for (index, occurrence) in occurrences.iter().enumerate() {
+        let database = databases
+            .entry((occurrence.name.clone(), occurrence.arity))
+            .or_insert_with(|| OsirisDatabaseAggregate {
+                first_write: None,
+                reads: 0,
+                writes: 0,
+                types: vec![BTreeSet::new(); usize::from(occurrence.arity)],
+            });
+        match occurrence.role {
+            OsirisCallRole::Read => database.reads += 1,
+            OsirisCallRole::Write => {
+                database.writes += 1;
+                database.first_write.get_or_insert(index);
+            }
+        }
+        for (column, argument) in database.types.iter_mut().zip(&occurrence.arguments) {
+            if let Some(evidence) = &argument.evidence {
+                column.insert(evidence.type_name.clone());
+            }
+        }
+    }
+
+    for ((name, arity), database) in databases {
+        let Some(first_write) = database.first_write else {
+            continue;
+        };
+        let occurrence = &occurrences[first_write];
+        let parameters = database
+            .types
+            .into_iter()
+            .map(osiris_type_summary)
+            .collect::<Vec<_>>();
+        definitions.push(Definition {
+            kind: OSIRIS_DATABASE_KIND.into(),
+            name,
+            range: occurrence.range,
+            selection_range: occurrence.selection_range,
+            fields: BTreeMap::from([
+                ("Goal".into(), goal.into()),
+                ("Parameters".into(), parameters.join(", ")),
+                ("Reads".into(), database.reads.to_string()),
+                ("Writes".into(), database.writes.to_string()),
+            ]),
+            field_ranges: BTreeMap::new(),
+            aliases: Vec::new(),
+            uuid: None,
+            parent: None,
+            schema_id: None,
+            arity: Some(arity),
+        });
+    }
+}
+
+/// Per-goal database facts accumulated in one pass over call occurrences.
+struct OsirisDatabaseAggregate {
+    first_write: Option<usize>,
+    reads: usize,
+    writes: usize,
+    types: Vec<BTreeSet<String>>,
+}
+
+/// Summarizes exact source types without choosing among conflicts.
+fn osiris_type_summary(types: BTreeSet<String>) -> String {
+    if types.len() == 1 {
+        types.into_iter().next().unwrap_or_else(|| "unknown".into())
+    } else if types.len() > 1 {
+        "conflicting".into()
+    } else {
+        "unknown".into()
+    }
+}
+
+/// Returns display labels for one declared PROC or QRY parameter list.
+fn osiris_parameter_labels(
+    arguments: Node<'_>,
+    text: &str,
+    variable_types: &HashMap<String, OsirisTypeEvidence>,
+) -> Result<Vec<String>, Error> {
+    let mut parameters = Vec::new();
+    let mut cursor = arguments.walk();
+    for argument in arguments.named_children(&mut cursor) {
+        let value = field(argument, "value")
+            .and_then(|value| value.utf8_text(text.as_bytes()).ok())
+            .unwrap_or("value");
+        let evidence = osiris_argument_evidence(argument, text, variable_types)?;
+        parameters.push(evidence.map_or_else(
+            || value.to_owned(),
+            |evidence| format!("{} {value}", evidence.type_name),
+        ));
+    }
+    Ok(parameters)
+}
+
+/// Collects unambiguous explicit casts for variables inside one rule.
+fn osiris_rule_variable_types(
+    rule: Node<'_>,
+    text: &str,
+) -> Result<HashMap<String, OsirisTypeEvidence>, Error> {
+    let mut candidates = HashMap::<String, Option<OsirisTypeEvidence>>::new();
+    let mut pending = vec![rule];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "typed_variable"
+            && let (Some(cast), Some(value)) = (field(node, "cast"), field(node, "value"))
+            && value.kind() == "local_variable"
+            && let Some(type_node) = field(cast, "type")
+        {
+            let name = value.utf8_text(text.as_bytes())?.to_owned();
+            let evidence = OsirisTypeEvidence {
+                type_name: type_node.utf8_text(text.as_bytes())?.to_owned(),
+                source_range: node_range(type_node),
+            };
+            candidates
+                .entry(name)
+                .and_modify(|current| {
+                    if current
+                        .as_ref()
+                        .is_some_and(|current| current.type_name != evidence.type_name)
+                    {
+                        *current = None;
+                    }
+                })
+                .or_insert(Some(evidence));
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    Ok(candidates
+        .into_iter()
+        .filter_map(|(name, evidence)| evidence.map(|evidence| (name, evidence)))
+        .collect())
+}
+
+/// Returns an exact type observation for one literal or explicitly typed variable.
+fn osiris_argument_evidence(
+    argument: Node<'_>,
+    text: &str,
+    variable_types: &HashMap<String, OsirisTypeEvidence>,
+) -> Result<Option<OsirisTypeEvidence>, Error> {
+    if let Some(cast) = field(argument, "cast")
+        && let Some(type_node) = field(cast, "type")
+    {
+        return Ok(Some(OsirisTypeEvidence {
+            type_name: type_node.utf8_text(text.as_bytes())?.to_owned(),
+            source_range: node_range(type_node),
+        }));
+    }
+    let Some(value) = field(argument, "value") else {
+        return Ok(None);
+    };
+    if value.kind() == "local_variable" {
+        return Ok(variable_types
+            .get(value.utf8_text(text.as_bytes())?)
+            .cloned());
+    }
+    let type_name = match value.kind() {
+        "integer" => "INTEGER",
+        "real" => "REAL",
+        "string_literal" => "STRING",
+        "guid_literal" => "GUIDSTRING",
+        _ => return Ok(None),
+    };
+    Ok(Some(OsirisTypeEvidence {
+        type_name: type_name.into(),
+        source_range: node_range(value),
+    }))
 }
 
 /// Parses legacy plain-text Stats with the generated Tree-sitter grammar.
@@ -174,6 +621,7 @@ fn parse_plain(
         references,
         observed_functions: sorted_functions(observed),
         issues,
+        osiris: None,
     })
 }
 
@@ -266,6 +714,7 @@ fn parse_stat_entry(
             uuid,
             parent,
             schema_id: None,
+            arity: None,
         },
         references,
         functions,
@@ -304,6 +753,7 @@ fn parse_named_block(node: Node<'_>, text: &str) -> Option<Definition> {
         uuid: None,
         parent: None,
         schema_id: None,
+        arity: None,
     })
 }
 
@@ -391,6 +841,7 @@ fn parse_toolkit(
         references,
         observed_functions: sorted_functions(observed),
         issues: Vec::new(),
+        osiris: None,
     })
 }
 
@@ -471,6 +922,7 @@ fn parse_lsx(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         references,
         observed_functions: sorted_functions(observed),
         issues: Vec::new(),
+        osiris: None,
     })
 }
 
@@ -555,6 +1007,7 @@ fn parse_localization(source: SourceFile, text: &str, language: &str) -> Result<
                         uuid: None,
                         parent: None,
                         schema_id: None,
+                        arity: None,
                     });
                 }
             }
@@ -569,6 +1022,7 @@ fn parse_localization(source: SourceFile, text: &str, language: &str) -> Result<
         references: Vec::new(),
         observed_functions: Vec::new(),
         issues: Vec::new(),
+        osiris: None,
     })
 }
 
@@ -645,6 +1099,7 @@ fn definition_from_xml_record(
         uuid,
         parent,
         schema_id,
+        arity: None,
     }
 }
 
@@ -689,6 +1144,7 @@ fn definition_from_resource(resource: ResourceRecord) -> Option<Definition> {
         uuid: Some(uuid),
         parent: None,
         schema_id: None,
+        arity: None,
     })
 }
 
@@ -969,15 +1425,30 @@ fn sorted_functions(functions: HashMap<String, ObservedFunction>) -> Vec<Observe
 
 /// Collects Tree-sitter error and missing nodes as recoverable source issues.
 fn collect_syntax_issues(root: Node<'_>, issues: &mut Vec<SourceIssue>) {
+    collect_tree_syntax_issues(
+        root,
+        issues,
+        "syntax-error",
+        "The Stats syntax is not valid.",
+    );
+}
+
+/// Collects one stable issue for each outermost Tree-sitter error or missing node.
+fn collect_tree_syntax_issues(
+    root: Node<'_>,
+    issues: &mut Vec<SourceIssue>,
+    code: &str,
+    invalid_message: &str,
+) {
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
         if node.is_error() || node.is_missing() {
             issues.push(SourceIssue {
-                code: "syntax-error".into(),
+                code: code.into(),
                 message: if node.is_missing() {
                     "Required syntax is missing.".into()
                 } else {
-                    "The Stats syntax is not valid.".into()
+                    invalid_message.into()
                 },
                 range: node_range(node),
             });

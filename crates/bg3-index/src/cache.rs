@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -18,8 +18,8 @@ use crate::schema::SchemaCatalog;
 use crate::{Error, ModuleSpec};
 
 const CACHE_MAGIC: &[u8; 8] = b"BG3LSIDX";
-const CACHE_VERSION: u32 = 1;
-const EXTRACTOR_VERSION: &str = "bg3-ls-index-v1";
+const CACHE_VERSION: u32 = 2;
+const EXTRACTOR_VERSION: &str = "bg3-ls-index-v2";
 const LOCALIZATION_EXTRACTOR_VERSION: &str = "bg3-ls-localization-v1";
 const ABANDONED_OBJECT_AGE: Duration = Duration::from_hours(720);
 
@@ -170,6 +170,12 @@ impl CacheStore {
         let manifest_path = self.manifest_path(module);
         let old_manifest = self.read_manifest(&manifest_path).unwrap_or_default();
         let schema_digest = schema.digest()?.to_hex().to_string();
+        let mut fingerprints = HashMap::new();
+        for source in sources {
+            fingerprints
+                .entry(source.kind)
+                .or_insert_with(|| context_fingerprint(source.kind, &schema_digest, language));
+        }
 
         let results: Vec<Result<(ParsedFile, FileManifest, bool), Error>> =
             self.pool.install(|| {
@@ -183,7 +189,7 @@ impl CacheStore {
                             .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
                             .map_or(0, |value| value.as_nanos());
                         let key = source.path.to_string_lossy().into_owned();
-                        let fingerprint = context_fingerprint(source, &schema_digest, language);
+                        let fingerprint = fingerprints[&source.kind].clone();
                         if let Some(entry) = old_manifest.files.get(&key)
                             && entry.size == metadata.len()
                             && entry.modified == modified
@@ -354,7 +360,10 @@ impl CacheStore {
         let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
         let mut file = fs::File::create(&temporary)?;
         file.write_all(&bytes)?;
-        file.sync_all()?;
+        // Cache entries are disposable and checksummed. A truncated buffered
+        // write becomes a cache miss, while one fsync per source dominates a
+        // cold full-data index.
+        drop(file);
         fs::rename(temporary, path)?;
         Ok(())
     }
@@ -413,11 +422,13 @@ fn object_key(source: &SourceFile, content_hash: &str, fingerprint: &str) -> Str
 }
 
 /// Fingerprints parser, schema, format, and localization inputs without reading source content.
-fn context_fingerprint(source: &SourceFile, schema: &str, language: &str) -> String {
+fn context_fingerprint(kind: crate::SourceKind, schema: &str, language: &str) -> String {
     let stats_abi = tree_sitter::Language::from(tree_sitter_bg3::BG3_STATS_LANGUAGE).abi_version();
     let value_abi =
         tree_sitter::Language::from(tree_sitter_bg3::BG3_STATS_VALUE_LANGUAGE).abi_version();
     let thoth_abi = tree_sitter::Language::from(tree_sitter_bg3::BG3_THOTH_LANGUAGE).abi_version();
+    let osiris_abi =
+        tree_sitter::Language::from(tree_sitter_bg3::BG3_OSIRIS_LANGUAGE).abi_version();
     let mut hash = blake3::Hasher::new();
     hash.update(EXTRACTOR_VERSION.as_bytes());
     hash.update(env!("CARGO_PKG_VERSION").as_bytes());
@@ -425,7 +436,8 @@ fn context_fingerprint(source: &SourceFile, schema: &str, language: &str) -> Str
     hash.update(&stats_abi.to_le_bytes());
     hash.update(&value_abi.to_le_bytes());
     hash.update(&thoth_abi.to_le_bytes());
-    hash.update(format!("{:?}", source.kind).as_bytes());
+    hash.update(&osiris_abi.to_le_bytes());
+    hash.update(format!("{kind:?}").as_bytes());
     hash.update(schema.as_bytes());
     hash.update(language.as_bytes());
     hash.finalize().to_hex().to_string()

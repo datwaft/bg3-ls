@@ -3,7 +3,8 @@ use std::path::Path;
 
 use crate::{OverlaySet, WorkspaceSnapshot, range_contains};
 use bg3_index::{
-    Definition, FUNCTIONS, Position, SchemaDefinition, SchemaField, SymbolTarget,
+    Definition, FUNCTIONS, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
+    OSIRIS_QUERY_KIND, Position, SchemaDefinition, SchemaField, SourceKind, SymbolTarget,
     THOTH_FUNCTION_KIND, TextRange, field_kind, function_spec, is_lsx_value_field,
 };
 
@@ -67,6 +68,18 @@ impl WorkspaceSnapshot {
             .unwrap_or(usize::MAX)
             .min(line.len());
         let before = &line[..cursor];
+        if file.source.kind == SourceKind::Osiris {
+            let mut items = self.complete_osiris(text, before, position, overlays, snippets);
+            items.sort_by(|left, right| {
+                left.label
+                    .to_ascii_lowercase()
+                    .cmp(&right.label.to_ascii_lowercase())
+                    .then(left.detail.cmp(&right.detail))
+            });
+            let incomplete = items.len() > self.max_completion_items;
+            items.truncate(self.max_completion_items);
+            return CompletionList { items, incomplete };
+        }
         if file.source.kind == bg3_index::SourceKind::Thoth {
             let prefix = identifier_prefix(before);
             let mut items = self.complete_thoth_functions(prefix, position, overlays, snippets);
@@ -128,10 +141,14 @@ impl WorkspaceSnapshot {
         position: Position,
         overlays: &OverlaySet,
     ) -> Option<SignatureHelp> {
+        let (_, file) = self.file(path, overlays)?;
         let text = overlays.get(path)?.text.as_str();
         let line = source_line(text, position.line)?;
         let cursor = usize::try_from(position.character).ok()?.min(line.len());
         let before = &line[..cursor];
+        if file.source.kind == SourceKind::Osiris {
+            return self.osiris_signature_help(before, overlays);
+        }
         // A Stats value starts with an unmatched document quote while the user edits it.
         // Remove the data-clause prefix before balancing expression quotes and calls.
         let expression = value_context(before)
@@ -535,6 +552,133 @@ impl WorkspaceSnapshot {
         items
     }
 
+    /// Completes visible user declarations only at Osiris call or parent-goal positions.
+    fn complete_osiris(
+        &self,
+        document: &str,
+        before: &str,
+        position: Position,
+        overlays: &OverlaySet,
+        snippets: bool,
+    ) -> Vec<CompletionItem> {
+        let context = match osiris_completion_context(document, before, position.line) {
+            Some(context) => context,
+            None => return Vec::new(),
+        };
+        let mut seen = BTreeSet::new();
+        let mut items = Vec::new();
+        for layer in self.layers.iter().rev() {
+            let mut candidates = BTreeMap::<(String, String, u16), Definition>::new();
+            for (_, overlay) in overlays.for_module(&layer.spec.name) {
+                for definition in &overlay.parsed.definitions {
+                    add_osiris_completion_candidate(
+                        &mut candidates,
+                        definition,
+                        context.prefix,
+                        context.goals,
+                    );
+                }
+            }
+            for record in &layer.definitions {
+                if overlays.contains(record.path.as_ref()) {
+                    continue;
+                }
+                add_osiris_completion_candidate(
+                    &mut candidates,
+                    record.definition(),
+                    context.prefix,
+                    context.goals,
+                );
+            }
+            for ((namespace, name, arity), definition) in candidates {
+                if !seen.insert((namespace, name.clone(), arity)) {
+                    continue;
+                }
+                let mut item = basic_item(
+                    &name,
+                    context.prefix,
+                    position,
+                    if context.goals {
+                        CompletionKind::Reference
+                    } else {
+                        CompletionKind::Function
+                    },
+                );
+                item.detail = Some(if context.goals {
+                    format!("Osiris goal — {}", layer.spec.name)
+                } else {
+                    format!(
+                        "{} /{arity} — {}",
+                        osiris_kind_label(&definition.kind),
+                        layer.spec.name
+                    )
+                });
+                if snippets && !context.goals {
+                    let parameters = stored_parameters(&definition);
+                    item.new_text = osiris_call_snippet(&name, arity, &parameters);
+                    item.snippet = arity > 0;
+                }
+                items.push(item);
+            }
+        }
+        items
+    }
+
+    /// Returns source-backed signatures for visible user callables and databases.
+    fn osiris_signature_help(&self, before: &str, overlays: &OverlaySet) -> Option<SignatureHelp> {
+        let context = call_context(before)?;
+        let database = context.function.starts_with("DB_");
+        let mut candidates = Vec::<(usize, Definition)>::new();
+        for (rank, layer) in self.layers.iter().enumerate() {
+            for (_, overlay) in overlays.for_module(&layer.spec.name) {
+                for definition in &overlay.parsed.definitions {
+                    if osiris_signature_candidate(definition, &context.function, database) {
+                        candidates.push((rank, definition.clone()));
+                    }
+                }
+            }
+            for record in &layer.definitions {
+                if !overlays.contains(record.path.as_ref())
+                    && osiris_signature_candidate(record.definition(), &context.function, database)
+                {
+                    candidates.push((rank, record.definition().clone()));
+                }
+            }
+        }
+        let arity = candidates
+            .iter()
+            .filter_map(|(_, definition)| definition.arity)
+            .filter(|arity| *arity == 0 || usize::from(*arity) > context.argument)
+            .min()?;
+        candidates.retain(|(_, definition)| definition.arity == Some(arity));
+        let parameters = if database {
+            merge_osiris_database_parameters(
+                candidates
+                    .iter()
+                    .map(|(_, definition)| stored_parameters(definition)),
+                arity,
+            )
+        } else {
+            let rank = candidates.iter().map(|(rank, _)| *rank).max()?;
+            candidates
+                .iter()
+                .find(|(candidate_rank, _)| *candidate_rank == rank)
+                .map(|(_, definition)| stored_parameters(definition))?
+        };
+        Some(SignatureHelp {
+            label: format!("{}({})", context.function, parameters.join(", ")),
+            documentation: if database {
+                "Signature evidence from configured loose Osiris goals. Unknown columns remain explicit."
+                    .into()
+            } else {
+                "Declared in a configured loose Osiris goal. Untyped parameters remain explicit."
+                    .into()
+            },
+            parameters,
+            active_parameter: context.argument,
+        })
+    }
+
     /// Completes localization handles with their known version suffix.
     fn complete_localization(
         &self,
@@ -575,6 +719,12 @@ struct CallContext {
     function: String,
     argument: usize,
     first_argument: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OsirisCompletionContext<'a> {
+    prefix: &'a str,
+    goals: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -619,6 +769,180 @@ fn split_parameters(parameters: &str) -> Vec<String> {
         .filter(|parameter| !parameter.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Adds one logical Osiris declaration to a module-rank completion group.
+fn add_osiris_completion_candidate(
+    candidates: &mut BTreeMap<(String, String, u16), Definition>,
+    definition: &Definition,
+    prefix: &str,
+    goals: bool,
+) {
+    if goals {
+        if definition.kind == OSIRIS_GOAL_KIND
+            && starts_with_case_insensitive(&definition.name, prefix)
+        {
+            candidates.insert(
+                ("goal".into(), definition.name.clone(), 0),
+                definition.clone(),
+            );
+        }
+        return;
+    }
+    let namespace = match definition.kind.as_str() {
+        OSIRIS_DATABASE_KIND => "database",
+        OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND => "callable",
+        _ => return,
+    };
+    if !starts_with_case_insensitive(&definition.name, prefix) {
+        return;
+    }
+    let Some(arity) = definition.arity else {
+        return;
+    };
+    candidates.insert(
+        (namespace.into(), definition.name.clone(), arity),
+        definition.clone(),
+    );
+}
+
+/// Selects one incomplete Osiris call name or parent-goal string.
+fn osiris_completion_context<'a>(
+    document: &str,
+    line: &'a str,
+    line_number: u32,
+) -> Option<OsirisCompletionContext<'a>> {
+    let trimmed = line.trim_start();
+    if let Some(prefix) = trimmed.strip_prefix("ParentTargetEdge") {
+        let prefix = prefix.trim_start().strip_prefix('"')?;
+        return (!prefix.contains('"')).then_some(OsirisCompletionContext {
+            prefix,
+            goals: true,
+        });
+    }
+    if !inside_osiris_statement_section(document, line_number) {
+        return None;
+    }
+
+    let mut call = trimmed;
+    loop {
+        let previous = call;
+        for keyword in ["IF", "PROC", "QRY", "AND", "THEN", "NOT"] {
+            if let Some(rest) = call.strip_prefix(keyword)
+                && rest.chars().next().is_none_or(char::is_whitespace)
+            {
+                call = rest.trim_start();
+                break;
+            }
+        }
+        if call == previous {
+            break;
+        }
+    }
+    if call
+        .chars()
+        .any(|character| !character.is_ascii_alphanumeric() && character != '_')
+    {
+        return None;
+    }
+    Some(OsirisCompletionContext {
+        prefix: call,
+        goals: false,
+    })
+}
+
+/// Tests whether the cursor follows an INIT, KB, or EXIT section marker.
+fn inside_osiris_statement_section(document: &str, line_number: u32) -> bool {
+    let mut inside = false;
+    for line in document
+        .lines()
+        .take(usize::try_from(line_number).unwrap_or(usize::MAX))
+    {
+        match line.trim() {
+            "INITSECTION" | "KBSECTION" | "EXITSECTION" => inside = true,
+            "ENDEXITSECTION" => inside = false,
+            _ => {}
+        }
+    }
+    inside
+}
+
+/// Tests whether one declaration can provide the requested Osiris signature.
+fn osiris_signature_candidate(definition: &Definition, name: &str, database: bool) -> bool {
+    definition.name == name
+        && if database {
+            definition.kind == OSIRIS_DATABASE_KIND
+        } else {
+            matches!(
+                definition.kind.as_str(),
+                OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND
+            )
+        }
+}
+
+/// Returns the stored source parameter list for one callable declaration.
+fn stored_parameters(definition: &Definition) -> Vec<String> {
+    definition
+        .fields
+        .get("Parameters")
+        .map_or_else(Vec::new, |parameters| split_parameters(parameters))
+}
+
+/// Merges database column evidence without selecting among incompatible aliases.
+fn merge_osiris_database_parameters(
+    parameter_lists: impl IntoIterator<Item = Vec<String>>,
+    arity: u16,
+) -> Vec<String> {
+    let mut columns = vec![BTreeSet::new(); usize::from(arity)];
+    for parameters in parameter_lists {
+        for (index, parameter) in parameters.into_iter().enumerate() {
+            if parameter != "unknown"
+                && let Some(column) = columns.get_mut(index)
+            {
+                column.insert(parameter);
+            }
+        }
+    }
+    columns
+        .into_iter()
+        .map(|types| {
+            if types.len() == 1 {
+                types.into_iter().next().unwrap_or_else(|| "unknown".into())
+            } else if types.len() > 1 {
+                "conflicting".into()
+            } else {
+                "unknown".into()
+            }
+        })
+        .collect()
+}
+
+/// Builds a call snippet from source parameter names and known database columns.
+fn osiris_call_snippet(name: &str, arity: u16, parameters: &[String]) -> String {
+    let placeholders = (0..usize::from(arity))
+        .map(|index| {
+            let stored = parameters.get(index).map_or("unknown", String::as_str);
+            let label = stored
+                .split_whitespace()
+                .last()
+                .filter(|label| label.starts_with('_') && *label != "_" && *label != "unknown")
+                .map_or_else(|| format!("column{}", index + 1), str::to_owned);
+            format!("${{{}:{label}}}", index + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({placeholders})")
+}
+
+/// Returns a user-facing Osiris declaration category.
+fn osiris_kind_label(kind: &str) -> &'static str {
+    match kind {
+        OSIRIS_DATABASE_KIND => "database",
+        OSIRIS_PROCEDURE_KIND => "procedure",
+        OSIRIS_QUERY_KIND => "query",
+        OSIRIS_GOAL_KIND => "goal",
+        _ => "symbol",
+    }
 }
 
 /// Adds one matching declaration to its same-rank completion group.

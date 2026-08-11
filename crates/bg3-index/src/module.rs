@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::domain::{Definition, ObservedFunction, ParsedFile, Reference};
+use crate::domain::{
+    Definition, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND,
+    ObservedFunction, ParsedFile, Reference,
+};
 use crate::parser::canonical_kind;
 use crate::{ModuleSpec, SymbolTarget};
 
@@ -53,6 +56,9 @@ pub struct ModuleIndex {
     by_name: HashMap<String, Vec<DefinitionId>>,
     by_uuid: HashMap<Uuid, Vec<DefinitionId>>,
     by_alias: HashMap<String, Vec<DefinitionId>>,
+    by_osiris_goal: HashMap<String, Vec<DefinitionId>>,
+    by_osiris_callable: HashMap<(String, u16), Vec<DefinitionId>>,
+    by_osiris_database: HashMap<(String, u16), Vec<DefinitionId>>,
     references_by_target: HashMap<SymbolTarget, Vec<usize>>,
 }
 
@@ -75,6 +81,9 @@ impl ModuleIndex {
             by_name: HashMap::new(),
             by_uuid: HashMap::new(),
             by_alias: HashMap::new(),
+            by_osiris_goal: HashMap::new(),
+            by_osiris_callable: HashMap::new(),
+            by_osiris_database: HashMap::new(),
             references_by_target: HashMap::new(),
         };
         index.rebuild();
@@ -117,6 +126,27 @@ impl ModuleIndex {
                 }
                 for alias in &definition.aliases {
                     self.by_alias.entry(alias.clone()).or_default().push(id);
+                }
+                match (definition.kind.as_str(), definition.arity) {
+                    (OSIRIS_GOAL_KIND, _) => {
+                        self.by_osiris_goal
+                            .entry(definition.name.clone())
+                            .or_default()
+                            .push(id);
+                    }
+                    (OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND, Some(arity)) => {
+                        self.by_osiris_callable
+                            .entry((definition.name.clone(), arity))
+                            .or_default()
+                            .push(id);
+                    }
+                    (OSIRIS_DATABASE_KIND, Some(arity)) => {
+                        self.by_osiris_database
+                            .entry((definition.name.clone(), arity))
+                            .or_default()
+                            .push(id);
+                    }
+                    _ => {}
                 }
             }
             for (reference_index, reference) in file.references.iter().enumerate() {
@@ -169,6 +199,13 @@ impl ModuleIndex {
                 self.by_name.get(name).or_else(|| self.by_alias.get(name))
             }
             SymbolTarget::Uuid(uuid) => self.by_uuid.get(uuid),
+            SymbolTarget::OsirisGoal { name } => self.by_osiris_goal.get(name),
+            SymbolTarget::OsirisCallable { name, arity } => {
+                self.by_osiris_callable.get(&(name.clone(), *arity))
+            }
+            SymbolTarget::OsirisDatabase { name, arity } => {
+                self.by_osiris_database.get(&(name.clone(), *arity))
+            }
         };
         ids.into_iter()
             .flatten()

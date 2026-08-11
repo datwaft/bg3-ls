@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bg3_index::{
-    Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, ParsedFile, Position, Reference,
-    SchemaCatalog, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, canonical_kind,
+    Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, OSIRIS_DATABASE_KIND,
+    OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, ParsedFile,
+    Position, Reference, SchemaCatalog, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    canonical_kind,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -164,6 +166,9 @@ impl WorkspaceSnapshot {
 
     /// Returns the most specific configured module that contains a source path.
     pub fn module_for_path(&self, path: &Path) -> Option<&ModuleSpec> {
+        if let Some(layer) = self.layers.iter().find(|layer| layer.file(path).is_some()) {
+            return Some(&layer.spec);
+        }
         self.layers
             .iter()
             .filter(|layer| path.starts_with(&layer.spec.root))
@@ -209,7 +214,7 @@ impl WorkspaceSnapshot {
                         .cmp(&right.definition.selection_range.start.line)
                 })
             });
-            if at_rank.len() > 1 {
+            if at_rank.len() > 1 && !matches!(target, SymbolTarget::OsirisDatabase { .. }) {
                 for definition in &mut at_rank {
                     definition.ambiguous = true;
                 }
@@ -236,12 +241,17 @@ impl WorkspaceSnapshot {
             return Some(field);
         }
         let target = self.target_at(path, position, overlays)?;
+        if let SymbolTarget::OsirisDatabase { .. } = &target {
+            return self.osiris_database_hover(&target, overlays);
+        }
         let definitions = self.resolve(&target, overlays);
         let effective = definitions.first()?;
-        let heading = if effective.definition.kind == THOTH_FUNCTION_KIND {
-            "Thoth function"
-        } else {
-            &effective.definition.kind
+        let heading = match effective.definition.kind.as_str() {
+            THOTH_FUNCTION_KIND => "Thoth function",
+            OSIRIS_GOAL_KIND => "Osiris goal",
+            OSIRIS_PROCEDURE_KIND => "Osiris procedure",
+            OSIRIS_QUERY_KIND => "Osiris query",
+            _ => &effective.definition.kind,
         };
         let mut markdown = format!(
             "**{heading}** `{}`\n\nModule: `{}`",
@@ -253,7 +263,10 @@ impl WorkspaceSnapshot {
         if let Some(parent) = &effective.definition.parent {
             markdown.push_str(&format!("\n\nParent: `{parent}`"));
         }
-        if effective.definition.kind == THOTH_FUNCTION_KIND {
+        if matches!(
+            effective.definition.kind.as_str(),
+            THOTH_FUNCTION_KIND | OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND
+        ) {
             let parameters = effective
                 .definition
                 .fields
@@ -288,6 +301,91 @@ impl WorkspaceSnapshot {
         }
         if let Some(preview) = self.tooltip_preview(&definitions, overlays) {
             markdown.push_str(&preview);
+        }
+        Some(markdown)
+    }
+
+    /// Describes one database from all visible loose occurrence evidence.
+    fn osiris_database_hover(
+        &self,
+        target: &SymbolTarget,
+        overlays: &OverlaySet,
+    ) -> Option<String> {
+        let SymbolTarget::OsirisDatabase { name, arity } = target else {
+            return None;
+        };
+        let mut reads = 0;
+        let mut writes = 0;
+        let mut types = vec![BTreeSet::<String>::new(); usize::from(*arity)];
+        let mut contributors = BTreeSet::new();
+        for (rank, layer) in self.layers.iter().enumerate() {
+            for (path, overlay) in overlays.for_module(&layer.spec.name) {
+                collect_osiris_database_evidence(
+                    &overlay.parsed,
+                    name,
+                    *arity,
+                    rank,
+                    &layer.spec.name,
+                    path,
+                    &mut reads,
+                    &mut writes,
+                    &mut types,
+                    &mut contributors,
+                );
+            }
+            for (path, file) in &layer.files {
+                if overlays.contains(path) {
+                    continue;
+                }
+                collect_osiris_database_evidence(
+                    file,
+                    name,
+                    *arity,
+                    rank,
+                    &layer.spec.name,
+                    path,
+                    &mut reads,
+                    &mut writes,
+                    &mut types,
+                    &mut contributors,
+                );
+            }
+        }
+        if reads + writes == 0 {
+            return None;
+        }
+        let parameters: Vec<_> = types
+            .into_iter()
+            .map(|types| {
+                if types.len() == 1 {
+                    types.into_iter().next().unwrap_or_else(|| "unknown".into())
+                } else if types.len() > 1 {
+                    "conflicting".into()
+                } else {
+                    "unknown".into()
+                }
+            })
+            .collect();
+        let mut markdown = format!(
+            "**Osiris database** `{name}/{arity}`\n\nSignature: `{}({})`\n\nWrites: {writes}\n\nReads: {reads}",
+            name,
+            parameters.join(", ")
+        );
+        if writes == 0 {
+            markdown.push_str(
+                "\n\nNo write is visible in configured loose sources. The database can come from packed or unconfigured Story sources.",
+            );
+        }
+        if !contributors.is_empty() {
+            markdown.push_str("\n\n**Contributing goals**");
+            let mut contributors: Vec<_> = contributors.into_iter().collect();
+            contributors.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+            for (_, module, goal, path) in contributors {
+                markdown.push_str(&format!(
+                    "\n\n- `{goal}` — module `{module}` — `{}`",
+                    path.display()
+                ));
+            }
         }
         Some(markdown)
     }
@@ -455,6 +553,7 @@ impl WorkspaceSnapshot {
                 .then(left.range.start.line.cmp(&right.range.start.line))
                 .then(left.range.start.character.cmp(&right.range.start.character))
         });
+        locations.dedup();
         locations
     }
 
@@ -541,10 +640,7 @@ impl WorkspaceSnapshot {
         file.definitions
             .iter()
             .find(|definition| range_contains(definition.selection_range, position))
-            .map(|definition| SymbolTarget::Named {
-                kind: Some(definition.kind.clone()),
-                name: definition.name.clone(),
-            })
+            .map(definition_target)
     }
 
     /// Returns schema field documentation when the position is on a field name.
@@ -594,6 +690,46 @@ impl WorkspaceSnapshot {
     }
 }
 
+/// Accumulates exact database evidence from one disk or overlay goal record.
+#[allow(clippy::too_many_arguments)]
+fn collect_osiris_database_evidence(
+    file: &ParsedFile,
+    name: &str,
+    arity: u16,
+    rank: usize,
+    module: &str,
+    path: &Path,
+    reads: &mut usize,
+    writes: &mut usize,
+    types: &mut [BTreeSet<String>],
+    contributors: &mut BTreeSet<(usize, String, String, PathBuf)>,
+) {
+    let Some(osiris) = &file.osiris else {
+        return;
+    };
+    let mut contributes = false;
+    for occurrence in &osiris.occurrences {
+        if occurrence.name != name || occurrence.arity != arity {
+            continue;
+        }
+        contributes = true;
+        match occurrence.role {
+            OsirisCallRole::Read => *reads += 1,
+            OsirisCallRole::Write => *writes += 1,
+        }
+        for (index, argument) in occurrence.arguments.iter().enumerate() {
+            if let (Some(column), Some(evidence)) =
+                (types.get_mut(index), argument.evidence.as_ref())
+            {
+                column.insert(evidence.type_name.clone());
+            }
+        }
+    }
+    if contributes {
+        contributors.insert((rank, module.into(), osiris.goal.clone(), path.to_path_buf()));
+    }
+}
+
 /// Tests whether one position is inside a half-open source range.
 pub fn range_contains(range: TextRange, position: Position) -> bool {
     let after_start =
@@ -616,11 +752,46 @@ fn definition_matches(definition: &Definition, target: &SymbolTarget) -> bool {
             definition.name == *name || definition.aliases.contains(name)
         }
         SymbolTarget::Uuid(uuid) => definition.uuid == Some(*uuid),
+        SymbolTarget::OsirisGoal { name } => {
+            definition.kind == OSIRIS_GOAL_KIND && definition.name == *name
+        }
+        SymbolTarget::OsirisCallable { name, arity } => {
+            matches!(
+                definition.kind.as_str(),
+                OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND
+            ) && definition.name == *name
+                && definition.arity == Some(*arity)
+        }
+        SymbolTarget::OsirisDatabase { name, arity } => {
+            definition.kind == OSIRIS_DATABASE_KIND
+                && definition.name == *name
+                && definition.arity == Some(*arity)
+        }
     }
 }
 
 /// Returns the semantic target represented by one declaration.
 pub fn definition_target(definition: &Definition) -> SymbolTarget {
+    match (definition.kind.as_str(), definition.arity) {
+        (OSIRIS_GOAL_KIND, _) => {
+            return SymbolTarget::OsirisGoal {
+                name: definition.name.clone(),
+            };
+        }
+        (OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND, Some(arity)) => {
+            return SymbolTarget::OsirisCallable {
+                name: definition.name.clone(),
+                arity,
+            };
+        }
+        (OSIRIS_DATABASE_KIND, Some(arity)) => {
+            return SymbolTarget::OsirisDatabase {
+                name: definition.name.clone(),
+                arity,
+            };
+        }
+        _ => {}
+    }
     SymbolTarget::Named {
         kind: Some(definition.kind.clone()),
         name: definition.name.clone(),

@@ -89,3 +89,33 @@ Additional measurements:
 The cold and warm p95 results remain within the repository regression limits.
 The cache stores helper parameter lists and call ranges so warm workspaces do
 not parse unchanged `.khn` files again.
+
+## Version 0.7 pre-release verification
+
+Issue #36 adds cached loose Osiris goals, declarations, calls, database
+occurrences, and source-backed type evidence. The verification used the same
+machine, schema revision, base modules, project, and five-trial method as the
+version 0.6 measurement. It used `tree-sitter-bg3` 0.3.0 with parser ABI 15.
+
+The index contained 3,451 documents and 89,139 definitions. Loose Osiris
+sources contributed 920 documents and 41,339 definitions compared with the
+version 0.6 index.
+
+| Metric | p50 | p95 | Change from version 0.6 p95 |
+| --- | ---: | ---: | ---: |
+| Cold indexing | 1.334 s | 1.429 s | -88.9% |
+| Warm indexing | 426 ms | 427 ms | +14.2% |
+| Navigation | 1.125 µs | 1.208 µs | +3.5% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100%
+- Repeated-trial RSS high-water mark after ten builds: 1,299,922,944 bytes
+- Cache size: 94,220,801 bytes in 3,459 files
+
+The warm p95 result remains within the 15% regression limit while the index
+loads 36% more documents. Cold indexing is faster because disposable cache
+objects no longer call `fsync` once per source. Cache writes still use
+checksums and atomic renames. An interrupted or incomplete write becomes a
+cache miss. Parser-context fingerprints are also computed once per source kind
+instead of once per file.

@@ -1,0 +1,19 @@
+Version 1
+SubGoalCombiner SGC_AND
+
+INITSECTION
+
+KBSECTION
+
+IF
+SecondaryEvent((CHARACTER)_Actor)
+THEN
+DB_Tracked(_Actor, 2);
+
+PROC
+SharedProc((CHARACTER)_Actor)
+THEN
+GoalCompleted;
+
+EXITSECTION
+ENDEXITSECTION

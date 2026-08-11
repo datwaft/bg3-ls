@@ -56,6 +56,43 @@ pub fn discover_module(
     Ok(files)
 }
 
+/// Returns the loose roots whose changes can affect one configured module.
+pub fn module_watch_roots(module: &ModuleSpec, game_data: &Path) -> Vec<PathBuf> {
+    let mut roots = match module.role {
+        ModuleRole::Base => vec![
+            module.root.clone(),
+            game_data.join("Public").join(&module.name),
+            game_data.join("Mods").join(&module.name),
+        ],
+        ModuleRole::Dependency | ModuleRole::Project => vec![module.root.clone()],
+    };
+    roots.retain(|root| root.is_dir());
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Classifies a loose document that can attach to the language server.
+pub fn source_kind_for_document(path: &Path) -> Option<SourceKind> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let normalized = normalized_path(path);
+    if is_osiris_goal(&normalized, &extension) && normalized.contains("/mods/") {
+        return Some(SourceKind::Osiris);
+    }
+    if let Some(kind) = classify_stats(&normalized, &extension) {
+        return Some(kind);
+    }
+    match extension.as_str() {
+        "lsx" if normalized.contains("/public/") || normalized.contains("/mods/") => {
+            Some(SourceKind::Lsx)
+        }
+        "khn" if normalized.contains("/mods/") && normalized.contains("/scripts/thoth/") => {
+            Some(SourceKind::Thoth)
+        }
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum DiscoveryMode {
     StatsOnly,
@@ -67,15 +104,15 @@ enum DiscoveryMode {
 /// Classifies a source path under one known discovery root.
 fn classify(path: &Path, mode: DiscoveryMode, language: &str) -> Option<SourceKind> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    let normalized = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase();
+    let normalized = normalized_path(path);
     match mode {
         DiscoveryMode::StatsOnly => classify_stats(&normalized, &extension),
         DiscoveryMode::ModuleResources => classify_module_resource(&normalized, &extension),
         DiscoveryMode::LocalizationOnly => (extension == "xml").then_some(SourceKind::Localization),
         DiscoveryMode::LooseModule => {
+            if is_osiris_goal(&normalized, &extension) && normalized.contains("/mods/") {
+                return Some(SourceKind::Osiris);
+            }
             if let Some(kind) = classify_stats(&normalized, &extension) {
                 return Some(kind);
             }
@@ -102,10 +139,26 @@ fn classify(path: &Path, mode: DiscoveryMode, language: &str) -> Option<SourceKi
 /// Classifies source formats that can occur below a base module resource root.
 fn classify_module_resource(normalized: &str, extension: &str) -> Option<SourceKind> {
     match extension {
+        "txt" if is_osiris_goal(normalized, extension) => Some(SourceKind::Osiris),
         "lsx" => Some(SourceKind::Lsx),
         "khn" if normalized.contains("/scripts/thoth/") => Some(SourceKind::Thoth),
         _ => None,
     }
+}
+
+/// Tests the exact `Story/RawFiles/Goals/*.txt` source shape.
+fn is_osiris_goal(normalized: &str, extension: &str) -> bool {
+    extension == "txt"
+        && normalized
+            .rsplit_once("/story/rawfiles/goals/")
+            .is_some_and(|(_, file)| !file.is_empty() && !file.contains('/'))
+}
+
+/// Uses one stable separator and case for path-based source classification.
+fn normalized_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase()
 }
 
 /// Classifies Toolkit and legacy Stats source formats.

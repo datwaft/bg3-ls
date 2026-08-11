@@ -10,6 +10,7 @@ struct Fixture {
     error_file: PathBuf,
     warning_file: PathBuf,
     clean_file: PathBuf,
+    osiris_error_file: PathBuf,
 }
 
 /// Creates one configured project with error, warning, and clean source files.
@@ -36,6 +37,14 @@ fn fixture() -> Fixture {
         "new entry \"CLEAN\"\ntype \"PassiveData\"\ndata \"Enabled\" \"Yes\"\n",
     )
     .unwrap();
+    let osiris_data = root.path().join("Mods/MyMod/Story/RawFiles/Goals");
+    fs::create_dir_all(&osiris_data).unwrap();
+    let osiris_error_file = osiris_data.join("BrokenGoal.txt");
+    fs::write(
+        &osiris_error_file,
+        "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nIF\nBroken(\nEXITSECTION\nENDEXITSECTION\n",
+    )
+    .unwrap();
     fs::write(
         root.path().join("bg3-ls.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -56,6 +65,7 @@ fn fixture() -> Fixture {
         error_file,
         warning_file,
         clean_file,
+        osiris_error_file,
     }
 }
 
@@ -121,7 +131,29 @@ fn applies_thresholds_and_default_project_scope() {
     let all_project_files = check(&fixture, &["--format", "json", "--fail-on", "never"]);
     assert_eq!(all_project_files.status.code(), Some(0));
     let records: serde_json::Value = serde_json::from_slice(&all_project_files.stdout).unwrap();
-    assert_eq!(records.as_array().unwrap().len(), 2);
+    assert_eq!(records.as_array().unwrap().len(), 3);
+    assert!(records.as_array().unwrap().iter().any(|record| {
+        record["path"] == "Mods/MyMod/Story/RawFiles/Goals/BrokenGoal.txt"
+            && record["code"] == "osiris-syntax-error"
+    }));
+}
+
+#[test]
+fn checks_an_explicit_osiris_goal() {
+    let fixture = fixture();
+    let output = check(
+        &fixture,
+        &[
+            fixture.osiris_error_file.to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let records: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(records.as_array().unwrap().len(), 1);
+    assert_eq!(records[0]["code"], "osiris-syntax-error");
 }
 
 #[test]

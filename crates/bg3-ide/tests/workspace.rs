@@ -83,6 +83,14 @@ fn overlay(workspace: &WorkspaceSnapshot, path: &Path, text: &str) -> OverlaySet
             kind: match path.extension().and_then(|extension| extension.to_str()) {
                 Some("lsx") => SourceKind::Lsx,
                 Some("khn") => SourceKind::Thoth,
+                Some("txt")
+                    if path
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .contains("/Story/RawFiles/Goals/") =>
+                {
+                    SourceKind::Osiris
+                }
                 _ => SourceKind::PlainStats,
             },
         },
@@ -101,6 +109,18 @@ fn overlay(workspace: &WorkspaceSnapshot, path: &Path, text: &str) -> OverlaySet
         },
     );
     overlays
+}
+
+fn source_position(text: &str, needle: &str) -> Position {
+    text.lines()
+        .enumerate()
+        .find_map(|(line, source)| {
+            source.find(needle).map(|character| Position {
+                line: u32::try_from(line).unwrap(),
+                character: u32::try_from(character).unwrap(),
+            })
+        })
+        .unwrap()
 }
 
 #[test]
@@ -278,6 +298,152 @@ fn thoth_overlays_replace_and_restore_disk_declarations() {
         ["Item and Spell Bug Fixes", "Shared"]
     );
     assert_eq!(workspace.resolve(&target, &OverlaySet::default()).len(), 3);
+}
+
+#[test]
+fn supports_source_backed_osiris_navigation_signatures_and_overlays() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let text = fs::read_to_string(&path).unwrap();
+    let overlays = OverlaySet::default();
+    let database_position = source_position(&text, "DB_Tracked");
+
+    let definitions = workspace.definitions_at(&path, database_position, &overlays);
+    assert_eq!(definitions.len(), 4);
+    assert_eq!(definitions[0].module, "MyMod");
+    assert!(definitions.iter().all(|definition| !definition.ambiguous));
+
+    let references = workspace.references_at(&path, database_position, false, &overlays);
+    assert_eq!(references.len(), 10);
+
+    let hover = workspace
+        .hover(&path, database_position, &overlays)
+        .unwrap();
+    assert!(hover.contains("**Osiris database** `DB_Tracked/2`"));
+    assert!(hover.contains("Signature: `DB_Tracked(CHARACTER, INTEGER)`"));
+    assert!(hover.contains("`MainGoal`"));
+    assert!(hover.contains("`SecondaryGoal`"));
+
+    let packed_position = source_position(&text, "DB_PackedOnly");
+    assert!(
+        workspace
+            .definitions_at(&path, packed_position, &overlays)
+            .is_empty()
+    );
+    let packed_hover = workspace.hover(&path, packed_position, &overlays).unwrap();
+    assert!(packed_hover.contains("No write is visible"));
+
+    let parent_position = source_position(&text, "SharedGoal");
+    let parent = workspace.definitions_at(&path, parent_position, &overlays);
+    assert_eq!(parent.len(), 1);
+    assert_eq!(parent[0].definition.name, "SharedGoal");
+
+    let callable_position = source_position(&text, "SharedProc");
+    let callables = workspace.definitions_at(&path, callable_position, &overlays);
+    assert_eq!(callables.len(), 4);
+    assert_eq!(callables[0].module, "MyMod");
+    assert_eq!(callables[1].module, "MyMod");
+    assert!(callables[0].ambiguous);
+    assert!(callables[1].ambiguous);
+    assert!(
+        callables[2..]
+            .iter()
+            .all(|definition| !definition.ambiguous)
+    );
+
+    let symbols = workspace.document_symbols(&path, &overlays);
+    assert_eq!(symbols.len(), 5);
+    assert!(symbols.iter().any(|symbol| symbol.name == "DB_Tracked"));
+    assert!(!symbols.iter().any(|symbol| symbol.name == "DB_PackedOnly"));
+
+    let open = overlay(&workspace, &path, &text);
+    let signature_line = text
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("DB_Tracked(_Actor, _Count)"))
+        .unwrap();
+    let signature = workspace
+        .signature_help(
+            &path,
+            Position {
+                line: u32::try_from(signature_line.0).unwrap(),
+                character: u32::try_from(signature_line.1.find(',').unwrap() + 1).unwrap(),
+            },
+            &open,
+        )
+        .unwrap();
+    assert_eq!(signature.label, "DB_Tracked(CHARACTER, INTEGER)");
+    assert_eq!(signature.active_parameter, 1);
+
+    let completion_text = "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nIF\nEvent()\nTHEN\nDB_Tr\nEXITSECTION\nENDEXITSECTION\n";
+    let completion_overlays = overlay(&workspace, &path, completion_text);
+    let completion = workspace.completion(
+        &path,
+        Position {
+            line: 7,
+            character: 5,
+        },
+        &completion_overlays,
+        true,
+    );
+    let database = completion
+        .items
+        .iter()
+        .find(|item| item.label == "DB_Tracked")
+        .unwrap();
+    assert_eq!(database.new_text, "DB_Tracked(${1:column1}, ${2:column2})");
+
+    let invalid_completion_text = "Version 1\nDB_Tr\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nEXITSECTION\nENDEXITSECTION\n";
+    let invalid_completion_overlays = overlay(&workspace, &path, invalid_completion_text);
+    assert!(
+        workspace
+            .completion(
+                &path,
+                Position {
+                    line: 1,
+                    character: 5,
+                },
+                &invalid_completion_overlays,
+                true,
+            )
+            .items
+            .is_empty()
+    );
+
+    let replacement = "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nPROC\nUnsavedProc((INTEGER)_Value)\nTHEN\nDB_Unsaved(_Value);\nEXITSECTION\nENDEXITSECTION\n";
+    let replacement_overlays = overlay(&workspace, &path, replacement);
+    let replacement_symbols = workspace.document_symbols(&path, &replacement_overlays);
+    assert!(
+        replacement_symbols
+            .iter()
+            .any(|symbol| symbol.name == "UnsavedProc")
+    );
+    assert!(
+        replacement_symbols
+            .iter()
+            .any(|symbol| symbol.name == "DB_Unsaved")
+    );
+    assert!(
+        replacement_symbols
+            .iter()
+            .all(|symbol| symbol.name != "SharedProc")
+    );
+}
+
+#[test]
+fn publishes_only_proven_osiris_syntax_diagnostics() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let malformed = "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nIF\nBroken(\nEXITSECTION\nENDEXITSECTION\n";
+    let overlays = overlay(&workspace, &path, malformed);
+    let diagnostics = workspace.diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning));
+
+    assert!(!diagnostics.is_empty());
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code == "osiris-syntax-error")
+    );
 }
 
 #[test]

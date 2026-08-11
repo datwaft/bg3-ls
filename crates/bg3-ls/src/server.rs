@@ -8,7 +8,11 @@ use bg3_ide::{
     DiagnosticSeverity as Bg3DiagnosticSeverity, OverlayDocument, OverlaySet, SourceLocation,
     Symbol, WorkspaceSnapshot,
 };
-use bg3_index::{Position as Bg3Position, SourceFile, SourceKind, TextRange, parse_source};
+use bg3_index::{
+    OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND,
+    Position as Bg3Position, SourceFile, SourceKind, TextRange, parse_source,
+    source_kind_for_document,
+};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tower_lsp_server::jsonrpc;
@@ -188,20 +192,12 @@ impl Backend {
 
 /// Selects a supported source format for an attached loose document.
 fn open_document_kind(path: &Path) -> Result<SourceKind, Error> {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("txt") => Ok(SourceKind::PlainStats),
-        Some("lsx") => Ok(SourceKind::Lsx),
-        Some("khn") => Ok(SourceKind::Thoth),
-        _ => Err(Error::Config(format!(
+    source_kind_for_document(path).ok_or_else(|| {
+        Error::Config(format!(
             "the server cannot attach to this source format: {}",
             path.display()
-        ))),
-    }
+        ))
+    })
 }
 
 #[allow(deprecated)]
@@ -593,6 +589,9 @@ fn symbol_kind(kind: &str) -> SymbolKind {
     match kind {
         "Equipment" | "ItemGroup" | "NameGroup" | "SpellSet" | "TreasureTable" => SymbolKind::ARRAY,
         "ThothFunction" => SymbolKind::FUNCTION,
+        OSIRIS_GOAL_KIND => SymbolKind::MODULE,
+        OSIRIS_DATABASE_KIND => SymbolKind::VARIABLE,
+        OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND => SymbolKind::FUNCTION,
         _ => SymbolKind::OBJECT,
     }
 }

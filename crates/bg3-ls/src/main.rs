@@ -45,7 +45,7 @@ enum Command {
     },
     /// Measures cold and warm full-data indexing with a dedicated disposable cache.
     Benchmark(BenchmarkOptions),
-    /// Checks project Stats files without an LSP client.
+    /// Checks project Stats files and Osiris goals without an LSP client.
     Check(CheckOptions),
 }
 
@@ -318,7 +318,7 @@ fn run_check(options: CheckOptions, cache: CacheStore) -> Result<ExitCode, Error
     })
 }
 
-/// Selects indexed legacy Stats files from defaults or explicit paths.
+/// Selects indexed diagnostic sources from defaults or explicit paths.
 fn select_check_paths(
     workspace: &WorkspaceSnapshot,
     project_root: &Path,
@@ -334,7 +334,7 @@ fn select_check_paths(
         return Ok(project
             .files
             .iter()
-            .filter(|(_, file)| file.source.kind == SourceKind::PlainStats)
+            .filter(|(_, file)| supports_diagnostics(file.source.kind))
             .map(|(path, _)| path.clone())
             .collect());
     }
@@ -355,35 +355,42 @@ fn select_check_paths(
         if path.is_dir() {
             for entry in walkdir::WalkDir::new(&path).follow_links(false) {
                 let entry = entry.map_err(|error| Error::Config(error.to_string()))?;
-                if entry.file_type().is_file() && is_indexed_plain_stats(workspace, entry.path()) {
+                if entry.file_type().is_file()
+                    && is_indexed_diagnostic_source(workspace, entry.path())
+                {
                     selected.insert(entry.into_path());
                 }
             }
-        } else if is_indexed_plain_stats(workspace, &path) {
+        } else if is_indexed_diagnostic_source(workspace, &path) {
             selected.insert(path);
         } else {
             return Err(Error::Config(format!(
-                "diagnostic path is not an indexed legacy Stats file: {}",
+                "diagnostic path is not an indexed Stats file or Osiris goal: {}",
                 path.display()
             )));
         }
     }
     if selected.is_empty() {
         return Err(Error::Config(format!(
-            "the selected paths contain no indexed legacy Stats files below {}",
+            "the selected paths contain no indexed Stats files or Osiris goals below {}",
             project_root.display()
         )));
     }
     Ok(selected.into_iter().collect())
 }
 
-/// Tests whether one path has a parsed legacy Stats record in any visible layer.
-fn is_indexed_plain_stats(workspace: &WorkspaceSnapshot, path: &Path) -> bool {
+/// Tests whether one path has a parsed diagnostic record in any visible layer.
+fn is_indexed_diagnostic_source(workspace: &WorkspaceSnapshot, path: &Path) -> bool {
     workspace.layers.iter().any(|layer| {
         layer
             .file(path)
-            .is_some_and(|file| file.source.kind == SourceKind::PlainStats)
+            .is_some_and(|file| supports_diagnostics(file.source.kind))
     })
+}
+
+/// Returns whether one source kind can produce proven diagnostics.
+fn supports_diagnostics(kind: SourceKind) -> bool {
+    matches!(kind, SourceKind::PlainStats | SourceKind::Osiris)
 }
 
 /// Prints diagnostics in the common path, line, column form.

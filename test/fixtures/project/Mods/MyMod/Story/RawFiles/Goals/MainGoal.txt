@@ -1,0 +1,40 @@
+Version 1
+SubGoalCombiner SGC_AND
+
+INITSECTION
+DB_Tracked((CHARACTER)CHARACTERGUID_Project_22222222-2222-2222-2222-222222222222, 1);
+
+KBSECTION
+
+IF
+ProjectEvent((CHARACTER)_Actor, (INTEGER)_Count, L"wide", 3.5, 33333333-3333-3333-3333-333333333333)
+AND
+DB_Tracked(_Actor, _Count)
+AND
+DB_PackedOnly(_Actor)
+AND
+ProjectQuery(_Actor)
+AND
+_Count >= 1
+THEN
+DB_Tracked(_Actor, _Count);
+SharedProc(_Actor);
+(CHARACTER)_Actor.ApplyExample(_Count);
+
+PROC
+SharedProc((CHARACTER)_Actor)
+THEN
+DB_Tracked(_Actor, 1);
+
+QRY
+ProjectQuery((CHARACTER)_Actor)
+AND
+DB_Tracked(_Actor, 1)
+THEN
+DB_NOOP(1);
+
+EXITSECTION
+NOT DB_Tracked((CHARACTER)CHARACTERGUID_Project_22222222-2222-2222-2222-222222222222, 1);
+ENDEXITSECTION
+
+ParentTargetEdge "SharedGoal"
