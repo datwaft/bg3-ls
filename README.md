@@ -51,8 +51,8 @@ directories. The colocated path keeps local grammar work testable, and release
 CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
-git clone --branch v0.6.0 https://github.com/datwaft/bg3-ls
-git clone --branch v0.2.0 https://github.com/datwaft/tree-sitter-bg3
+git clone --branch v0.7.0 https://github.com/datwaft/bg3-ls
+git clone --branch v0.3.0 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```
@@ -63,9 +63,11 @@ Confirm that `bg3-ls` is on `PATH`:
 bg3-ls --version
 ```
 
-Version 0.6.0 adds Thoth helper indexing and requires `tree-sitter-bg3`
-0.2.0. Existing Stats and LSX configuration remains compatible. Add
-`bg3_thoth` to the LSP `filetypes` list to attach the server to `.khn` buffers.
+Version 0.7.0 adds loose Osiris goal support and requires `tree-sitter-bg3`
+0.3.0. Existing configuration remains compatible. Add `bg3_osiris` to the LSP
+`filetypes` list to attach the server to goal buffers. `bg3-ls check` now also
+checks project goals for syntax errors. Disposable caches rebuild
+automatically after the upgrade.
 
 ## Configuration
 
