@@ -315,7 +315,7 @@ repository.
 `bg3-ls` supports one active project per server process. It does not implement
 rename, formatting, semantic tokens, code actions, arbitrary full-text search,
 general packed-file extraction, dependency/mod package localization, binary
-resource formats, automatic dependency discovery, or native Windows releases.
+resource formats, automatic dependency discovery, Intel macOS, or native Windows releases.
 LSX support uses a conservative field list. It does not provide an LSX schema,
 field-name completion, LSX diagnostics, or XML entity transformation for
 injected highlighting.
