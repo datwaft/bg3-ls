@@ -32,7 +32,7 @@ tower-lsp-server = "0.23"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tree-sitter = "0.26.11"
-tree-sitter-bg3 = { version = "=0.2.0", path = "../tree-sitter-bg3" }
+tree-sitter-bg3 = { version = "=0.3.0", path = "../tree-sitter-bg3" }
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.19", features = ["serde", "v4"] }
 walkdir = "2.5"

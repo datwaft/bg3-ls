@@ -26,11 +26,24 @@ pub enum SourceKind {
     Table,
     Lsx,
     Thoth,
+    Osiris,
     Localization,
 }
 
 /// The semantic kind used for declarations and calls in Thoth helper files.
 pub const THOTH_FUNCTION_KIND: &str = "ThothFunction";
+
+/// The semantic kind used for one loose Osiris goal file.
+pub const OSIRIS_GOAL_KIND: &str = "OsirisGoal";
+
+/// The semantic kind used for an implicit Osiris user database.
+pub const OSIRIS_DATABASE_KIND: &str = "OsirisDatabase";
+
+/// The semantic kind used for an Osiris procedure declaration.
+pub const OSIRIS_PROCEDURE_KIND: &str = "OsirisProcedure";
+
+/// The semantic kind used for an Osiris query declaration.
+pub const OSIRIS_QUERY_KIND: &str = "OsirisQuery";
 
 /// Identifies one source file without assigning it a load-order rank.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -52,6 +65,7 @@ pub struct Definition {
     pub uuid: Option<Uuid>,
     pub parent: Option<String>,
     pub schema_id: Option<String>,
+    pub arity: Option<u16>,
 }
 
 /// A semantic lookup target that remains valid across module compositions.
@@ -59,6 +73,9 @@ pub struct Definition {
 pub enum SymbolTarget {
     Named { kind: Option<String>, name: String },
     Uuid(Uuid),
+    OsirisGoal { name: String },
+    OsirisCallable { name: String, arity: u16 },
+    OsirisDatabase { name: String, arity: u16 },
 }
 
 /// A semantic symbol use extracted from a BG3 source file.
@@ -67,6 +84,45 @@ pub struct Reference {
     pub target: SymbolTarget,
     pub range: TextRange,
     pub context: String,
+}
+
+/// The semantic role of one Osiris database occurrence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum OsirisCallRole {
+    Read,
+    Write,
+}
+
+/// One exact source-backed type observation for an Osiris argument.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OsirisTypeEvidence {
+    pub type_name: String,
+    pub source_range: TextRange,
+}
+
+/// One argument supplied to an Osiris database call.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OsirisArgument {
+    pub range: TextRange,
+    pub evidence: Option<OsirisTypeEvidence>,
+}
+
+/// One read or write of an implicit Osiris user database.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OsirisDatabaseOccurrence {
+    pub name: String,
+    pub arity: u16,
+    pub range: TextRange,
+    pub selection_range: TextRange,
+    pub role: OsirisCallRole,
+    pub arguments: Vec<OsirisArgument>,
+}
+
+/// Osiris-specific facts retained with one cacheable goal record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OsirisFile {
+    pub goal: String,
+    pub occurrences: Vec<OsirisDatabaseOccurrence>,
 }
 
 /// Aggregate information about a function observed in indexed expressions.
@@ -94,6 +150,7 @@ pub struct ParsedFile {
     pub references: Vec<Reference>,
     pub observed_functions: Vec<ObservedFunction>,
     pub issues: Vec<SourceIssue>,
+    pub osiris: Option<OsirisFile>,
 }
 
 /// Converts byte offsets to line and UTF-8 column positions.

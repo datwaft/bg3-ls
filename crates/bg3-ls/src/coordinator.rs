@@ -8,7 +8,7 @@ use arc_swap::ArcSwapOption;
 use bg3_ide::WorkspaceSnapshot;
 use bg3_index::{
     CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, THOTH_FUNCTION_KIND,
-    discover_module,
+    discover_module, module_watch_roots,
 };
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -450,8 +450,13 @@ impl Coordinator {
             },
             NotifyConfig::default(),
         )?;
+        let mut watched = HashSet::new();
         for module in &config.modules {
-            watcher.watch(&module.root, RecursiveMode::Recursive)?;
+            for root in module_watch_roots(module, &config.game_data) {
+                if watched.insert(root.clone()) {
+                    watcher.watch(&root, RecursiveMode::Recursive)?;
+                }
+            }
         }
         for relative in ["Editor/Config/Stats", "Editor/Config/UuidObjects"] {
             watcher.watch(&config.game_data.join(relative), RecursiveMode::Recursive)?;
@@ -505,7 +510,11 @@ impl Coordinator {
                 let affected: HashSet<_> = config
                     .modules
                     .iter()
-                    .filter(|module| paths.iter().any(|path| path.starts_with(&module.root)))
+                    .filter(|module| {
+                        module_watch_roots(module, &config.game_data)
+                            .iter()
+                            .any(|root| paths.iter().any(|path| path.starts_with(root)))
+                    })
                     .map(|module| module.name.clone())
                     .collect();
                 if !affected.is_empty() {

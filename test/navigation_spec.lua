@@ -4,11 +4,14 @@ local project = root .. "/test/fixtures/project"
 local source = project .. "/Public/MyMod/Stats/Generated/Data/Passive.txt"
 local lsx_source = project .. "/Public/MyMod/Progressions/Progressions.lsx"
 local thoth_source = project .. "/Mods/MyMod/Scripts/thoth/helpers/MyMod.khn"
+local osiris_source = project .. "/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt"
 local cache = assert(vim.env.BG3_LS_TEST_CACHE)
 local dependency = vim.fn.tempname()
 local dependency_file = dependency .. "/Public/Fixes/Stats/Generated/Data/Passive.txt"
 local dependency_helper = dependency .. "/Mods/Fixes/Scripts/thoth/helpers/Watched.khn"
 local dependency_fixture_helper = dependency .. "/Mods/Fixes/Scripts/thoth/helpers/Fixes.khn"
+local dependency_goal = dependency .. "/Mods/Fixes/Story/RawFiles/Goals/WatchedGoal.txt"
+local dependency_fixture_goal = dependency .. "/Mods/Fixes/Story/RawFiles/Goals/FixesGoal.txt"
 vim.fn.mkdir(vim.fs.dirname(dependency_file), "p")
 vim.fn.writefile(
   vim.fn.readfile(root .. "/test/fixtures/dependency/Public/Fixes/Stats/Generated/Data/Passive.txt"),
@@ -18,6 +21,11 @@ vim.fn.mkdir(vim.fs.dirname(dependency_fixture_helper), "p")
 vim.fn.writefile(
   vim.fn.readfile(root .. "/test/fixtures/dependency/Mods/Fixes/Scripts/thoth/helpers/Fixes.khn"),
   dependency_fixture_helper
+)
+vim.fn.mkdir(vim.fs.dirname(dependency_fixture_goal), "p")
+vim.fn.writefile(
+  vim.fn.readfile(root .. "/test/fixtures/dependency/Mods/Fixes/Story/RawFiles/Goals/FixesGoal.txt"),
+  dependency_fixture_goal
 )
 
 local progress = {}
@@ -153,6 +161,13 @@ if vim.env.BG3_LS_SKIP_WATCHER_TESTS ~= "1" then
   -- progress. Give the OS watcher registration one event-loop turn to complete.
   vim.wait(250)
 
+  local function wait_for_refresh(previous_generation, message)
+    assert(vim.wait(10000, function()
+      return completed_progress > previous_generation
+    end, 50), message)
+  end
+
+  local previous_generation = completed_progress
   vim.fn.writefile({
     'new entry "CHAINED"',
     'type "PassiveData"',
@@ -161,42 +176,78 @@ if vim.env.BG3_LS_SKIP_WATCHER_TESTS ~= "1" then
     'new entry "WATCHED"',
     'type "PassiveData"',
   }, dependency_file)
-  assert(vim.wait(10000, function()
-    return completed_progress >= 2
-  end, 50), "the filesystem watcher did not publish a new index generation")
+  wait_for_refresh(previous_generation, "the filesystem watcher did not publish a new index generation")
 
   local watched = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "WATCHED" }, 5000)
   assert(watched[client_id] and #watched[client_id].result == 1, vim.inspect(watched))
 
+  previous_generation = completed_progress
   vim.fn.mkdir(vim.fs.dirname(dependency_helper), "p")
   vim.fn.writefile({
     "function WatchedHelper(value)",
     "  return value",
     "end",
   }, dependency_helper)
-  assert(vim.wait(10000, function()
-    return completed_progress >= 3
-  end, 50), "the watcher did not index an added Thoth helper")
+  wait_for_refresh(previous_generation, "the watcher did not index an added Thoth helper")
   local added = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "WatchedHelper" }, 5000)
   assert(added[client_id] and #added[client_id].result == 1, vim.inspect(added))
 
+  previous_generation = completed_progress
   vim.fn.writefile({
     "function ChangedHelper(value, fallback)",
     "  return value or fallback",
     "end",
   }, dependency_helper)
-  assert(vim.wait(10000, function()
-    return completed_progress >= 4
-  end, 50), "the watcher did not update a changed Thoth helper")
+  wait_for_refresh(previous_generation, "the watcher did not update a changed Thoth helper")
   local changed = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "ChangedHelper" }, 5000)
   assert(changed[client_id] and #changed[client_id].result == 1, vim.inspect(changed))
 
+  previous_generation = completed_progress
   vim.fn.delete(dependency_helper)
-  assert(vim.wait(10000, function()
-    return completed_progress >= 5
-  end, 50), "the watcher did not remove a deleted Thoth helper")
+  wait_for_refresh(previous_generation, "the watcher did not remove a deleted Thoth helper")
   local removed = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "ChangedHelper" }, 5000)
   assert(removed[client_id] and #removed[client_id].result == 0, vim.inspect(removed))
+
+  previous_generation = completed_progress
+  vim.fn.mkdir(vim.fs.dirname(dependency_goal), "p")
+  vim.fn.writefile({
+    "Version 1",
+    "SubGoalCombiner SGC_AND",
+    "INITSECTION",
+    "KBSECTION",
+    "PROC",
+    "WatchedProc((INTEGER)_Value)",
+    "THEN",
+    "DB_Watched(_Value);",
+    "EXITSECTION",
+    "ENDEXITSECTION",
+  }, dependency_goal)
+  wait_for_refresh(previous_generation, "the watcher did not index an added Osiris goal")
+  local added_goal = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "WatchedProc" }, 5000)
+  assert(added_goal[client_id] and #added_goal[client_id].result == 1, vim.inspect(added_goal))
+
+  previous_generation = completed_progress
+  vim.fn.writefile({
+    "Version 1",
+    "SubGoalCombiner SGC_AND",
+    "INITSECTION",
+    "KBSECTION",
+    "PROC",
+    "ChangedProc((INTEGER)_Value)",
+    "THEN",
+    "DB_Watched(_Value);",
+    "EXITSECTION",
+    "ENDEXITSECTION",
+  }, dependency_goal)
+  wait_for_refresh(previous_generation, "the watcher did not update a changed Osiris goal")
+  local changed_goal = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "ChangedProc" }, 5000)
+  assert(changed_goal[client_id] and #changed_goal[client_id].result == 1, vim.inspect(changed_goal))
+
+  previous_generation = completed_progress
+  vim.fn.delete(dependency_goal)
+  wait_for_refresh(previous_generation, "the watcher did not remove a deleted Osiris goal")
+  local removed_goal = vim.lsp.buf_request_sync(0, "workspace/symbol", { query = "ChangedProc" }, 5000)
+  assert(removed_goal[client_id] and #removed_goal[client_id].result == 0, vim.inspect(removed_goal))
 end
 
 vim.lsp.buf_detach_client(0, client_id)
@@ -307,6 +358,147 @@ assert(
 assert(vim.wait(1000, function()
   return vim.tbl_isempty(vim.diagnostic.get(0))
 end, 50), "the server published diagnostics for Thoth source")
+
+vim.bo.modified = false
+vim.cmd("edit " .. vim.fn.fnameescape(osiris_source))
+vim.bo.filetype = "bg3_osiris"
+local osiris_client_id = assert(vim.lsp.start(lsp_config))
+assert(osiris_client_id == client_id, "the Osiris buffer did not reuse the project client")
+assert(vim.wait(5000, function()
+  return vim.lsp.buf_is_attached(0, client_id)
+end, 10), "the project client did not attach to the Osiris buffer")
+
+local function osiris_position(needle)
+  for line, source_line in ipairs(vim.api.nvim_buf_get_lines(0, 0, -1, false)) do
+    local column = source_line:find(needle, 1, true)
+    if column then
+      return { line = line - 1, character = column - 1 }
+    end
+  end
+  error("missing Osiris test token: " .. needle)
+end
+
+local database_definition = vim.lsp.buf_request_sync(0, "textDocument/definition", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = osiris_position("DB_Tracked"),
+}, 5000)
+assert(
+  database_definition[client_id] and #database_definition[client_id].result == 4,
+  vim.inspect(database_definition)
+)
+
+local database_references = vim.lsp.buf_request_sync(0, "textDocument/references", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = osiris_position("DB_Tracked"),
+  context = { includeDeclaration = true },
+}, 5000)
+assert(
+  database_references[client_id] and #database_references[client_id].result == 10,
+  vim.inspect(database_references)
+)
+
+local parent_definition = vim.lsp.buf_request_sync(0, "textDocument/definition", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = osiris_position("SharedGoal"),
+}, 5000)
+assert(parent_definition[client_id] and #parent_definition[client_id].result == 1, vim.inspect(parent_definition))
+
+local database_hover = vim.lsp.buf_request_sync(0, "textDocument/hover", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = osiris_position("DB_Tracked"),
+}, 5000)
+local database_hover_text = assert(database_hover[client_id] and database_hover[client_id].result).contents.value
+assert(database_hover_text:find("DB_Tracked/2", 1, true), database_hover_text)
+assert(database_hover_text:find("DB_Tracked(CHARACTER, INTEGER)", 1, true), database_hover_text)
+
+local osiris_symbols = vim.lsp.buf_request_sync(0, "textDocument/documentSymbol", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+}, 5000)
+assert(osiris_symbols[client_id] and #osiris_symbols[client_id].result == 5, vim.inspect(osiris_symbols))
+
+local signature_position = osiris_position("DB_Tracked(_Actor, _Count)")
+signature_position.character = signature_position.character + #"DB_Tracked(_Actor,"
+local osiris_signature = vim.lsp.buf_request_sync(0, "textDocument/signatureHelp", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = signature_position,
+}, 5000)
+assert(osiris_signature[client_id] and osiris_signature[client_id].result, vim.inspect(osiris_signature))
+assert(
+  osiris_signature[client_id].result.signatures[1].label == "DB_Tracked(CHARACTER, INTEGER)",
+  vim.inspect(osiris_signature)
+)
+assert(osiris_signature[client_id].result.activeParameter == 1, vim.inspect(osiris_signature))
+
+replace_buffer({
+  "Version 1",
+  "SubGoalCombiner SGC_AND",
+  "INITSECTION",
+  "KBSECTION",
+  "IF",
+  "Event()",
+  "THEN",
+  "DB_Tr",
+  "EXITSECTION",
+  "ENDEXITSECTION",
+})
+assert(vim.wait(5000, function()
+  local results = vim.lsp.buf_request_sync(0, "textDocument/completion", {
+    textDocument = { uri = vim.uri_from_bufnr(0) },
+    position = { line = 7, character = 5 },
+  }, 1000)
+  local result = results and results[client_id] and results[client_id].result
+  local items = result and (result.items or result)
+  return items and vim.iter(items):any(function(item)
+    return item.label == "DB_Tracked"
+  end)
+end, 50), "Osiris completion did not include DB_Tracked")
+
+replace_buffer({
+  "Version 1",
+  "SubGoalCombiner SGC_AND",
+  "INITSECTION",
+  "KBSECTION",
+  "PROC",
+  "UnsavedProc((INTEGER)_Value)",
+  "THEN",
+  "DB_Unsaved(_Value);",
+  "EXITSECTION",
+  "ENDEXITSECTION",
+})
+assert(vim.wait(5000, function()
+  local result = vim.lsp.buf_request_sync(0, "textDocument/documentSymbol", {
+    textDocument = { uri = vim.uri_from_bufnr(0) },
+  }, 1000)
+  local symbols = result and result[client_id] and result[client_id].result
+  return symbols
+    and vim.iter(symbols):any(function(symbol)
+      return symbol.name == "UnsavedProc"
+    end)
+    and vim.iter(symbols):any(function(symbol)
+      return symbol.name == "DB_Unsaved"
+    end)
+end, 50), "the unsaved Osiris overlay did not replace disk declarations")
+
+replace_buffer({
+  "Version 1",
+  "SubGoalCombiner SGC_AND",
+  "INITSECTION",
+  "KBSECTION",
+  "IF",
+  "Broken(",
+  "EXITSECTION",
+  "ENDEXITSECTION",
+})
+assert(vim.wait(5000, function()
+  return vim.iter(vim.diagnostic.get(0)):any(function(diagnostic)
+    return diagnostic.code == "osiris-syntax-error" and diagnostic.source == "bg3"
+  end)
+end, 50), "the server did not publish the Osiris syntax diagnostic")
+
+replace_buffer(vim.fn.readfile(osiris_source))
+assert(vim.wait(5000, function()
+  return vim.tbl_isempty(vim.diagnostic.get(0))
+end, 50), "the Osiris syntax diagnostic remained after restoring valid source")
 
 assert(vim.tbl_contains(progress, "begin"), vim.inspect(progress))
 assert(vim.tbl_contains(progress, "end"), vim.inspect(progress))

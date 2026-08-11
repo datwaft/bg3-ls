@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bg3_index::{
-    CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SchemaCatalog, SourceFile, SourceKind,
-    SymbolTarget, THOTH_FUNCTION_KIND, discover_module, parse_source,
+    CacheStore, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
+    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, SchemaCatalog, SourceFile,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, discover_module, parse_source,
     read_base_localization_package, read_localization_package,
 };
 
@@ -201,6 +202,114 @@ fn parses_thoth_declarations_parameters_and_calls() {
 }
 
 #[test]
+fn parses_osiris_goals_declarations_calls_and_database_evidence() {
+    let root = fixtures();
+    let path = root.join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let parsed = parse_source(
+        SourceFile {
+            path: path.clone(),
+            kind: SourceKind::Osiris,
+        },
+        &fs::read_to_string(path).unwrap(),
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert!(parsed.issues.is_empty());
+    assert!(parsed.definitions.iter().any(|definition| {
+        definition.kind == OSIRIS_GOAL_KIND && definition.name == "MainGoal"
+    }));
+    assert!(parsed.definitions.iter().any(|definition| {
+        definition.kind == OSIRIS_PROCEDURE_KIND
+            && definition.name == "SharedProc"
+            && definition.arity == Some(1)
+    }));
+    assert!(parsed.definitions.iter().any(|definition| {
+        definition.kind == OSIRIS_QUERY_KIND
+            && definition.name == "ProjectQuery"
+            && definition.arity == Some(1)
+    }));
+    let databases: Vec<_> = parsed
+        .definitions
+        .iter()
+        .filter(|definition| definition.kind == OSIRIS_DATABASE_KIND)
+        .collect();
+    assert_eq!(databases.len(), 2);
+    assert!(databases.iter().any(|definition| {
+        definition.name == "DB_Tracked"
+            && definition.arity == Some(2)
+            && definition.fields["Parameters"] == "CHARACTER, INTEGER"
+    }));
+    assert!(
+        databases
+            .iter()
+            .any(|definition| { definition.name == "DB_NOOP" && definition.arity == Some(1) })
+    );
+    assert!(
+        !databases
+            .iter()
+            .any(|definition| definition.name == "DB_PackedOnly")
+    );
+    assert!(parsed.references.iter().any(|reference| {
+        reference.target
+            == SymbolTarget::OsirisCallable {
+                name: "SharedProc".into(),
+                arity: 1,
+            }
+    }));
+    assert!(parsed.references.iter().any(|reference| {
+        reference.target
+            == SymbolTarget::OsirisCallable {
+                name: "ApplyExample".into(),
+                arity: 1,
+            }
+    }));
+    assert!(parsed.references.iter().any(|reference| {
+        reference.target
+            == SymbolTarget::OsirisGoal {
+                name: "SharedGoal".into(),
+            }
+    }));
+    let osiris = parsed.osiris.as_ref().unwrap();
+    let tracked: Vec<_> = osiris
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.name == "DB_Tracked")
+        .collect();
+    assert_eq!(tracked.len(), 6);
+    assert!(tracked.iter().any(|occurrence| {
+        occurrence.role == OsirisCallRole::Read
+            && occurrence.arguments[0]
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.type_name == "CHARACTER")
+    }));
+}
+
+#[test]
+fn reports_only_osiris_syntax_errors_for_malformed_goals() {
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Broken.txt"),
+            kind: SourceKind::Osiris,
+        },
+        "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nIF\nBroken(\nEXITSECTION\nENDEXITSECTION\n",
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert!(!parsed.issues.is_empty());
+    assert!(
+        parsed
+            .issues
+            .iter()
+            .all(|issue| issue.code == "osiris-syntax-error")
+    );
+}
+
+#[test]
 fn discovers_thoth_helpers_only_below_mod_script_trees() {
     let root = fixtures();
     let module = ModuleSpec {
@@ -220,6 +329,32 @@ fn discovers_thoth_helpers_only_below_mod_script_trees() {
         file.kind != SourceKind::Thoth
             || file.path.to_string_lossy().contains("/Mods/")
                 && file.path.to_string_lossy().contains("/Scripts/thoth/")
+    }));
+}
+
+#[test]
+fn discovers_only_txt_files_at_the_osiris_goal_path() {
+    let root = fixtures();
+    let module = ModuleSpec {
+        name: "MyMod".into(),
+        root: root.join("project"),
+        role: ModuleRole::Project,
+    };
+    let files = discover_module(&module, &root.join("game"), "English", false).unwrap();
+
+    let goals: Vec<_> = files
+        .iter()
+        .filter(|file| file.kind == SourceKind::Osiris)
+        .collect();
+    assert_eq!(goals.len(), 2);
+    assert!(goals.iter().all(|file| {
+        file.path
+            .to_string_lossy()
+            .contains("/Story/RawFiles/Goals/")
+            && file
+                .path
+                .extension()
+                .is_some_and(|extension| extension == "txt")
     }));
 }
 
@@ -372,6 +507,45 @@ fn indexes_tables_lsx_and_localization() {
             == SymbolTarget::Uuid("dddddddd-dddd-dddd-dddd-dddddddddddd".parse().unwrap())
     }));
     assert!(index.functions.contains_key("SelectSpells"));
+}
+
+#[test]
+fn caches_and_invalidates_osiris_goal_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let goal_dir = directory.path().join("Mods/MyMod/Story/RawFiles/Goals");
+    fs::create_dir_all(&goal_dir).unwrap();
+    let goal = goal_dir.join("CacheGoal.txt");
+    let first_source = "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nPROC\nFirstProc()\nTHEN\nDB_Cached(1);\nEXITSECTION\nENDEXITSECTION\n";
+    fs::write(&goal, first_source).unwrap();
+    let module = ModuleSpec {
+        name: "MyMod".into(),
+        root: directory.path().to_path_buf(),
+        role: ModuleRole::Project,
+    };
+    let files = discover_module(&module, directory.path(), "English", false).unwrap();
+    let cache = CacheStore::new(directory.path().join("cache")).unwrap();
+
+    let (cold_files, cold) = cache
+        .build_module(&module, &files, &SchemaCatalog::default(), "English")
+        .unwrap();
+    let (warm_files, warm) = cache
+        .build_module(&module, &files, &SchemaCatalog::default(), "English")
+        .unwrap();
+    assert_eq!(cold.misses, 1);
+    assert_eq!(warm.hits, 1);
+    assert!(cold_files[0].osiris.is_some());
+    assert!(warm_files[0].definitions.iter().any(|definition| {
+        definition.kind == OSIRIS_PROCEDURE_KIND && definition.name == "FirstProc"
+    }));
+
+    fs::write(&goal, first_source.replace("FirstProc", "ChangedProcedure")).unwrap();
+    let (changed_files, changed) = cache
+        .build_module(&module, &files, &SchemaCatalog::default(), "English")
+        .unwrap();
+    assert_eq!(changed.misses, 1);
+    assert!(changed_files[0].definitions.iter().any(|definition| {
+        definition.kind == OSIRIS_PROCEDURE_KIND && definition.name == "ChangedProcedure"
+    }));
 }
 
 #[test]

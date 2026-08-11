@@ -1,0 +1,14 @@
+Version 1
+SubGoalCombiner SGC_AND
+
+INITSECTION
+
+KBSECTION
+
+PROC
+SharedProc((CHARACTER)_Actor)
+THEN
+DB_Tracked(_Actor, 1);
+
+EXITSECTION
+ENDEXITSECTION

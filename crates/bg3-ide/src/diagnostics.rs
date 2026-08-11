@@ -52,6 +52,16 @@ impl WorkspaceSnapshot {
                 message: issue.message.clone(),
             })
             .collect();
+        if file.source.kind == SourceKind::Osiris {
+            diagnostics.sort_by_key(|diagnostic| {
+                (
+                    diagnostic.range.start.line,
+                    diagnostic.range.start.character,
+                    diagnostic.code.clone(),
+                )
+            });
+            return diagnostics;
+        }
 
         for definition in &file.definitions {
             let schemas = schemas_for_definition(self, path, definition);
@@ -339,6 +349,9 @@ fn target_name(target: &SymbolTarget) -> String {
     match target {
         SymbolTarget::Named { name, .. } => name.clone(),
         SymbolTarget::Uuid(uuid) => uuid.to_string(),
+        SymbolTarget::OsirisGoal { name }
+        | SymbolTarget::OsirisCallable { name, .. }
+        | SymbolTarget::OsirisDatabase { name, .. } => name.clone(),
     }
 }
 

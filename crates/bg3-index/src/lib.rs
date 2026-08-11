@@ -20,10 +20,14 @@ pub use catalog::{
     FUNCTIONS, FunctionForm, FunctionSpec, ParameterSpec, field_kind, function_spec,
     is_lsx_value_field,
 };
-pub use discovery::{discover_module, path_is_within, resolve_path};
+pub use discovery::{
+    discover_module, module_watch_roots, path_is_within, resolve_path, source_kind_for_document,
+};
 pub use domain::{
-    Definition, LineMap, ObservedFunction, ParsedFile, Position, Reference, SourceFile,
-    SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
+    OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
+    OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference, SourceFile, SourceIssue,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
 };
 pub use localization::{
     LocalizationCatalog, LocalizedText, read_base_localization_package, read_localization_package,

@@ -5,10 +5,10 @@
 > make some BG3 mods using Neovim, and I didn't want to spend my time on
 > non-modding things.
 
-`bg3-ls` is a standalone language server for Baldur's Gate 3 Stats, LSX, and
-Thoth helper files. It indexes loose Toolkit and mod data outside the editor
-process. Neovim stays responsive while the server builds or refreshes its
-index.
+`bg3-ls` is a standalone language server for Baldur's Gate 3 Stats, LSX, Thoth
+helpers, and loose Osiris goals. It indexes loose Toolkit and mod data outside
+the editor process. Neovim stays responsive while the server builds or
+refreshes its index.
 
 The server provides:
 
@@ -25,13 +25,15 @@ The server provides:
 - disposable XDG caches for fast warm starts.
 
 The server uses [tree-sitter-bg3](https://github.com/datwaft/tree-sitter-bg3)
-for legacy Stats syntax, embedded value expressions, and Thoth helpers. It
-streams XML with `quick-xml`; it does not require a Neovim XML parser.
+for legacy Stats syntax, embedded value expressions, Thoth helpers, and Osiris
+goals. It streams XML with `quick-xml`; it does not require a Neovim XML
+parser.
 
 ## Requirements
 
 - Neovim nightly or Neovim 0.12+
-- the `bg3_stats`, `bg3_lsx`, and `bg3_thoth` filetypes from `tree-sitter-bg3`
+- the `bg3_stats`, `bg3_lsx`, `bg3_thoth`, and `bg3_osiris` filetypes from
+  `tree-sitter-bg3` 0.3.0
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
@@ -113,7 +115,7 @@ local project_root = assert(vim.fs.root(vim.uv.cwd(), ".nvim.lua"))
 
 vim.lsp.config("bg3", {
 	cmd = { "bg3-ls" },
-	filetypes = { "bg3_stats", "bg3_lsx", "bg3_thoth" },
+	filetypes = { "bg3_stats", "bg3_lsx", "bg3_thoth", "bg3_osiris" },
 	workspace_required = true,
 
 	-- Dependency files can be outside the project ancestor tree. Always return
@@ -147,10 +149,11 @@ Standard LSP completion works with Blink's LSP source without extra setup.
 Fidget displays the server's standard schema, discovery, parsing, module-build,
 and publication progress.
 
-Install `tree-sitter-bg3` as a Neovim plugin to detect `bg3_lsx` and
-`bg3_thoth` files. The plugin keeps XML as the outer LSX parser, injects
-`bg3_stats_value` into selected `LSString` fields, and parses `.khn` helpers
-with the dedicated Thoth grammar.
+Install `tree-sitter-bg3` as a Neovim plugin to detect `bg3_lsx`, `bg3_thoth`,
+and `bg3_osiris` files. The plugin keeps XML as the outer LSX parser, injects
+`bg3_stats_value` into selected `LSString` fields, parses `.khn` helpers with
+the dedicated Thoth grammar, and detects Osiris only for
+`Story/RawFiles/Goals/*.txt` paths.
 
 ## Load order
 
@@ -178,7 +181,8 @@ The server reads:
 - Toolkit `.stats` and `.tbl` files;
 - legacy `Public/*/Stats/Generated/Data/*.txt` files;
 - relevant loose `.lsx` resources below `Public` and `Mods`;
-- loose `Mods/<module>/Scripts/thoth/**/*.khn` helpers; and
+- loose `Mods/<module>/Scripts/thoth/**/*.khn` helpers;
+- loose `Mods/<module>/Story/RawFiles/Goals/*.txt` Osiris goals;
 - loose localization XML for the configured language;
 - the canonical configured-language LOCA catalog in the base-game localization
   package.
@@ -191,12 +195,23 @@ uses normal module precedence and replaces packed base text. The preview shows
 unresolved description parameters as source text because the server does not
 run game logic.
 
-Open Stats, LSX, and Thoth files replace their disk records with unsaved
-overlays. Closing a buffer restores its disk record. Thoth helper declarations
-provide definition, hover, references, function completion, declared-parameter
-signature help, document symbols, and workspace symbols. The server applies
-the configured module precedence to helper overrides. It does not infer Thoth
-parameter or return types and does not publish Thoth diagnostics.
+Open Stats, LSX, Thoth, and Osiris files replace their disk records with
+unsaved overlays. Closing a buffer restores its disk record. Thoth helper
+declarations provide definition, hover, references, function completion,
+declared-parameter signature help, document symbols, and workspace symbols.
+The server applies the configured module precedence to helper overrides. It
+does not infer Thoth parameter or return types and does not publish Thoth
+diagnostics.
+
+Osiris navigation includes goals, parent edges, `PROC` and `QRY` declarations,
+and user database occurrences. Procedure and query identity uses name and
+arity in one callable namespace. User databases use a separate name-and-arity
+namespace. A database has no source declaration, so definition returns the
+first write in each contributing loose goal. References include all visible
+reads and writes. Hover and signature help merge only explicit casts and
+literal evidence from visible source. Unknown or conflicting columns remain
+unknown. The server does not report missing Osiris symbols because engine and
+packed declarations can be unavailable.
 
 In supported LSX values, the server provides definition, hover, references,
 function completion, typed symbol completion, and signature help. It does not
@@ -237,13 +252,15 @@ workspace:
 ```sh
 bg3-ls check
 bg3-ls check Public/MyMod/Stats/Generated/Data/Passive.txt
+bg3-ls check Mods/MyMod/Story/RawFiles/Goals/MyGoal.txt
 bg3-ls check --format json --fail-on warning
 ```
 
 The command finds the nearest `bg3-ls.json` in the current directory or its
-ancestors. With no paths, it reports diagnostics for all legacy Stats files in
-the project module. Explicit files or directories limit diagnostic output. The
-command still indexes visible dependencies and base modules for resolution.
+ancestors. With no paths, it reports diagnostics for all legacy Stats files
+and loose Osiris goals in the project module. Explicit files or directories
+limit diagnostic output. The command still indexes visible dependencies and
+base modules for resolution.
 
 Human output uses one-based lines and columns. JSON output uses zero-based
 `line` and `character` values that match LSP positions. `--fail-on` accepts
@@ -305,6 +322,13 @@ generic expression identifiers, root-template UUID resolution, required
 fields, and inferred function arity. Static tooltip previews do not evaluate
 `DescriptionParams`, select runtime gender variants, or claim exact game UI
 rendering.
+
+Osiris support does not execute or compile Story, provide control-flow
+analysis, load a complete engine API catalog, or infer aliases from
+`story_header.div`. It does not diagnose database alias compatibility. A
+[follow-up issue](https://github.com/datwaft/bg3-ls/issues/37) tracks that
+check for configurations where installed or curated signatures prove the
+types.
 
 ## License
 
