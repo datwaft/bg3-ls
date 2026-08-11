@@ -51,7 +51,7 @@ directories. The colocated path keeps local grammar work testable, and release
 CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
-git clone --branch v0.7.0 https://github.com/datwaft/bg3-ls
+git clone --branch v0.8.0 https://github.com/datwaft/bg3-ls
 git clone --branch v0.3.0 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
@@ -86,11 +86,10 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
-Version 0.7.0 adds loose Osiris goal support and requires `tree-sitter-bg3`
-0.3.0. Existing configuration remains compatible. Add `bg3_osiris` to the LSP
-`filetypes` list to attach the server to goal buffers. `bg3-ls check` now also
-checks project goals for syntax errors. Disposable caches rebuild
-automatically after the upgrade.
+Version 0.8.0 adds the native `bg3-ls convert` command for loose LSF and LSX
+resources. Existing LSP configuration remains compatible, and the release
+continues to use `tree-sitter-bg3` 0.3.0. Native LSF output is uncompressed, so
+compiled files can be larger than their source resources.
 
 ## Configuration
 

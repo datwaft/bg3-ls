@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bg3-index = { version = "=0.7.0", path = "../bg3-index" }
+bg3-index = { version = "=0.8.0", path = "../bg3-index" }
 serde.workspace = true
 url.workspace = true
 uuid.workspace = true
