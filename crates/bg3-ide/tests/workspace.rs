@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bg3_ide::{DiagnosticSeverity, OverlayDocument, OverlaySet, WorkspaceSnapshot};
 use bg3_index::{
     LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, Position, SchemaCatalog, SourceFile,
-    SourceKind, SymbolTarget, discover_module, parse_source,
+    SourceKind, SymbolTarget, discover_module, parse_source, parse_tooltip_catalog,
 };
 
 fn fixtures() -> PathBuf {
@@ -83,6 +83,7 @@ fn overlay(workspace: &WorkspaceSnapshot, path: &Path, text: &str) -> OverlaySet
             kind: match path.extension().and_then(|extension| extension.to_str()) {
                 Some("lsx") => SourceKind::Lsx,
                 Some("khn") => SourceKind::Thoth,
+                Some("xml") => SourceKind::Localization,
                 Some("txt")
                     if path
                         .to_string_lossy()
@@ -1268,6 +1269,71 @@ data "Description" "h000000000000000000000000000000000004;1"
 
     assert!(hover.contains("**Packed title**"));
     assert!(hover.contains("Packed description\nSecond line"));
+}
+
+#[test]
+fn hover_resolves_static_and_typed_localization_tooltips() {
+    let (workspace, _) = fixture_workspace(200);
+    let title = "h111111111111111111111111111111111111";
+    let description = "h222222222222222222222222222222222222";
+    let catalog = LocalizationCatalog::from_entries(
+        "English",
+        [
+            (title.into(), 1, "Attack roll".into()),
+            (
+                description.into(),
+                1,
+                "Determines whether an attack hits.<br>Runtime detail".into(),
+            ),
+            (
+                "h000000000000000000000000000000000001".into(),
+                2,
+                "Test action & label".into(),
+            ),
+            (
+                "h000000000000000000000000000000000002".into(),
+                1,
+                "Synthetic description".into(),
+            ),
+        ],
+    )
+    .unwrap();
+    let xaml = format!(
+        r#"<ResourceDictionary xmlns:ls="synthetic"><Trigger Property="TagTooltip" Value="AttackRoll"><ls:LSTooltip Content="{description}" ls:AttachedProperties.InheritedTag="{title}"/></Trigger><Trigger Property="TagTooltip" Value="Dynamic"><ls:LSTooltip Content="{{Binding Runtime}}"/></Trigger></ResourceDictionary>"#
+    );
+    let tooltips = parse_tooltip_catalog(xaml.as_bytes()).unwrap();
+    let workspace = workspace
+        .with_base_localization(Arc::new(catalog))
+        .with_tooltips(Arc::new(tooltips));
+    let path = fixtures().join("project/Mods/MyMod/Localization/English/english.xml");
+    let text = r#"<contentList><content contentuid="h333333333333333333333333333333333333" version="1">An &lt;LSTag Tooltip="AttackRoll">attack&lt;/LSTag&gt;, <LSTag Type="Passive" Tooltip="CONSUMER">passive</LSTag>, and <LSTag Tooltip="Dynamic">dynamic</LSTag>.</content></contentList>"#;
+    let overlays = overlay(&workspace, &path, text);
+
+    let glossary_hover = workspace
+        .hover(&path, source_position(text, "AttackRoll"), &overlays)
+        .unwrap();
+    assert!(glossary_hover.contains("**Game tooltip** `AttackRoll`"));
+    assert!(glossary_hover.contains("**Attack roll**"));
+    assert!(glossary_hover.contains("Determines whether an attack hits."));
+    assert!(glossary_hover.contains("Runtime detail"));
+
+    let typed_hover = workspace
+        .hover(&path, source_position(text, "CONSUMER"), &overlays)
+        .unwrap();
+    assert!(typed_hover.contains("**PassiveData** `CONSUMER`"));
+    assert!(typed_hover.contains("**Test action & label**"));
+    assert!(typed_hover.contains("Synthetic description"));
+
+    assert!(
+        workspace
+            .hover(&path, source_position(text, "Dynamic"), &overlays)
+            .is_none()
+    );
+    assert!(
+        workspace
+            .diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning))
+            .is_empty()
+    );
 }
 
 #[test]

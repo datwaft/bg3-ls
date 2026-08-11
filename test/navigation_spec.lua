@@ -12,6 +12,7 @@ local dependency_helper = dependency .. "/Mods/Fixes/Scripts/thoth/helpers/Watch
 local dependency_fixture_helper = dependency .. "/Mods/Fixes/Scripts/thoth/helpers/Fixes.khn"
 local dependency_goal = dependency .. "/Mods/Fixes/Story/RawFiles/Goals/WatchedGoal.txt"
 local dependency_fixture_goal = dependency .. "/Mods/Fixes/Story/RawFiles/Goals/FixesGoal.txt"
+local localization_source = dependency .. "/Mods/Fixes/Localization/English/hover.xml"
 vim.fn.mkdir(vim.fs.dirname(dependency_file), "p")
 vim.fn.writefile(
   vim.fn.readfile(root .. "/test/fixtures/dependency/Public/Fixes/Stats/Generated/Data/Passive.txt"),
@@ -27,6 +28,10 @@ vim.fn.writefile(
   vim.fn.readfile(root .. "/test/fixtures/dependency/Mods/Fixes/Story/RawFiles/Goals/FixesGoal.txt"),
   dependency_fixture_goal
 )
+vim.fn.mkdir(vim.fs.dirname(localization_source), "p")
+vim.fn.writefile({
+  '<contentList><content contentuid="h333333333333333333333333333333333333" version="1">&lt;LSTag Type="Passive" Tooltip="CONSUMER">consumer&lt;/LSTag&gt;</content></contentList>',
+}, localization_source)
 
 local progress = {}
 local completed_progress = 0
@@ -103,6 +108,25 @@ assert(hover_text:find("---", 1, true), hover_text)
 assert(hover_text:find("Test action & label", 1, true), hover_text)
 assert(hover_text:find("Synthetic description", 1, true), hover_text)
 assert(hover_text:find("aaaaaaaa%-aaaa%-aaaa%-aaaa%-aaaaaaaaaaaa"), hover_text)
+
+vim.cmd("edit " .. vim.fn.fnameescape(localization_source))
+vim.bo.filetype = "bg3_localization"
+assert(vim.lsp.buf_attach_client(0, client_id))
+local localization_line = vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]
+local localization_tooltip = assert(localization_line:find("CONSUMER", 1, true)) - 1
+local localization_hover_response = vim.lsp.buf_request_sync(0, "textDocument/hover", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = { line = 0, character = localization_tooltip },
+}, 5000)
+local localization_hover = assert(
+  localization_hover_response[client_id] and localization_hover_response[client_id].result
+)
+local localization_hover_text = localization_hover.contents.value
+assert(localization_hover_text:find("PassiveData", 1, true), localization_hover_text)
+assert(localization_hover_text:find("Test action & label", 1, true), localization_hover_text)
+assert(localization_hover_text:find("Synthetic description", 1, true), localization_hover_text)
+
+vim.cmd("edit " .. vim.fn.fnameescape(source))
 
 local function replace_buffer(lines)
   vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)

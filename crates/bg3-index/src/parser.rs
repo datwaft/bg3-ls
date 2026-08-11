@@ -931,8 +931,9 @@ fn parse_localization(source: SourceFile, text: &str, language: &str) -> Result<
     let lines = LineMap::new(text);
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(false);
-    let mut current: Option<(String, String, TextRange, TextRange, String)> = None;
+    let mut current: Option<(String, String, TextRange, TextRange, usize, String)> = None;
     let mut definitions = Vec::new();
+    let mut references = Vec::new();
 
     loop {
         let start = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
@@ -948,22 +949,23 @@ fn parse_localization(source: SourceFile, text: &str, language: &str) -> Result<
                         lines.range(start, end),
                         attribute_range(text, &lines, start, end, "contentuid")
                             .unwrap_or_else(|| lines.range(start, end)),
+                        end,
                         String::new(),
                     ));
                 }
             }
             Event::Text(event) => {
-                if let Some((_, _, _, _, body)) = current.as_mut() {
+                if let Some((_, _, _, _, _, body)) = current.as_mut() {
                     body.push_str(&event.xml_content(XmlVersion::Implicit1_0)?);
                 }
             }
             Event::CData(event) => {
-                if let Some((_, _, _, _, body)) = current.as_mut() {
+                if let Some((_, _, _, _, _, body)) = current.as_mut() {
                     body.push_str(&event.xml_content(XmlVersion::Implicit1_0)?);
                 }
             }
             Event::GeneralRef(event) => {
-                if let Some((_, _, _, _, body)) = current.as_mut() {
+                if let Some((_, _, _, _, _, body)) = current.as_mut() {
                     let reference = event.xml10_content()?;
                     if let Some(number) = reference.strip_prefix('#') {
                         let (radix, digits) = number
@@ -990,7 +992,12 @@ fn parse_localization(source: SourceFile, text: &str, language: &str) -> Result<
                 }
             }
             Event::End(event) if event.name().as_ref() == b"content" => {
-                if let Some((handle, version, mut range, selection_range, body)) = current.take() {
+                if let Some((handle, version, mut range, selection_range, body_start, body)) =
+                    current.take()
+                {
+                    references.extend(localization_tooltip_references(
+                        text, &lines, body_start, start,
+                    ));
                     range.end = lines.position(end);
                     definitions.push(Definition {
                         kind: "Localization".into(),
@@ -1019,11 +1026,160 @@ fn parse_localization(source: SourceFile, text: &str, language: &str) -> Result<
     Ok(ParsedFile {
         source,
         definitions,
-        references: Vec::new(),
+        references,
         observed_functions: Vec::new(),
         issues: Vec::new(),
         osiris: None,
     })
+}
+
+/// Finds exact `Tooltip` value ranges in encoded, mixed, and literal LSTag markup.
+fn localization_tooltip_references(
+    source: &str,
+    lines: &LineMap,
+    start: usize,
+    end: usize,
+) -> Vec<Reference> {
+    let mut references = Vec::new();
+    let mut cursor = start;
+    while cursor < end {
+        let literal = source[cursor..end]
+            .find("<LSTag")
+            .map(|offset| cursor + offset);
+        let encoded = source[cursor..end]
+            .find("&lt;LSTag")
+            .map(|offset| cursor + offset);
+        let Some(tag_start) = [literal, encoded].into_iter().flatten().min() else {
+            break;
+        };
+        let name_end = tag_start
+            + if source[tag_start..].starts_with("&lt;") {
+                "&lt;LSTag".len()
+            } else {
+                "<LSTag".len()
+            };
+        if !source.as_bytes().get(name_end).is_some_and(|byte| {
+            byte.is_ascii_whitespace()
+                || *byte == b'>'
+                || source.as_bytes()[name_end..end].starts_with(b"&gt;")
+        }) {
+            cursor = name_end;
+            continue;
+        }
+        let Some(tag_end) = localization_tag_end(source, name_end, end) else {
+            break;
+        };
+        let attributes = localization_tag_attributes(source, name_end, tag_end);
+        if let Some((tooltip, value_start, value_end)) = attributes.get("Tooltip") {
+            let kind = attributes
+                .get("Type")
+                .and_then(|(value, _, _)| localization_tag_kind(value));
+            let target = if attributes.contains_key("Type") {
+                kind.map(|kind| SymbolTarget::Named {
+                    kind: Some(kind.into()),
+                    name: tooltip.clone(),
+                })
+            } else {
+                Some(SymbolTarget::Tooltip {
+                    name: tooltip.clone(),
+                })
+            };
+            if let Some(target) = target {
+                references.push(Reference {
+                    target,
+                    range: lines.range(*value_start, *value_end),
+                    context: "localization-tooltip".into(),
+                });
+            }
+        }
+        cursor = tag_end.saturating_add(1);
+    }
+    references
+}
+
+fn localization_tag_end(source: &str, start: usize, limit: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut quote = None;
+    let mut cursor = start;
+    while cursor < limit {
+        let byte = bytes[cursor];
+        if let Some(active) = quote {
+            if byte == active {
+                quote = None;
+            }
+        } else if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        } else if byte == b'>' || bytes[cursor..limit].starts_with(b"&gt;") {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn localization_tag_attributes(
+    source: &str,
+    start: usize,
+    end: usize,
+) -> BTreeMap<String, (String, usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut attributes = BTreeMap::new();
+    let mut cursor = start;
+    while cursor < end {
+        while cursor < end && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        let name_start = cursor;
+        while cursor < end
+            && (bytes[cursor].is_ascii_alphanumeric()
+                || matches!(bytes[cursor], b'_' | b':' | b'-'))
+        {
+            cursor += 1;
+        }
+        if cursor == name_start {
+            cursor += 1;
+            continue;
+        }
+        let name = &source[name_start..cursor];
+        while cursor < end && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'=') {
+            continue;
+        }
+        cursor += 1;
+        while cursor < end && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        let Some(quote @ (b'\'' | b'"')) = bytes.get(cursor).copied() else {
+            continue;
+        };
+        cursor += 1;
+        let value_start = cursor;
+        while cursor < end && bytes[cursor] != quote {
+            cursor += 1;
+        }
+        if cursor >= end {
+            break;
+        }
+        attributes.insert(
+            name.to_owned(),
+            (source[value_start..cursor].to_owned(), value_start, cursor),
+        );
+        cursor += 1;
+    }
+    attributes
+}
+
+fn localization_tag_kind(value: &str) -> Option<&'static str> {
+    match value {
+        "ActionResource" => Some("ActionResource"),
+        "Interrupt" => Some("InterruptData"),
+        "Passive" => Some("PassiveData"),
+        "Spell" => Some("SpellData"),
+        "Status" => Some("StatusData"),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]

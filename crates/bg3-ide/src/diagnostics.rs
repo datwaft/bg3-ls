@@ -39,7 +39,10 @@ impl WorkspaceSnapshot {
         };
         // The Stats catalogs do not describe LSX nodes. Do not report legacy
         // schema errors until the server has a verified LSX schema source.
-        if matches!(file.source.kind, SourceKind::Lsx | SourceKind::Thoth) {
+        if matches!(
+            file.source.kind,
+            SourceKind::Lsx | SourceKind::Thoth | SourceKind::Localization
+        ) {
             return Vec::new();
         }
         let mut diagnostics: Vec<_> = file
@@ -348,6 +351,7 @@ fn is_diagnosable_kind(kind: &str) -> bool {
 fn target_name(target: &SymbolTarget) -> String {
     match target {
         SymbolTarget::Named { name, .. } => name.clone(),
+        SymbolTarget::Tooltip { name } => name.clone(),
         SymbolTarget::Uuid(uuid) => uuid.to_string(),
         SymbolTarget::OsirisGoal { name }
         | SymbolTarget::OsirisCallable { name, .. }

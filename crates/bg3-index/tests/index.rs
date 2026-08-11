@@ -5,7 +5,8 @@ use bg3_index::{
     CacheStore, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, SchemaCatalog, SourceFile,
     SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, discover_module, parse_source,
-    read_base_localization_package, read_localization_package,
+    parse_tooltip_catalog, read_base_localization_package, read_base_tooltip_catalog,
+    read_localization_package, source_kind_for_document,
 };
 
 fn fixtures() -> PathBuf {
@@ -60,21 +61,28 @@ fn synthetic_loca(entries: &[(&str, u16, &str)]) -> Vec<u8> {
 }
 
 fn synthetic_package(language: &str, loca: &[u8], compression: u8) -> Vec<u8> {
+    synthetic_package_entry(
+        &format!(
+            "Localization/{language}/{}.loca",
+            language.to_ascii_lowercase()
+        ),
+        loca,
+        compression,
+    )
+}
+
+fn synthetic_package_entry(name: &str, contents: &[u8], compression: u8) -> Vec<u8> {
     let stored = match compression {
-        0 => loca.to_vec(),
-        2 => lz4_flex::block::compress(loca),
-        _ => loca.to_vec(),
+        0 => contents.to_vec(),
+        2 => lz4_flex::block::compress(contents),
+        _ => contents.to_vec(),
     };
     let mut entry = vec![0_u8; 272];
-    let name = format!(
-        "Localization/{language}/{}.loca",
-        language.to_ascii_lowercase()
-    );
     entry[..name.len()].copy_from_slice(name.as_bytes());
     entry[256..260].copy_from_slice(&40_u32.to_le_bytes());
     entry[263] = compression;
     entry[264..268].copy_from_slice(&u32::try_from(stored.len()).unwrap().to_le_bytes());
-    let uncompressed = if compression == 0 { 0 } else { loca.len() };
+    let uncompressed = if compression == 0 { 0 } else { contents.len() };
     entry[268..272].copy_from_slice(&u32::try_from(uncompressed).unwrap().to_le_bytes());
 
     let compressed_list = lz4_flex::block::compress(&entry);
@@ -610,6 +618,108 @@ fn preserves_loose_localization_entities_and_cdata() {
 }
 
 #[test]
+fn parses_localization_tooltip_references_in_all_supported_spellings() {
+    let text = r#"<contentList>
+<content contentuid="h111111111111111111111111111111111111" version="1">Encoded &lt;LSTag Tooltip="AttackRoll"&gt;attack&lt;/LSTag&gt;; mixed &lt;LSTag Type="Status" Tooltip='SLOWED'>slow&lt;/LSTag&gt;; literal <LSTag Tooltip="TEST_PASSIVE" Type="Passive">passive</LSTag>; dynamic <LSTag Type="Unknown" Tooltip="IGNORED">ignored</LSTag>.</content>
+</contentList>"#;
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Localization/English/english.xml"),
+            kind: SourceKind::Localization,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert_eq!(parsed.references.len(), 3);
+    assert_eq!(
+        parsed.references[0].target,
+        SymbolTarget::Tooltip {
+            name: "AttackRoll".into()
+        }
+    );
+    assert_eq!(
+        parsed.references[1].target,
+        SymbolTarget::Named {
+            kind: Some("StatusData".into()),
+            name: "SLOWED".into(),
+        }
+    );
+    assert_eq!(
+        parsed.references[2].target,
+        SymbolTarget::Named {
+            kind: Some("PassiveData".into()),
+            name: "TEST_PASSIVE".into(),
+        }
+    );
+    for reference in &parsed.references {
+        assert_eq!(reference.range.start.line, 1);
+        let line = text.lines().nth(1).unwrap();
+        let start = usize::try_from(reference.range.start.character).unwrap();
+        let end = usize::try_from(reference.range.end.character).unwrap();
+        assert!(matches!(
+            &line[start..end],
+            "AttackRoll" | "SLOWED" | "TEST_PASSIVE"
+        ));
+    }
+}
+
+#[test]
+fn classifies_localization_xml_as_an_open_document() {
+    assert_eq!(
+        source_kind_for_document(Path::new(
+            "/workspace/Mods/MyMod/Localization/English/english.xml"
+        )),
+        Some(SourceKind::Localization)
+    );
+}
+
+#[test]
+fn reads_only_static_entries_from_the_packed_tooltip_glossary() {
+    let title = "h111111111111111111111111111111111111";
+    let description = "h222222222222222222222222222222222222";
+    let xaml = format!(
+        r#"<ResourceDictionary xmlns:ls="synthetic">
+<Style><Style.Triggers>
+<Trigger Property="TagTooltip" Value="AttackRoll"><Setter><Setter.Value><ls:LSTooltip Content="{description}" ls:AttachedProperties.InheritedTag="{title}"/></Setter.Value></Setter></Trigger>
+<Trigger Property="TagTooltip" Value="Dynamic"><Setter><Setter.Value><ls:LSTooltip Content="{{Binding RuntimeValue}}"/></Setter.Value></Setter></Trigger>
+<Trigger Property="TagTooltip" Value="TitleOnly"><Setter><Setter.Value><ls:LSTooltip Tag="{title}"/></Setter.Value></Setter></Trigger>
+</Style.Triggers></Style>
+</ResourceDictionary>"#
+    );
+    let parsed = parse_tooltip_catalog(xaml.as_bytes()).unwrap();
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(
+        parsed.get("AttackRoll").unwrap().title.as_deref(),
+        Some(title)
+    );
+    assert_eq!(
+        parsed.get("AttackRoll").unwrap().description.as_deref(),
+        Some(description)
+    );
+    assert!(parsed.get("Dynamic").is_none());
+
+    for compression in [0, 2] {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("Game.pak"),
+            synthetic_package_entry(
+                "Public/Game/GUI/Library/Tooltips.xaml",
+                xaml.as_bytes(),
+                compression,
+            ),
+        )
+        .unwrap();
+        let catalog = read_base_tooltip_catalog(directory.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(catalog, parsed);
+    }
+}
+
+#[test]
 fn rejects_unsafe_localization_package_variants() {
     let loca = synthetic_loca(&[("h111111111111111111111111111111111111", 1, "Synthetic")]);
     let directory = tempfile::tempdir().unwrap();
@@ -690,6 +800,38 @@ fn caches_and_invalidates_the_base_localization_catalog() {
 
     let missing = read_base_localization_package(directory.path(), "English").unwrap();
     assert!(missing.is_none());
+}
+
+#[test]
+fn caches_and_invalidates_the_base_tooltip_catalog() {
+    let directory = tempfile::tempdir().unwrap();
+    let game = directory.path().join("game");
+    fs::create_dir_all(&game).unwrap();
+    let package = game.join("Game.pak");
+    let first = br#"<Root xmlns:ls="synthetic"><Trigger Property="TagTooltip" Value="First"><ls:LSTooltip Content="h111111111111111111111111111111111111"/></Trigger></Root>"#;
+    fs::write(
+        &package,
+        synthetic_package_entry("Public/Game/GUI/Library/Tooltips.xaml", first, 0),
+    )
+    .unwrap();
+    let cache = CacheStore::new(directory.path().join("cache")).unwrap();
+
+    let (catalog, first_hit) = cache.load_base_tooltips(&game).unwrap().unwrap();
+    assert!(!first_hit);
+    assert!(catalog.get("First").is_some());
+    let (_, second_hit) = cache.load_base_tooltips(&game).unwrap().unwrap();
+    assert!(second_hit);
+
+    let second = br#"<Root xmlns:ls="synthetic"><Trigger Property="TagTooltip" Value="SecondChanged"><ls:LSTooltip Content="h222222222222222222222222222222222222"/></Trigger></Root>"#;
+    fs::write(
+        &package,
+        synthetic_package_entry("Public/Game/GUI/Library/Tooltips.xaml", second, 0),
+    )
+    .unwrap();
+    let (changed, changed_hit) = cache.load_base_tooltips(&game).unwrap().unwrap();
+    assert!(!changed_hit);
+    assert!(changed.get("First").is_none());
+    assert!(changed.get("SecondChanged").is_some());
 }
 
 #[test]

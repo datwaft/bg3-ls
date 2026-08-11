@@ -8,7 +8,7 @@ use arc_swap::ArcSwapOption;
 use bg3_ide::WorkspaceSnapshot;
 use bg3_index::{
     CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, THOTH_FUNCTION_KIND,
-    discover_module, module_watch_roots,
+    TooltipCatalog, base_tooltip_package_path, discover_module, module_watch_roots,
 };
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -39,6 +39,7 @@ pub struct IndexInfo {
     pub enumerations: usize,
     pub resources: usize,
     pub localizations: usize,
+    pub tooltips: usize,
     pub functions: usize,
     pub cache_hits: usize,
     pub cache_misses: usize,
@@ -248,6 +249,15 @@ impl Coordinator {
         } else {
             None
         };
+        let tooltip_task = if affected.is_none() {
+            let tooltip_cache = cache.clone();
+            let game_data = config.game_data.clone();
+            Some(tokio::task::spawn_blocking(move || {
+                tooltip_cache.load_base_tooltips(&game_data)
+            }))
+        } else {
+            None
+        };
         let schema = if affected.is_some() {
             previous
                 .as_ref()
@@ -314,6 +324,49 @@ impl Coordinator {
                         )
                         .await;
                     Arc::new(LocalizationCatalog::new(config.language.clone()))
+                }
+            }
+        };
+        let tooltips = if affected.is_some() {
+            previous
+                .as_ref()
+                .map(|workspace| workspace.tooltips())
+                .ok_or_else(|| Error::Index("a scoped build has no previous snapshot".into()))?
+        } else {
+            match tooltip_task
+                .expect("a full build starts a tooltip task")
+                .await
+            {
+                Ok(Ok(Some((catalog, hit)))) => {
+                    if hit {
+                        cache_stats.hits += 1;
+                    } else {
+                        cache_stats.misses += 1;
+                    }
+                    Arc::new(catalog)
+                }
+                Ok(Ok(None)) => Arc::new(TooltipCatalog::default()),
+                Ok(Err(error)) => {
+                    client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "BG3 tooltip glossary is unavailable; localization tag hover will use typed loose resources only: {error}"
+                            ),
+                        )
+                        .await;
+                    Arc::new(TooltipCatalog::default())
+                }
+                Err(error) => {
+                    client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "BG3 tooltip-glossary task failed; localization tag hover will use typed loose resources only: {error}"
+                            ),
+                        )
+                        .await;
+                    Arc::new(TooltipCatalog::default())
                 }
             }
         };
@@ -428,6 +481,7 @@ impl Coordinator {
             config.max_completion_items,
         )
         .with_base_localization(base_localization)
+        .with_tooltips(tooltips)
         .with_incomplete_kinds(incomplete_kinds);
         let info = index_info(&workspace, cache_stats);
         Ok((workspace, info))
@@ -464,6 +518,10 @@ impl Coordinator {
         let localization_root = config.game_data.join("Localization");
         if localization_root.is_dir() {
             watcher.watch(&localization_root, RecursiveMode::Recursive)?;
+        }
+        let tooltip_package = base_tooltip_package_path(&config.game_data);
+        if tooltip_package.is_file() {
+            watcher.watch(&tooltip_package, RecursiveMode::NonRecursive)?;
         }
         *active = Some(watcher);
         drop(active);
@@ -502,6 +560,7 @@ impl Coordinator {
                     path.starts_with(config.game_data.join("Editor/Config/Stats"))
                         || path.starts_with(config.game_data.join("Editor/Config/UuidObjects"))
                         || path.starts_with(config.game_data.join("Localization"))
+                        || path == &base_tooltip_package_path(&config.game_data)
                 });
                 if full_rebuild_required {
                     coordinator.rebuild(Arc::clone(&config), &client).await;
@@ -536,6 +595,7 @@ fn index_info(workspace: &WorkspaceSnapshot, cache: CacheStats) -> IndexInfo {
         schemas: workspace.schema.by_id.len(),
         enumerations: workspace.schema.enumerations.len(),
         localizations: workspace.base_localization_count(),
+        tooltips: workspace.tooltip_count(),
         cache_hits: cache.hits,
         cache_misses: cache.misses,
         ..IndexInfo::default()
