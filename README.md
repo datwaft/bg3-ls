@@ -33,7 +33,7 @@ parser.
 
 - Neovim nightly or Neovim 0.12+
 - the `bg3_stats`, `bg3_lsx`, `bg3_localization`, `bg3_thoth`, and
-  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.4.1
+  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.4.2
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
@@ -51,8 +51,8 @@ directories. The colocated path keeps local grammar work testable, and release
 CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
-git clone --branch v0.10.0 https://github.com/datwaft/bg3-ls
-git clone --branch v0.4.1 https://github.com/datwaft/tree-sitter-bg3
+git clone --branch v0.10.1 https://github.com/datwaft/bg3-ls
+git clone --branch v0.4.2 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```
@@ -85,6 +85,9 @@ written. A failed conversion does not change an existing destination.
 
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
+
+Version 0.10.1 aligns source builds with `tree-sitter-bg3` 0.4.2. Existing
+configuration remains compatible, and no migration is required.
 
 Version 0.10.0 adds configured-language hover for LSX attributes with
 `type="TranslatedString"`. Loose localization keeps normal module precedence
