@@ -51,7 +51,7 @@ directories. The colocated path keeps local grammar work testable, and release
 CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
-git clone --branch v0.9.0 https://github.com/datwaft/bg3-ls
+git clone --branch v0.10.0 https://github.com/datwaft/bg3-ls
 git clone --branch v0.4.1 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
@@ -85,6 +85,12 @@ written. A failed conversion does not change an existing destination.
 
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
+
+Version 0.10.0 adds configured-language hover for LSX attributes with
+`type="TranslatedString"`. Loose localization keeps normal module precedence
+and replaces packed base text. Existing configuration remains compatible, and
+no migration is required. This release continues to use `tree-sitter-bg3`
+0.4.1.
 
 Version 0.9.0 adds resolved hover for static game tooltip text and supported
 typed `LSTag` resources in localization XML. Runtime-bound tooltip values stay
