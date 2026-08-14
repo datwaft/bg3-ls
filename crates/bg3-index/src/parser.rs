@@ -15,6 +15,7 @@ use crate::domain::{
     OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference, SourceFile, SourceIssue,
     SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
 };
+use crate::localization::valid_handle;
 use crate::schema::{SchemaCatalog, SchemaDefinition};
 use crate::xml::{attribute_range, attributes};
 
@@ -883,12 +884,25 @@ fn parse_lsx(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
                         } else {
                             continue;
                         };
+                        let range = attribute_range(text, &lines, start, end, key)
+                            .unwrap_or_else(|| lines.range(start, end));
+                        if key == "handle"
+                            && values
+                                .get("type")
+                                .is_some_and(|field_type| field_type == "TranslatedString")
+                            && valid_handle(&attribute)
+                        {
+                            references.push(Reference {
+                                target: SymbolTarget::Named {
+                                    kind: Some("Localization".into()),
+                                    name: attribute.clone(),
+                                },
+                                range,
+                                context: "localization".into(),
+                            });
+                        }
                         resource.record.fields.insert(name.clone(), attribute);
-                        resource.record.ranges.insert(
-                            name.clone(),
-                            attribute_range(text, &lines, start, end, key)
-                                .unwrap_or_else(|| lines.range(start, end)),
-                        );
+                        resource.record.ranges.insert(name.clone(), range);
                     }
                 }
             }
