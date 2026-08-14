@@ -253,6 +253,10 @@ In supported LSX values, the server provides definition, hover, references,
 function completion, typed symbol completion, and signature help. It does not
 apply legacy Stats schema diagnostics to LSX documents.
 
+Hover on an LSX attribute with `type="TranslatedString"` resolves its `handle`
+through the configured-language localization sources. Loose localization keeps
+normal module precedence and replaces packed base text.
+
 Toolkit `.stats` and `.tbl` files remain readable navigation targets. The BG3
 client attaches to localization XML for tooltip hover and references. It does
 not attach to Toolkit Stats XML documents.

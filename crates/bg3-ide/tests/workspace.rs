@@ -550,6 +550,59 @@ fn supports_language_features_in_lsx_values_without_stats_diagnostics() {
 }
 
 #[test]
+fn hovers_typed_lsx_localization_handles_from_loose_and_packed_sources() {
+    let (workspace, _) = fixture_workspace(200);
+    let loose_handle = "h000000000000000000000000000000000001";
+    let packed_handle = "h333333333333333333333333333333333333";
+    let catalog = LocalizationCatalog::from_entries(
+        "English",
+        [
+            (loose_handle.into(), 1, "Shadowed packed text".into()),
+            (
+                packed_handle.into(),
+                2,
+                "Packed <LSTag Type=\"Status\">description</LSTag>".into(),
+            ),
+        ],
+    )
+    .unwrap();
+    let workspace = workspace.with_base_localization(Arc::new(catalog));
+    let path = fixtures().join("project/Public/MyMod/Progressions/ProgressionDescriptions.lsx");
+    let text = format!(
+        r#"<node id="ProgressionDescription">
+  <attribute id="DisplayName" type="TranslatedString" handle="{loose_handle}" version="2" />
+  <attribute id="Description" type="TranslatedString" handle="{packed_handle}" version="2" />
+  <attribute id="TechnicalName" type="LSString" handle="{packed_handle}" />
+</node>"#
+    );
+    let overlays = overlay(&workspace, &path, &text);
+
+    let loose_hover = workspace
+        .hover(&path, source_position(&text, loose_handle), &overlays)
+        .unwrap();
+    assert!(loose_hover.contains(&format!("**Localization** `{loose_handle}`")));
+    assert!(loose_hover.contains("Test action & label"));
+    assert!(!loose_hover.contains("Shadowed packed text"));
+
+    let packed_hover = workspace
+        .hover(&path, source_position(&text, packed_handle), &overlays)
+        .unwrap();
+    assert!(packed_hover.contains(&format!("**Localization** `{packed_handle}`")));
+    assert!(packed_hover.contains("Packed description"));
+
+    let ordinary_line = text.lines().nth(3).unwrap();
+    let ordinary_position = Position {
+        line: 3,
+        character: u32::try_from(ordinary_line.find(packed_handle).unwrap()).unwrap(),
+    };
+    assert!(
+        workspace
+            .hover(&path, ordinary_position, &overlays)
+            .is_none()
+    );
+}
+
+#[test]
 fn resolves_override_layers_from_highest_to_lowest() {
     let (workspace, _) = fixture_workspace(200);
     let definitions = workspace.resolve(

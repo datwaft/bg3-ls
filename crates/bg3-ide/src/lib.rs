@@ -255,10 +255,18 @@ impl WorkspaceSnapshot {
 
     /// Returns a rich Markdown description for the symbol under one position.
     pub fn hover(&self, path: &Path, position: Position, overlays: &OverlaySet) -> Option<String> {
+        let target = self.target_at(path, position, overlays)?;
+        if let SymbolTarget::Named {
+            kind: Some(kind),
+            name,
+        } = &target
+            && kind == "Localization"
+        {
+            return self.localization_hover(name, overlays);
+        }
         if let Some(field) = self.field_at(path, position, overlays) {
             return Some(field);
         }
-        let target = self.target_at(path, position, overlays)?;
         if let SymbolTarget::Tooltip { name } = &target {
             return self.tooltip_tag_hover(name, overlays);
         }
@@ -324,6 +332,15 @@ impl WorkspaceSnapshot {
             markdown.push_str(&preview);
         }
         Some(markdown)
+    }
+
+    /// Renders the configured-language value for one exact localization handle.
+    fn localization_hover(&self, handle: &str, overlays: &OverlaySet) -> Option<String> {
+        let text = self.localized_value(handle, overlays)?;
+        Some(format!(
+            "**Localization** `{handle}`\n\n{}",
+            render_localized_text(&text)
+        ))
     }
 
     /// Describes one database from all visible loose occurrence evidence.

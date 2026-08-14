@@ -518,6 +518,37 @@ fn indexes_tables_lsx_and_localization() {
 }
 
 #[test]
+fn indexes_typed_lsx_localization_handles_without_resource_identity() {
+    let handle = "h111111111111111111111111111111111111";
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Public/MyMod/Progressions/ProgressionDescriptions.lsx"),
+            kind: SourceKind::Lsx,
+        },
+        &format!(
+            r#"<node id="ProgressionDescription">
+  <attribute id="Description" type="TranslatedString" handle="{handle}" version="1" />
+  <attribute id="TechnicalName" type="LSString" handle="h222222222222222222222222222222222222" />
+</node>"#
+        ),
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert!(parsed.definitions.is_empty());
+    assert_eq!(parsed.references.len(), 1);
+    assert_eq!(
+        parsed.references[0].target,
+        SymbolTarget::Named {
+            kind: Some("Localization".into()),
+            name: handle.into(),
+        }
+    );
+    assert_eq!(parsed.references[0].context, "localization");
+}
+
+#[test]
 fn caches_and_invalidates_osiris_goal_records() {
     let directory = tempfile::tempdir().unwrap();
     let goal_dir = directory.path().join("Mods/MyMod/Story/RawFiles/Goals");
