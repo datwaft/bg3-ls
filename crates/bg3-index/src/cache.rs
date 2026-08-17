@@ -17,6 +17,7 @@ use crate::package::package_fingerprint;
 use crate::parser::parse_source;
 use crate::schema::SchemaCatalog;
 use crate::thoth::PackagedThothCatalog;
+use crate::thoth_facts::{CachedThothFacts, PackagedThothFacts, parse_packaged_thoth_facts};
 use crate::tooltip::{TooltipCatalog, base_tooltip_package_path, read_base_tooltip_catalog};
 use crate::{Error, ModuleSpec};
 
@@ -289,6 +290,51 @@ impl CacheStore {
             },
         )?;
         Ok((catalog, false))
+    }
+
+    /// Loads parsed, source-backed facts for every candidate in a packaged
+    /// Thoth catalog.
+    ///
+    /// The catalog digest and extractor version form the cache identity. The
+    /// parser callback runs only after a cache miss, and receives a
+    /// `PackagedThothSource` rather than a fabricated filesystem path.
+    pub fn load_packaged_thoth_facts<F, Parse>(
+        &self,
+        catalog: &PackagedThothCatalog,
+        extractor_version: &str,
+        parse: Parse,
+    ) -> Result<(PackagedThothFacts<F>, bool), Error>
+    where
+        F: CachedThothFacts,
+        Parse: Fn(&crate::PackagedThothSource) -> Result<F, Error>,
+    {
+        let catalog_bytes = postcard::to_stdvec(catalog)?;
+        let mut identity = blake3::Hasher::new();
+        identity.update(extractor_version.as_bytes());
+        identity.update(&catalog_bytes);
+        let digest = identity.finalize().to_hex().to_string();
+        let cache_path = self
+            .root
+            .join("thoth")
+            .join(format!("facts-{digest}.cache"));
+
+        if let Ok(cached) = self.read_envelope::<CachedPackagedThothFacts<F>>(&cache_path)
+            && cached.extractor_version == extractor_version
+            && cached.catalog_digest == digest
+        {
+            return Ok((cached.facts, true));
+        }
+
+        let facts = parse_packaged_thoth_facts(catalog, extractor_version, parse)?;
+        self.write_envelope(
+            &cache_path,
+            &CachedPackagedThothFacts {
+                extractor_version: extractor_version.to_owned(),
+                catalog_digest: digest,
+                facts: facts.clone(),
+            },
+        )?;
+        Ok((facts, false))
     }
 
     /// Parses a module in parallel and reuses unchanged cached file records.
@@ -575,6 +621,13 @@ struct CachedPackagedThoth {
     catalog: PackagedThothCatalog,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CachedPackagedThothFacts<F> {
+    extractor_version: String,
+    catalog_digest: String,
+    facts: PackagedThothFacts<F>,
+}
+
 /// Includes every semantic input that can change a cached parsed file.
 fn object_key(source: &SourceFile, content_hash: &str, fingerprint: &str) -> String {
     let mut hash = blake3::Hasher::new();
@@ -673,5 +726,102 @@ mod tests {
             .expect("changed load");
         assert!(!hit);
         assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn packaged_thoth_facts_cache_is_content_and_extractor_versioned() {
+        let directory = tempdir().expect("temporary directory");
+        let cache = CacheStore::new(directory.path().join("cache")).expect("cache");
+        let first_catalog = catalog("first");
+        let calls = Cell::new(0);
+
+        let (facts, hit) = cache
+            .load_packaged_thoth_facts(&first_catalog, "facts-v1", |source| {
+                calls.set(calls.get() + 1);
+                Ok::<_, Error>(source.text().to_owned())
+            })
+            .expect("first facts load");
+        assert!(!hit);
+        assert_eq!(facts.records()[0].facts(), "first");
+        assert_eq!(calls.get(), 1);
+
+        let (cached, hit) = cache
+            .load_packaged_thoth_facts(&first_catalog, "facts-v1", |_| {
+                calls.set(calls.get() + 1);
+                Ok::<_, Error>("unexpected".to_owned())
+            })
+            .expect("cached facts load");
+        assert!(hit);
+        assert_eq!(cached.records()[0].facts(), "first");
+        assert_eq!(calls.get(), 1);
+
+        let (reparsed, hit) = cache
+            .load_packaged_thoth_facts(&catalog("second"), "facts-v1", |source| {
+                calls.set(calls.get() + 1);
+                Ok::<_, Error>(source.text().to_owned())
+            })
+            .expect("changed facts load");
+        assert!(!hit);
+        assert_eq!(reparsed.records()[0].facts(), "second");
+        assert_eq!(calls.get(), 2);
+
+        let (_, hit) = cache
+            .load_packaged_thoth_facts(&catalog("second"), "facts-v2", |_| {
+                calls.set(calls.get() + 1);
+                Ok::<_, Error>("versioned".to_owned())
+            })
+            .expect("versioned facts load");
+        assert!(!hit);
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn packaged_thoth_facts_cache_persists_partial_parse_results() {
+        let directory = tempdir().expect("temporary directory");
+        let cache = CacheStore::new(directory.path().join("cache")).expect("cache");
+        let catalog = PackagedThothCatalog::from_sources([
+            PackagedThothSource::new(
+                "Example",
+                "/synthetic/base.pak",
+                "Mods/Example/Scripts/thoth/helpers/valid.khn",
+                0,
+                "valid",
+            )
+            .expect("valid source"),
+            PackagedThothSource::new(
+                "Example",
+                "/synthetic/base.pak",
+                "Mods/Example/Scripts/thoth/helpers/broken.khn",
+                0,
+                "broken",
+            )
+            .expect("broken source still has valid package provenance"),
+        ])
+        .expect("valid catalog");
+
+        let calls = Cell::new(0);
+        let (facts, hit) = cache
+            .load_packaged_thoth_facts(&catalog, "facts-v1", |source| {
+                calls.set(calls.get() + 1);
+                if source.text() == "broken" {
+                    Err(Error::Parse("synthetic malformed source".into()))
+                } else {
+                    Ok::<_, Error>(source.text().to_owned())
+                }
+            })
+            .expect("partial facts load");
+        assert!(!hit);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts.rejected_count(), 1);
+        assert_eq!(calls.get(), 2);
+
+        let (cached, hit) = cache
+            .load_packaged_thoth_facts(&catalog, "facts-v1", |_| -> Result<String, Error> {
+                panic!("a cached partial result must not parse package entries")
+            })
+            .expect("cached partial facts load");
+        assert!(hit);
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached.rejected_count(), 1);
     }
 }

@@ -14,8 +14,9 @@ use std::time::Instant;
 
 use bg3_ide::{DiagnosticSeverity, OverlaySet, WorkspaceSnapshot, definition_target};
 use bg3_index::{
-    CacheStats, CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SourceKind, discover_module,
-    packaged_thoth_package_candidates, read_packaged_thoth_catalog,
+    CacheStats, CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SourceKind,
+    THOTH_FACTS_EXTRACTOR_VERSION, discover_module, packaged_thoth_package_candidates,
+    parse_thoth_file, read_packaged_thoth_catalog,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -700,11 +701,21 @@ fn build_workspace(
         .map(|module| module.name.clone())
         .collect();
     let package_candidates = packaged_thoth_package_candidates(game_data, &base_modules)?;
-    let (packaged_thoth, hit) =
+    let (packaged_thoth, catalog_hit) =
         cache.load_packaged_thoth(&base_modules, &package_candidates, || {
             read_packaged_thoth_catalog(game_data, &base_modules)
         })?;
-    if hit {
+    if catalog_hit {
+        totals.hits += 1;
+    } else {
+        totals.misses += 1;
+    }
+    let (packaged_thoth_facts, facts_hit) = cache.load_packaged_thoth_facts(
+        &packaged_thoth,
+        THOTH_FACTS_EXTRACTOR_VERSION,
+        |source| parse_thoth_file(source.text()),
+    )?;
+    if facts_hit {
         totals.hits += 1;
     } else {
         totals.misses += 1;
@@ -718,6 +729,7 @@ fn build_workspace(
             max_completion_items,
         )
         .with_packaged_thoth(Arc::new(packaged_thoth))
+        .with_packaged_thoth_facts(Arc::new(packaged_thoth_facts))
         .with_incomplete_kinds(incomplete_kinds.iter().copied()),
         totals,
     ))

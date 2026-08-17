@@ -10,6 +10,7 @@ mod package;
 mod parser;
 mod schema;
 mod thoth;
+mod thoth_facts;
 mod tooltip;
 mod xml;
 
@@ -30,18 +31,26 @@ pub use domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
     OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference, SourceFile, SourceIssue,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment, ThothCall,
+    ThothDeclaration, ThothDeclarationOwner, ThothExpression, ThothFile, ThothMemberAccess,
+    ThothParameter, ThothReturn,
 };
 pub use localization::{
     LocalizationCatalog, LocalizedText, read_base_localization_package, read_localization_package,
 };
 pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
 pub use package::{PackageEntry, PackageHeader, PackageReader};
-pub use parser::{canonical_kind, is_uuid, parse_source, schema_for_toolkit, schemas_for_plain};
+pub use parser::{
+    canonical_kind, is_uuid, parse_source, parse_thoth_file, schema_for_toolkit, schemas_for_plain,
+};
 pub use schema::{SchemaCatalog, SchemaDefinition, SchemaField, is_schema_discriminator};
 pub use thoth::{
     PackagedThothCatalog, PackagedThothResolution, PackagedThothSource,
     packaged_thoth_package_candidates, read_packaged_thoth_catalog, thoth_module_from_entry,
+};
+pub use thoth_facts::{
+    CachedThothFacts, PackagedThothFact, PackagedThothFacts, THOTH_FACTS_EXTRACTOR_VERSION,
+    parse_packaged_thoth_facts,
 };
 pub use tooltip::{
     TooltipCatalog, TooltipText, base_tooltip_package_path, parse_tooltip_catalog,

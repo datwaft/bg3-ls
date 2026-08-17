@@ -153,3 +153,35 @@ memory value. The nearest published repeated-trial measurement was
 by one document and three definitions. The issue #58 value is 3.3% higher than
 that contextual measurement. Timing remains within the repository regression
 limits, and the packaged catalog adds one cache file and 111,410 bytes.
+
+## Version 0.11 installed Thoth fact verification
+
+Issue #54 adds cached fact extraction for declarations, calls, assignments,
+returns, and member-access evidence from loose and packaged Thoth sources. The
+verification used five cold and five warm trials on the same machine, data
+revision, modules, project, and source composition as the Issue #58 run. Both
+builds used `tree-sitter-bg3` 0.4.3 with parser ABI 15.
+
+The index contained 3,450 loose documents and 89,136 definitions. The packaged
+catalog contained two sources, 110,015 source bytes, and one contributing
+package.
+
+| Metric | Issue #54 p50 | Issue #54 p95 | Issue #58 p95 | p95 change |
+| --- | ---: | ---: | ---: | ---: |
+| Cold indexing | 1.386 s | 1.405 s | 1.454 s | -3.4% |
+| Warm indexing | 415 ms | 419 ms | 447 ms | -6.3% |
+| Navigation | 1.083 µs | 1.208 µs | 1.167 µs | +3.5% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100%
+- Issue #54 repeated-trial RSS high-water mark from a separate unrestricted
+  run of the same build after ten builds: 1,304,215,552 bytes
+- Issue #54 cache: 94,811,556 bytes in 3,460 files
+- Issue #58 cache: 94,329,398 bytes in 3,459 files
+
+The fact cache adds one file and 482,158 bytes compared with Issue #58. Cold
+and warm indexing remain below the repository regression limits. The separate
+unrestricted run is provided for context; its timing was 1.336/1.339 seconds
+cold p50/p95, 411/420 ms warm p50/p95, and 1.083/1.125 microseconds navigation
+p50/p95.

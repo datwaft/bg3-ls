@@ -18,6 +18,7 @@ The server provides:
 - references, document symbols, and workspace symbols;
 - schema-aware completion with snippet support;
 - verified signature help for curated Stats functions and declared Thoth helpers;
+- conservative Thoth API evidence from configured loose and packaged sources;
 - high-confidence syntax, schema, value, and typed-reference diagnostics;
 - full-document overlays for unsaved files;
 - recursive file watching and scoped module rebuilds;
@@ -87,7 +88,7 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
-Version 0.10.1 aligns source builds with `tree-sitter-bg3` 0.4.2. Existing
+Version 0.10.1 aligns source builds with `tree-sitter-bg3` 0.4.3. Existing
 configuration remains compatible, and no migration is required.
 
 Version 0.10.0 adds configured-language hover for LSX attributes with
@@ -247,14 +248,21 @@ Open Stats, LSX, Thoth, and Osiris files replace their disk records with
 unsaved overlays. Closing a buffer restores its disk record. Thoth helper
 declarations provide definition, hover, references, function completion,
 declared-parameter signature help, document symbols, and workspace symbols.
-The server applies the configured module precedence to helper overrides. It
-keeps packaged helpers as immutable virtual sources and does not expose their
-archive entries as editable filesystem locations. Package priority selects a
-strictly higher-priority entry; equal-priority candidates remain ambiguous.
-Loose dependency and project sources retain their configured higher module
-precedence. The server does not infer Thoth parameter or return types. Invalid Thoth syntax produces
-the stable `thoth-syntax-error` diagnostic code; valid Thoth produces no syntax
-diagnostics. Semantic Thoth diagnostics remain out of scope.
+The server also indexes conservative evidence from configured loose and
+packaged Thoth sources: declared names and parameters, observed call names and
+exact arity ranges, assignments, returns, and member-access chains. This
+evidence can improve completion, hover, and signature help when the source
+proves the fact. Generic access chains remain evidence only; the server does
+not classify them as namespaces, enums, objects, or members without a declared
+type. It keeps packaged helpers as immutable virtual sources and does not
+expose their archive entries as editable filesystem locations or fake URIs.
+Package priority selects a strictly higher-priority entry; equal-priority
+candidates remain ambiguous. Loose dependency and project sources retain
+their configured higher module precedence. Thoth parameter and return types
+remain unknown unless a later annotation or type-flow feature proves them.
+Invalid Thoth syntax produces the stable `thoth-syntax-error` diagnostic code;
+valid Thoth produces no syntax diagnostics. Semantic Thoth diagnostics remain
+out of scope.
 
 Osiris navigation includes goals, parent edges, `PROC` and `QRY` declarations,
 and user database occurrences. Procedure and query identity uses name and
@@ -393,7 +401,10 @@ fields, and inferred function arity. Static tooltip previews do not evaluate
 BG3 UI rendering.
 
 Thoth diagnostics are limited to syntax errors reported as
-`thoth-syntax-error`. Semantic Thoth diagnostics remain out of scope.
+`thoth-syntax-error`. Indexed Thoth observations do not by themselves create
+semantic diagnostics. LuaCATS-like annotations and type propagation remain
+planned follow-up work, so unknown types stay unknown. Semantic Thoth
+diagnostics remain out of scope.
 
 Osiris support does not execute or compile Story, provide control-flow
 analysis, load a complete engine API catalog, or infer aliases from

@@ -10,8 +10,9 @@ use std::sync::Arc;
 use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, OSIRIS_DATABASE_KIND,
     OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
-    PackagedThothCatalog, ParsedFile, Position, Reference, SchemaCatalog, SymbolTarget,
-    THOTH_FUNCTION_KIND, TextRange, TooltipCatalog, canonical_kind,
+    PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position, Reference, SchemaCatalog,
+    SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothFile,
+    TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -108,8 +109,18 @@ pub struct WorkspaceSnapshot {
     pub max_completion_items: usize,
     base_localization: Arc<LocalizationCatalog>,
     packaged_thoth: Arc<PackagedThothCatalog>,
+    packaged_thoth_facts: Arc<PackagedThothFacts<ThothFile>>,
     tooltips: Arc<TooltipCatalog>,
     incomplete_kinds: BTreeSet<String>,
+}
+
+fn empty_packaged_thoth_facts() -> PackagedThothFacts<ThothFile> {
+    parse_packaged_thoth_facts(
+        &PackagedThothCatalog::default(),
+        THOTH_FACTS_EXTRACTOR_VERSION,
+        |_| Ok(ThothFile::default()),
+    )
+    .expect("an empty packaged Thoth catalog must parse")
 }
 
 impl WorkspaceSnapshot {
@@ -129,6 +140,7 @@ impl WorkspaceSnapshot {
             max_completion_items,
             base_localization: Arc::new(LocalizationCatalog::default()),
             packaged_thoth: Arc::new(PackagedThothCatalog::default()),
+            packaged_thoth_facts: Arc::new(empty_packaged_thoth_facts()),
             tooltips: Arc::new(TooltipCatalog::default()),
             incomplete_kinds: BTreeSet::new(),
         }
@@ -164,6 +176,22 @@ impl WorkspaceSnapshot {
     /// Shares the immutable packaged Thoth catalog with a workspace rebuild.
     pub fn packaged_thoth(&self) -> Arc<PackagedThothCatalog> {
         Arc::clone(&self.packaged_thoth)
+    }
+
+    /// Adds parsed facts extracted from installed Thoth package entries.
+    pub fn with_packaged_thoth_facts(mut self, facts: Arc<PackagedThothFacts<ThothFile>>) -> Self {
+        self.packaged_thoth_facts = facts;
+        self
+    }
+
+    /// Shares immutable parsed facts extracted from installed Thoth packages.
+    pub fn packaged_thoth_facts(&self) -> Arc<PackagedThothFacts<ThothFile>> {
+        Arc::clone(&self.packaged_thoth_facts)
+    }
+
+    /// Returns the number of installed package entries with parsed Thoth facts.
+    pub fn packaged_thoth_facts_count(&self) -> usize {
+        self.packaged_thoth_facts.len()
     }
 
     /// Adds the static game tooltip glossary that has no navigable source location.
@@ -942,4 +970,38 @@ fn markdown_inline_code(source: &str) -> String {
         ""
     };
     format!("{fence}{padding}{source}{padding}{fence}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bg3_index::PackagedThothSource;
+
+    #[test]
+    fn packaged_facts_are_replaced_without_mutating_an_existing_snapshot() {
+        let source = PackagedThothSource::new(
+            "Example",
+            "/synthetic/Example.pak",
+            "Mods/Example/Scripts/thoth/helpers/base.khn",
+            0,
+            "function Base() end",
+        )
+        .expect("synthetic package source");
+        let catalog = PackagedThothCatalog::from_sources([source]).expect("synthetic catalog");
+        let facts = parse_packaged_thoth_facts(&catalog, "test-v1", |_| {
+            Ok::<_, bg3_index::Error>(ThothFile::default())
+        })
+        .expect("synthetic facts");
+        let workspace =
+            WorkspaceSnapshot::new(Arc::new(SchemaCatalog::default()), Vec::new(), 1, 100, 100)
+                .with_packaged_thoth_facts(Arc::new(facts));
+        let old_facts = workspace.packaged_thoth_facts();
+
+        let replacement = empty_packaged_thoth_facts();
+        let next = workspace.with_packaged_thoth_facts(Arc::new(replacement));
+
+        assert_eq!(old_facts.len(), 1);
+        assert_eq!(next.packaged_thoth_facts_count(), 0);
+        assert!(!Arc::ptr_eq(&old_facts, &next.packaged_thoth_facts()));
+    }
 }
