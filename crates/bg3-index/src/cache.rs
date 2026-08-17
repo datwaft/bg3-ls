@@ -13,8 +13,10 @@ use crate::domain::{ParsedFile, SourceFile};
 use crate::localization::{
     LocalizationCatalog, base_localization_package_path, read_localization_package,
 };
+use crate::package::package_fingerprint;
 use crate::parser::parse_source;
 use crate::schema::SchemaCatalog;
+use crate::thoth::PackagedThothCatalog;
 use crate::tooltip::{TooltipCatalog, base_tooltip_package_path, read_base_tooltip_catalog};
 use crate::{Error, ModuleSpec};
 
@@ -23,6 +25,7 @@ const CACHE_VERSION: u32 = 2;
 const EXTRACTOR_VERSION: &str = "bg3-ls-index-v3";
 const LOCALIZATION_EXTRACTOR_VERSION: &str = "bg3-ls-localization-v1";
 const TOOLTIP_EXTRACTOR_VERSION: &str = "bg3-ls-tooltips-v1";
+const THOTH_EXTRACTOR_VERSION: &str = "bg3-ls-thoth-v1";
 const ABANDONED_OBJECT_AGE: Duration = Duration::from_hours(720);
 
 /// Summary of cache use during one module build.
@@ -48,6 +51,7 @@ impl CacheStore {
             "schemas",
             "localizations",
             "tooltips",
+            "thoth",
         ] {
             fs::create_dir_all(root.join(child))?;
         }
@@ -211,6 +215,82 @@ impl CacheStore {
         Ok(Some((catalog, false)))
     }
 
+    /// Loads the configured packaged Thoth catalog and reuses its decoded form.
+    ///
+    /// The caller supplies the complete, deterministic set of package
+    /// candidates discovered for the current configuration. The callback is
+    /// evaluated only on a cache miss, which keeps package parsing out of the
+    /// cache layer while allowing the cache to validate all package inputs.
+    pub fn load_packaged_thoth<F>(
+        &self,
+        base_modules: &[String],
+        package_candidates: &[PathBuf],
+        load: F,
+    ) -> Result<(PackagedThothCatalog, bool), Error>
+    where
+        F: FnOnce() -> Result<PackagedThothCatalog, Error>,
+    {
+        let mut modules = base_modules.to_vec();
+        modules.sort();
+        modules.dedup();
+
+        let packages = package_candidates
+            .iter()
+            .map(|path| {
+                let metadata = fs::metadata(path)?;
+                let modified = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                    .map_or(0, |value| value.as_nanos());
+                Ok(PackageManifest {
+                    path: path.clone(),
+                    size: metadata.len(),
+                    modified,
+                    fingerprint: package_fingerprint(path)?,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let mut packages = packages;
+        packages.sort_by(|left, right| left.path.cmp(&right.path));
+        packages.dedup_by(|left, right| left.path == right.path);
+
+        let mut identity = blake3::Hasher::new();
+        identity.update(THOTH_EXTRACTOR_VERSION.as_bytes());
+        for module in &modules {
+            identity.update(module.as_bytes());
+            identity.update(&[0]);
+        }
+        for package in &packages {
+            identity.update(package.path.to_string_lossy().as_bytes());
+            identity.update(&[0]);
+        }
+        let cache_path = self
+            .root
+            .join("thoth")
+            .join(format!("{}.cache", identity.finalize().to_hex()));
+
+        if let Ok(cached) = self.read_envelope::<CachedPackagedThoth>(&cache_path)
+            && cached.modules == modules
+            && cached.packages == packages
+            && cached.extractor_version == THOTH_EXTRACTOR_VERSION
+        {
+            return Ok((cached.catalog, true));
+        }
+
+        let catalog = load()?;
+        self.write_envelope(
+            &cache_path,
+            &CachedPackagedThoth {
+                modules,
+                packages,
+                extractor_version: THOTH_EXTRACTOR_VERSION.into(),
+                catalog: catalog.clone(),
+            },
+        )?;
+        Ok((catalog, false))
+    }
+
     /// Parses a module in parallel and reuses unchanged cached file records.
     pub fn build_module(
         &self,
@@ -306,6 +386,7 @@ impl CacheStore {
             "schemas",
             "localizations",
             "tooltips",
+            "thoth",
         ] {
             fs::create_dir_all(self.root.join(child))?;
         }
@@ -478,6 +559,22 @@ struct CachedTooltips {
     catalog: TooltipCatalog,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct PackageManifest {
+    path: PathBuf,
+    size: u64,
+    modified: u128,
+    fingerprint: [u8; 16],
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CachedPackagedThoth {
+    modules: Vec<String>,
+    packages: Vec<PackageManifest>,
+    extractor_version: String,
+    catalog: PackagedThothCatalog,
+}
+
 /// Includes every semantic input that can change a cached parsed file.
 fn object_key(source: &SourceFile, content_hash: &str, fingerprint: &str) -> String {
     let mut hash = blake3::Hasher::new();
@@ -507,4 +604,74 @@ fn context_fingerprint(kind: crate::SourceKind, schema: &str, language: &str) ->
     hash.update(schema.as_bytes());
     hash.update(language.as_bytes());
     hash.finalize().to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::thoth::PackagedThothSource;
+    use std::cell::Cell;
+    use tempfile::tempdir;
+
+    fn catalog(text: &str) -> PackagedThothCatalog {
+        PackagedThothCatalog::from_sources([PackagedThothSource::new(
+            "Example",
+            "/synthetic/base.pak",
+            "Mods/Example/Scripts/thoth/helpers/example.khn",
+            0,
+            text,
+        )
+        .expect("valid synthetic source")])
+        .expect("valid synthetic catalog")
+    }
+
+    fn package_marker(checksum: u8) -> Vec<u8> {
+        let mut package = Vec::new();
+        package.extend_from_slice(b"LSPK");
+        package.extend_from_slice(&18_u32.to_le_bytes());
+        package.extend_from_slice(&40_u64.to_le_bytes());
+        package.extend_from_slice(&8_u32.to_le_bytes());
+        package.extend_from_slice(&[0, 0]);
+        package.extend_from_slice(&[checksum; 16]);
+        package.extend_from_slice(&1_u16.to_le_bytes());
+        package.extend_from_slice(&[0_u8; 8]);
+        package
+    }
+
+    #[test]
+    fn packaged_thoth_cache_hits_and_invalidates_on_package_change() {
+        let directory = tempdir().expect("temporary directory");
+        let package = directory.path().join("base.pak");
+        fs::write(&package, package_marker(1)).expect("write package marker");
+        let cache = CacheStore::new(directory.path().join("cache")).expect("cache");
+        let modules = vec!["Example".to_owned()];
+        let candidates = vec![package.clone()];
+        let calls = Cell::new(0);
+
+        let (_, hit) = cache
+            .load_packaged_thoth(&modules, &candidates, || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("first"))
+            })
+            .expect("first load");
+        assert!(!hit);
+        let (_, hit) = cache
+            .load_packaged_thoth(&modules, &candidates, || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("unexpected"))
+            })
+            .expect("cached load");
+        assert!(hit);
+        assert_eq!(calls.get(), 1);
+
+        fs::write(&package, package_marker(2)).expect("change package marker");
+        let (_, hit) = cache
+            .load_packaged_thoth(&modules, &candidates, || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("second"))
+            })
+            .expect("changed load");
+        assert!(!hit);
+        assert_eq!(calls.get(), 2);
+    }
 }

@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, OSIRIS_DATABASE_KIND,
-    OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, ParsedFile,
-    Position, Reference, SchemaCatalog, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
-    TooltipCatalog, canonical_kind,
+    OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
+    PackagedThothCatalog, ParsedFile, Position, Reference, SchemaCatalog, SymbolTarget,
+    THOTH_FUNCTION_KIND, TextRange, TooltipCatalog, canonical_kind,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -107,6 +107,7 @@ pub struct WorkspaceSnapshot {
     pub max_workspace_symbols: usize,
     pub max_completion_items: usize,
     base_localization: Arc<LocalizationCatalog>,
+    packaged_thoth: Arc<PackagedThothCatalog>,
     tooltips: Arc<TooltipCatalog>,
     incomplete_kinds: BTreeSet<String>,
 }
@@ -127,6 +128,7 @@ impl WorkspaceSnapshot {
             max_workspace_symbols,
             max_completion_items,
             base_localization: Arc::new(LocalizationCatalog::default()),
+            packaged_thoth: Arc::new(PackagedThothCatalog::default()),
             tooltips: Arc::new(TooltipCatalog::default()),
             incomplete_kinds: BTreeSet::new(),
         }
@@ -146,6 +148,22 @@ impl WorkspaceSnapshot {
     /// Shares the immutable packed catalog with a scoped workspace rebuild.
     pub fn base_localization(&self) -> Arc<LocalizationCatalog> {
         Arc::clone(&self.base_localization)
+    }
+
+    /// Adds installed Thoth sources read from configured base-game packages.
+    pub fn with_packaged_thoth(mut self, catalog: Arc<PackagedThothCatalog>) -> Self {
+        self.packaged_thoth = catalog;
+        self
+    }
+
+    /// Returns the number of packaged Thoth source candidates.
+    pub fn packaged_thoth_count(&self) -> usize {
+        self.packaged_thoth.len()
+    }
+
+    /// Shares the immutable packaged Thoth catalog with a workspace rebuild.
+    pub fn packaged_thoth(&self) -> Arc<PackagedThothCatalog> {
+        Arc::clone(&self.packaged_thoth)
     }
 
     /// Adds the static game tooltip glossary that has no navigable source location.
