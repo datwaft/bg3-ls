@@ -304,6 +304,17 @@ fn extracts_cacheable_thoth_facts_without_inventing_types() {
 }
 
 #[test]
+fn distinguishes_local_and_global_thoth_declarations_with_values() {
+    let facts = parse_thoth_file("local local_value = 1\nglobal global_value = 2\n").unwrap();
+
+    assert_eq!(facts.assignments.len(), 2);
+    assert!(facts.assignments[0].local);
+    assert!(!facts.assignments[0].global);
+    assert!(!facts.assignments[1].local);
+    assert!(facts.assignments[1].global);
+}
+
+#[test]
 fn classifies_thoth_expression_facts_and_preserves_return_order() {
     let text = "function Facts(value)\n  return nil, false, 42, \"text\", value, Call(value), Namespace.Member, value + 1\nend\n";
     let facts = parse_thoth_file(text).unwrap();

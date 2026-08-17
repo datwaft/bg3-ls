@@ -2,6 +2,7 @@
 
 mod diagnostics;
 mod language;
+mod thoth;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -17,6 +18,10 @@ use bg3_index::{
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
 pub use language::{CompletionItem, CompletionKind, CompletionList, SignatureHelp};
+pub use thoth::{
+    ResolvedThothAlias, ResolvedThothClass, ResolvedThothField, ResolvedThothFunction,
+    ResolvedThothVariable, ThothTypeSource,
+};
 
 /// A definition result with the module that contributes its precedence.
 #[derive(Clone, Debug)]
