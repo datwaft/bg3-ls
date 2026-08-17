@@ -46,7 +46,7 @@ enum Command {
     },
     /// Measures cold and warm full-data indexing with a dedicated disposable cache.
     Benchmark(BenchmarkOptions),
-    /// Checks project Stats files and Osiris goals without an LSP client.
+    /// Checks project Stats, Osiris, and Thoth files without an LSP client.
     Check(CheckOptions),
     /// Converts one loose BG3 resource between binary LSF and textual LSX.
     Convert(conversion::Options),
@@ -374,14 +374,14 @@ fn select_check_paths(
             selected.insert(path);
         } else {
             return Err(Error::Config(format!(
-                "diagnostic path is not an indexed Stats file or Osiris goal: {}",
+                "diagnostic path is not an indexed Stats, Osiris, or Thoth file: {}",
                 path.display()
             )));
         }
     }
     if selected.is_empty() {
         return Err(Error::Config(format!(
-            "the selected paths contain no indexed Stats files or Osiris goals below {}",
+            "the selected paths contain no indexed Stats, Osiris, or Thoth files below {}",
             project_root.display()
         )));
     }
@@ -399,7 +399,10 @@ fn is_indexed_diagnostic_source(workspace: &WorkspaceSnapshot, path: &Path) -> b
 
 /// Returns whether one source kind can produce proven diagnostics.
 fn supports_diagnostics(kind: SourceKind) -> bool {
-    matches!(kind, SourceKind::PlainStats | SourceKind::Osiris)
+    matches!(
+        kind,
+        SourceKind::PlainStats | SourceKind::Osiris | SourceKind::Thoth
+    )
 }
 
 /// Prints diagnostics in the common path, line, column form.

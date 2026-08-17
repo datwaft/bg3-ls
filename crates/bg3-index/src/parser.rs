@@ -46,6 +46,13 @@ fn parse_thoth(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         .parse(text, None)
         .ok_or_else(|| Error::Parse("the Thoth parser returned no tree".into()))?;
     let root = tree.root_node();
+    let mut issues = Vec::new();
+    collect_tree_syntax_issues(
+        root,
+        &mut issues,
+        "thoth-syntax-error",
+        "The Thoth syntax is not valid.",
+    );
     let mut definitions = Vec::new();
     let mut cursor = root.walk();
     for node in root.named_children(&mut cursor) {
@@ -82,8 +89,7 @@ fn parse_thoth(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         definitions,
         references,
         observed_functions: Vec::new(),
-        // Thoth syntax diagnostics are intentionally outside the first indexing scope.
-        issues: Vec::new(),
+        issues,
         osiris: None,
     })
 }

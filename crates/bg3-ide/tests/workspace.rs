@@ -448,6 +448,62 @@ fn publishes_only_proven_osiris_syntax_diagnostics() {
 }
 
 #[test]
+fn publishes_thoth_syntax_diagnostics_and_skips_semantic_checks() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Scripts/thoth/helpers/MyMod.khn");
+    let malformed = "function Broken(entity)\n  @\nend\n";
+    let mut overlays = overlay(&workspace, &path, malformed);
+    let diagnostics = workspace.diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning));
+
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code, "thoth-syntax-error");
+    assert_eq!(diagnostic.message, "The Thoth syntax is not valid.");
+    assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+    assert_eq!(
+        diagnostic.range.start,
+        Position {
+            line: 1,
+            character: 2
+        }
+    );
+    assert_eq!(
+        diagnostic.range.end,
+        Position {
+            line: 1,
+            character: 3
+        }
+    );
+
+    let valid = "function Valid(entity)\n  return MissingHelper(entity)\nend\n";
+    let valid_document = overlay(&workspace, &path, valid)
+        .get(&path)
+        .unwrap()
+        .clone();
+    overlays.insert(
+        path.clone(),
+        OverlayDocument {
+            version: 2,
+            ..valid_document
+        },
+    );
+    assert!(
+        workspace
+            .diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning))
+            .is_empty(),
+        "valid Thoth syntax must not produce unsupported semantic diagnostics"
+    );
+
+    overlays.remove(&path);
+    assert!(
+        workspace
+            .diagnostics(&path, &overlays, Some(DiagnosticSeverity::Warning))
+            .is_empty(),
+        "clearing the overlay must restore the valid disk diagnostics"
+    );
+}
+
+#[test]
 fn supports_language_features_in_lsx_values_without_stats_diagnostics() {
     let (workspace, _) = fixture_workspace(200);
     let path = fixtures().join("project/Public/MyMod/Progressions/Progressions.lsx");

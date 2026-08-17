@@ -11,6 +11,7 @@ struct Fixture {
     warning_file: PathBuf,
     clean_file: PathBuf,
     osiris_error_file: PathBuf,
+    thoth_error_file: PathBuf,
 }
 
 /// Creates one configured project with error, warning, and clean source files.
@@ -45,6 +46,10 @@ fn fixture() -> Fixture {
         "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nIF\nBroken(\nEXITSECTION\nENDEXITSECTION\n",
     )
     .unwrap();
+    let thoth_data = root.path().join("Mods/MyMod/Scripts/thoth/helpers");
+    fs::create_dir_all(&thoth_data).unwrap();
+    let thoth_error_file = thoth_data.join("Broken.khn");
+    fs::write(&thoth_error_file, "function Broken(\n").unwrap();
     fs::write(
         root.path().join("bg3-ls.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -66,6 +71,7 @@ fn fixture() -> Fixture {
         warning_file,
         clean_file,
         osiris_error_file,
+        thoth_error_file,
     }
 }
 
@@ -131,10 +137,14 @@ fn applies_thresholds_and_default_project_scope() {
     let all_project_files = check(&fixture, &["--format", "json", "--fail-on", "never"]);
     assert_eq!(all_project_files.status.code(), Some(0));
     let records: serde_json::Value = serde_json::from_slice(&all_project_files.stdout).unwrap();
-    assert_eq!(records.as_array().unwrap().len(), 3);
+    assert_eq!(records.as_array().unwrap().len(), 4);
     assert!(records.as_array().unwrap().iter().any(|record| {
         record["path"] == "Mods/MyMod/Story/RawFiles/Goals/BrokenGoal.txt"
             && record["code"] == "osiris-syntax-error"
+    }));
+    assert!(records.as_array().unwrap().iter().any(|record| {
+        record["path"] == "Mods/MyMod/Scripts/thoth/helpers/Broken.khn"
+            && record["code"] == "thoth-syntax-error"
     }));
 }
 
@@ -154,6 +164,24 @@ fn checks_an_explicit_osiris_goal() {
     let records: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(records.as_array().unwrap().len(), 1);
     assert_eq!(records[0]["code"], "osiris-syntax-error");
+}
+
+#[test]
+fn checks_an_explicit_thoth_file() {
+    let fixture = fixture();
+    let output = check(
+        &fixture,
+        &[
+            fixture.thoth_error_file.to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let records: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(records.as_array().unwrap().len(), 1);
+    assert_eq!(records[0]["code"], "thoth-syntax-error");
 }
 
 #[test]

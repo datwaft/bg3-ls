@@ -383,6 +383,26 @@ assert(vim.wait(1000, function()
   return vim.tbl_isempty(vim.diagnostic.get(0))
 end, 50), "the server published diagnostics for Thoth source")
 
+replace_buffer({
+  "function Broken(",
+  "  return value",
+  "end",
+})
+assert(vim.wait(5000, function()
+  return vim.iter(vim.diagnostic.get(0)):any(function(diagnostic)
+    return diagnostic.code == "thoth-syntax-error" and diagnostic.source == "bg3"
+  end)
+end, 50), "the server did not publish the Thoth syntax diagnostic")
+
+replace_buffer({
+  "function UnsavedCaller(value)",
+  "  return DependencyOnly(value)",
+  "end",
+})
+assert(vim.wait(5000, function()
+  return vim.tbl_isempty(vim.diagnostic.get(0))
+end, 50), "the Thoth syntax diagnostic remained after restoring valid source")
+
 vim.bo.modified = false
 vim.cmd("edit " .. vim.fn.fnameescape(osiris_source))
 vim.bo.filetype = "bg3_osiris"
