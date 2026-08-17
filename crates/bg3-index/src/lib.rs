@@ -1,5 +1,6 @@
 //! BG3 source extraction, schema metadata, module indexes, and persistent caches.
 
+mod annotation;
 mod cache;
 mod catalog;
 mod discovery;
@@ -19,6 +20,12 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use annotation::{
+    FunctionParameterType, ParsedTypeExpression, PrimitiveType, ThothAliasAnnotation,
+    ThothAnnotations, ThothClassAnnotation, ThothFieldAnnotation, ThothFunctionAnnotation,
+    ThothFunctionContract, ThothParameterAnnotation, ThothReturnAnnotation,
+    ThothVariableAnnotation, TypeExpression, TypeParseError, parse_type_expression,
+};
 pub use cache::{CacheStats, CacheStore};
 pub use catalog::{
     FUNCTIONS, FunctionForm, FunctionSpec, ParameterSpec, field_kind, function_spec,

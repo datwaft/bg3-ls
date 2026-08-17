@@ -188,6 +188,129 @@ fn higher_configured_base_rank_wins_and_shadowed_package_is_not_hover_evidence()
 }
 
 #[test]
+fn exposes_explicit_packaged_annotations_with_provenance() {
+    let (workspace, path) = workspace();
+    let entry = "Mods/Shared/Scripts/thoth/helpers/Annotated.khn";
+    let catalog = Arc::new(
+        PackagedThothCatalog::from_sources([source(
+            "Shared",
+            entry,
+            "Shared.pak",
+            0,
+            "---@param value string\n---@return boolean\nfunction Annotated(value) end\n",
+        )])
+        .expect("catalog"),
+    );
+    let facts = Arc::new(
+        parse_packaged_thoth_facts(catalog.as_ref(), "test-v2", |source| {
+            bg3_index::parse_thoth_file(source.text())
+        })
+        .expect("facts"),
+    );
+    let workspace = workspace
+        .with_packaged_thoth(catalog)
+        .with_packaged_thoth_facts(facts);
+    let text = "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"Annotated(value, \"";
+    let overlays = overlay(&workspace, &path, text);
+
+    let signature = workspace
+        .signature_help(
+            &path,
+            Position {
+                line: 2,
+                character: u32::try_from(text.lines().nth(2).unwrap().len()).unwrap(),
+            },
+            &overlays,
+        )
+        .expect("packaged annotated signature");
+    assert_eq!(signature.label, "Annotated(value: string): boolean");
+    assert!(signature.documentation.contains(entry));
+
+    let hover = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 2,
+                character: u32::try_from(text.lines().nth(2).unwrap().find("Annotated").unwrap())
+                    .unwrap(),
+            },
+            &overlays,
+        )
+        .expect("packaged annotated hover");
+    assert!(hover.contains("value: string"));
+    assert!(hover.contains(entry));
+    assert!(!hover.contains("/synthetic/"));
+
+    let completion = workspace.completion(
+        &path,
+        Position {
+            line: 2,
+            character: 48,
+        },
+        &overlays,
+        false,
+    );
+    let item = completion
+        .items
+        .iter()
+        .find(|item| item.label == "Annotated")
+        .expect("packaged annotated completion");
+    assert_eq!(
+        item.detail.as_deref(),
+        Some("Annotated(value: string): boolean (installed Shared)")
+    );
+}
+
+#[test]
+fn suppresses_conflicting_equal_priority_packaged_annotations() {
+    let (workspace, path) = workspace();
+    let first = "Mods/Shared/Scripts/thoth/helpers/First.khn";
+    let second = "Mods/Shared/Scripts/thoth/helpers/Second.khn";
+    let catalog = Arc::new(
+        PackagedThothCatalog::from_sources([
+            source(
+                "Shared",
+                first,
+                "First.pak",
+                0,
+                "---@param value string\nfunction Conflicting(value) end\n",
+            ),
+            source(
+                "Shared",
+                second,
+                "Second.pak",
+                0,
+                "---@param value number\nfunction Conflicting(value) end\n",
+            ),
+        ])
+        .expect("catalog"),
+    );
+    let facts = Arc::new(
+        parse_packaged_thoth_facts(catalog.as_ref(), "test-v2", |source| {
+            bg3_index::parse_thoth_file(source.text())
+        })
+        .expect("facts"),
+    );
+    let workspace = workspace
+        .with_packaged_thoth(catalog)
+        .with_packaged_thoth_facts(facts);
+    let text = "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"Conflicting(value\"";
+    let overlays = overlay(&workspace, &path, text);
+    let signature = workspace
+        .signature_help(
+            &path,
+            Position {
+                line: 2,
+                character: u32::try_from(text.lines().nth(2).unwrap().len()).unwrap(),
+            },
+            &overlays,
+        )
+        .expect("ambiguous packaged signature");
+    assert_eq!(signature.label, "Conflicting(value)");
+    assert!(!signature.documentation.contains("Explicit"));
+}
+
+#[test]
 fn unknown_observed_package_calls_keep_each_exact_arity() {
     let (workspace, path) = workspace();
     let entry = "Mods/OtherBase/Scripts/thoth/helpers/Observed.khn";

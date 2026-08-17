@@ -351,6 +351,83 @@ assert(vim.wait(5000, function()
 end, 10), "the project client did not attach to the Thoth buffer")
 
 replace_buffer({
+  "---@class Weapon",
+  "---@field IsValid boolean",
+  "",
+  "---@param weapon Weapon?",
+  "---@return ConditionResult",
+  "function IsWeaponCandidate(weapon)",
+  "  return weapon",
+  "end",
+  "---@type Weapon?",
+  "local candidate = nil",
+  "return IsWeaponCandidate(candidate)",
+})
+
+local function thoth_hover_at(needle, line)
+  local column = assert(vim.api.nvim_buf_get_lines(0, line, line + 1, false)[1]:find(needle, 1, true)) - 1
+  local response = vim.lsp.buf_request_sync(0, "textDocument/hover", {
+    textDocument = { uri = vim.uri_from_bufnr(0) },
+    position = { line = line, character = column },
+  }, 5000)
+  return assert(response[client_id] and response[client_id].result, vim.inspect(response)).contents.value
+end
+
+assert(vim.wait(5000, function()
+  local symbols = vim.lsp.buf_request_sync(0, "textDocument/documentSymbol", {
+    textDocument = { uri = vim.uri_from_bufnr(0) },
+  }, 1000)
+  return symbols and symbols[client_id] and symbols[client_id].result
+end, 50), "the annotated Thoth overlay was not indexed")
+
+local annotated_hover = thoth_hover_at("IsWeaponCandidate", 5)
+assert(annotated_hover:find("Thoth function", 1, true), annotated_hover)
+assert(annotated_hover:find("weapon: Weapon|nil", 1, true), annotated_hover)
+assert(annotated_hover:find("ConditionResult", 1, true), annotated_hover)
+
+local annotated_signature_line = "return IsWeaponCandidate(candidate)"
+local annotated_signature = vim.lsp.buf_request_sync(0, "textDocument/signatureHelp", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = { line = 10, character = #annotated_signature_line - 1 },
+}, 5000)
+local annotated_signature_result = assert(
+  annotated_signature[client_id] and annotated_signature[client_id].result,
+  vim.inspect(annotated_signature)
+)
+assert(annotated_signature_result.signatures[1].label:find("weapon: Weapon|nil", 1, true), vim.inspect(annotated_signature))
+assert(annotated_signature_result.signatures[1].label:find("ConditionResult", 1, true), vim.inspect(annotated_signature))
+
+local class_hover = thoth_hover_at("Weapon", 0)
+assert(class_hover:find("Thoth class", 1, true), class_hover)
+assert(class_hover:find("IsValid", 1, true), class_hover)
+local type_hover = thoth_hover_at("candidate", 9)
+assert(type_hover:find("Thoth type", 1, true), type_hover)
+assert(type_hover:find("Weapon|nil", 1, true), type_hover)
+
+replace_buffer({
+  "---@param weapon ???",
+  "function IsWeaponCandidate(weapon)",
+  "end",
+})
+assert(vim.wait(5000, function()
+  return vim.iter(vim.diagnostic.get(0)):any(function(diagnostic)
+    return diagnostic.code == "thoth-annotation-error" and diagnostic.source == "bg3"
+  end)
+end, 50), "the server did not publish the Thoth annotation diagnostic")
+
+replace_buffer({
+  "---@param weapon Weapon?",
+  "---@return ConditionResult",
+  "function IsWeaponCandidate(weapon)",
+  "end",
+})
+assert(vim.wait(5000, function()
+  return not vim.iter(vim.diagnostic.get(0)):any(function(diagnostic)
+    return diagnostic.code == "thoth-annotation-error"
+  end)
+end, 50), "the Thoth annotation diagnostic remained after restoring valid source")
+
+replace_buffer({
   "function UnsavedCaller(value)",
   "  return DependencyOnly(value)",
   "end",

@@ -5,8 +5,8 @@ use crate::{OverlaySet, WorkspaceSnapshot, range_contains};
 use bg3_index::{
     Definition, FUNCTIONS, ModuleRole, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothCatalog, Position, SchemaDefinition,
-    SchemaField, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, field_kind,
-    function_spec, is_lsx_value_field,
+    SchemaField, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
+    ThothFunctionContract, field_kind, function_spec, is_lsx_value_field,
 };
 
 /// The semantic category of one completion result.
@@ -45,6 +45,122 @@ pub struct SignatureHelp {
     pub documentation: String,
     pub parameters: Vec<String>,
     pub active_parameter: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AnnotatedSignature {
+    parameters: Vec<String>,
+    returns: Vec<String>,
+}
+
+impl AnnotatedSignature {
+    fn label(&self, name: &str) -> String {
+        let mut label = format!("{name}({})", self.parameters.join(", "));
+        if !self.returns.is_empty() {
+            label.push_str(": ");
+            label.push_str(&self.returns.join(", "));
+        }
+        label
+    }
+
+    fn documentation(&self, prefix: &str) -> String {
+        if self.returns.is_empty() {
+            prefix.to_owned()
+        } else {
+            format!("{prefix}\n\nReturns: `{}`", self.returns.join(", "))
+        }
+    }
+}
+
+fn annotated_signature(contract: &ThothFunctionContract) -> AnnotatedSignature {
+    AnnotatedSignature {
+        parameters: contract
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let variadic = if parameter.variadic { "..." } else { "" };
+                format!("{variadic}{}: {}", parameter.name, parameter.ty)
+            })
+            .collect(),
+        returns: contract
+            .returns
+            .iter()
+            .map(|return_value| return_value.ty.to_string())
+            .collect(),
+    }
+}
+
+fn function_annotation(annotations: &ThothAnnotations, name: &str) -> Option<AnnotatedSignature> {
+    annotations
+        .functions
+        .iter()
+        .find(|annotation| annotation.name.as_deref() == Some(name))
+        .and_then(|annotation| annotation.contracts.first())
+        .map(annotated_signature)
+}
+
+fn function_annotation_at(
+    annotations: &ThothAnnotations,
+    name: &str,
+    selection_range: TextRange,
+) -> Option<AnnotatedSignature> {
+    annotations
+        .functions
+        .iter()
+        .find(|annotation| {
+            annotation.name.as_deref() == Some(name)
+                && annotation.name_range == Some(selection_range)
+        })
+        .and_then(|annotation| annotation.contracts.first())
+        .map(annotated_signature)
+}
+
+fn type_annotation_hover(
+    annotations: &ThothAnnotations,
+    word: &str,
+    position: Position,
+) -> Option<String> {
+    if let Some(class) = annotations
+        .classes
+        .iter()
+        .find(|class| class.name == word && range_contains(class.name_range, position))
+    {
+        let fields = class
+            .fields
+            .iter()
+            .map(|field| format!("- `{}`: `{}`", field.name, field.ty))
+            .collect::<Vec<_>>();
+        let mut markdown = format!("**Thoth class** `{word}`");
+        if !fields.is_empty() {
+            markdown.push_str("\n\n");
+            markdown.push_str(&fields.join("\n"));
+        }
+        return Some(markdown);
+    }
+    if let Some((class, field)) = annotations.classes.iter().find_map(|class| {
+        class
+            .fields
+            .iter()
+            .find(|field| field.name == word && range_contains(field.name_range, position))
+            .map(|field| (class, field))
+    }) {
+        return Some(format!(
+            "**Thoth field** `{word}`\n\nClass: `{}`\n\nType: `{}`",
+            class.name, field.ty
+        ));
+    }
+    if let Some(alias) = annotations
+        .aliases
+        .iter()
+        .find(|alias| alias.name == word && range_contains(alias.name_range, position))
+    {
+        return Some(format!("**Thoth alias** `{word}`\n\nType: `{}`", alias.ty));
+    }
+    annotations
+        .variables
+        .iter()
+        .find(|variable| variable.target == word && range_contains(variable.target_range, position))
+        .map(|variable| format!("**Thoth type** `{word}`\n\nType: `{}`", variable.ty))
 }
 
 impl WorkspaceSnapshot {
@@ -191,7 +307,18 @@ impl WorkspaceSnapshot {
             kind: Some(THOTH_FUNCTION_KIND.into()),
             name: context.function.clone(),
         };
-        if let Some(definition) = self.resolve(&target, overlays).into_iter().next() {
+        let resolved = self.resolve(&target, overlays);
+        if let Some(signature) =
+            self.loose_thoth_annotation_signature(&context.function, &resolved, overlays)
+        {
+            return Some(SignatureHelp {
+                label: signature.label(&context.function),
+                documentation: signature.documentation("Explicit Thoth annotation."),
+                parameters: signature.parameters,
+                active_parameter: context.argument,
+            });
+        }
+        if let Some(definition) = resolved.into_iter().next() {
             let parameters = thoth_parameters(&definition.definition);
             return Some(SignatureHelp {
                 label: format!("{}({})", definition.definition.name, parameters.join(", ")),
@@ -204,6 +331,21 @@ impl WorkspaceSnapshot {
             });
         }
         let (parameters, ambiguous, module) = self.packaged_thoth_signature(&context.function)?;
+        if let Some((signature, module, entries)) =
+            self.packaged_thoth_annotation(&context.function)
+        {
+            let mut documentation = signature.documentation("Explicit installed Thoth annotation.");
+            documentation.push_str(&format!("\n\nModule: `{module}`"));
+            if !entries.is_empty() {
+                documentation.push_str(&format!("\n\nPackage entries: `{}`", entries.join("`, `")));
+            }
+            return Some(SignatureHelp {
+                label: signature.label(&context.function),
+                documentation,
+                parameters: signature.parameters,
+                active_parameter: context.argument,
+            });
+        }
         Some(SignatureHelp {
             label: format!("{}({})", context.function, parameters.join(", ")),
             documentation: if ambiguous {
@@ -260,8 +402,42 @@ impl WorkspaceSnapshot {
                 }
             }
         }
+        if let Some((_, file)) = self.file(path, overlays)
+            && let Some(thoth) = &file.thoth
+            && let Some(hover) = type_annotation_hover(
+                &thoth.annotations,
+                word,
+                Position {
+                    line: position.line,
+                    character: position.character,
+                },
+            )
+        {
+            return Some(hover);
+        }
+        if let Some((_, file)) = self.file(path, overlays)
+            && let Some(thoth) = &file.thoth
+            && let Some(signature) = function_annotation(&thoth.annotations, word)
+        {
+            return Some(format!(
+                "**Thoth function** `{word}`\n\nSignature: `{}`\n\n{}",
+                signature.label(word),
+                signature.documentation("Explicit Thoth annotation.")
+            ));
+        }
         if let Some(evidence) = self.loose_thoth_hover(word, overlays) {
             return Some(evidence);
+        }
+        if let Some((signature, module, entries)) = self.packaged_thoth_annotation(word) {
+            let mut markdown = format!(
+                "**Installed Thoth function** `{word}`\n\nModule: `{module}`\n\nSignature: `{}`\n\n{}",
+                signature.label(word),
+                signature.documentation("Explicit installed Thoth annotation.")
+            );
+            if !entries.is_empty() {
+                markdown.push_str(&format!("\n\nPackage entries: `{}`", entries.join("`, `")));
+            }
+            return Some(markdown);
         }
         if let Some(evidence) = self.packaged_thoth_function_evidence(word) {
             return Some(evidence);
@@ -488,15 +664,22 @@ impl WorkspaceSnapshot {
                     continue;
                 }
                 let ambiguous = parameter_lists.len() > 1;
+                let annotation =
+                    self.loose_thoth_completion_annotation(&layer.spec.name, &name, overlays);
                 for parameters in parameter_lists {
                     let mut item = basic_item(&name, prefix, position, CompletionKind::Function);
-                    item.detail = Some(if ambiguous {
+                    item.detail = Some(if let Some(signature) = &annotation {
+                        signature.label(&name)
+                    } else if ambiguous {
                         format!("{} (same-rank ambiguity)", layer.spec.name)
                     } else {
                         layer.spec.name.clone()
                     });
-                    item.documentation =
-                        Some("Declared Thoth helper. Parameter types are not inferred.".into());
+                    item.documentation = Some(if annotation.is_some() {
+                        "Explicit Thoth annotation.".into()
+                    } else {
+                        "Declared Thoth helper. Parameter types are not inferred.".into()
+                    });
                     if snippets {
                         let parameters = split_parameters(&parameters);
                         if parameters.is_empty() {
@@ -522,14 +705,35 @@ impl WorkspaceSnapshot {
             }
             for parameters in parameter_lists {
                 let mut item = basic_item(&name, prefix, position, CompletionKind::Function);
-                item.detail = Some(if ambiguous {
-                    format!("installed {module} (same-rank ambiguity)")
-                } else {
-                    format!("installed {module}")
-                });
+                let annotation = self.packaged_thoth_annotation(&name);
+                item.detail = Some(
+                    if let Some((signature, installed_module, _)) = &annotation {
+                        format!(
+                            "{} (installed {})",
+                            signature.label(&name),
+                            installed_module
+                        )
+                    } else if ambiguous {
+                        format!("installed {module} (same-rank ambiguity)")
+                    } else {
+                        format!("installed {module}")
+                    },
+                );
                 item.documentation = Some(
-                    "Installed Thoth declaration from configured package data. Parameter types are not inferred."
-                        .into(),
+                    if let Some((_, installed_module, entries)) = &annotation {
+                        let mut documentation = format!(
+                            "Explicit installed Thoth annotation from module {}.",
+                            installed_module
+                        );
+                        if !entries.is_empty() {
+                            documentation
+                                .push_str(&format!(" Package entries: {}.", entries.join(", ")));
+                        }
+                        documentation
+                    } else {
+                        "Installed Thoth declaration from configured package data. Parameter types are not inferred."
+                        .into()
+                    },
                 );
                 if snippets {
                     if parameters.is_empty() {
@@ -803,6 +1007,91 @@ impl WorkspaceSnapshot {
         Some((parameters, ambiguous, module))
     }
 
+    /// Resolves explicit contracts from the effective packaged declarations.
+    /// Package entries remain provenance labels; they are never converted to
+    /// navigable filesystem locations.
+    fn packaged_thoth_annotation(
+        &self,
+        name: &str,
+    ) -> Option<(AnnotatedSignature, String, Vec<String>)> {
+        let catalog = self.packaged_thoth();
+        let facts = self.packaged_thoth_facts();
+        for layer in self
+            .layers
+            .iter()
+            .rev()
+            .filter(|layer| layer.spec.role == ModuleRole::Base)
+        {
+            let mut records = Vec::new();
+            for record in facts.iter() {
+                if record.source().module() != layer.spec.name {
+                    continue;
+                }
+                let Some((priority, _)) = packaged_thoth_entry_priority(
+                    &catalog,
+                    record.source().module(),
+                    record.source().entry(),
+                ) else {
+                    continue;
+                };
+                if record.source().priority() != priority
+                    || !catalog
+                        .sources_for(record.source().module(), record.source().entry())
+                        .iter()
+                        .any(|candidate| candidate == record.source())
+                {
+                    continue;
+                }
+                if record
+                    .facts()
+                    .declarations
+                    .iter()
+                    .any(|declaration| declaration.name == name)
+                {
+                    records.push(record);
+                }
+            }
+            if records.is_empty() {
+                continue;
+            }
+            let signatures = records
+                .iter()
+                .flat_map(|record| {
+                    record
+                        .facts()
+                        .declarations
+                        .iter()
+                        .filter(|declaration| declaration.name == name)
+                        .map(|declaration| {
+                            function_annotation_at(
+                                &record.facts().annotations,
+                                name,
+                                declaration.name_range,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let Some(Some(signature)) = signatures.first() else {
+                return None;
+            };
+            if !signatures
+                .iter()
+                .all(|candidate| candidate.as_ref() == Some(signature))
+            {
+                return None;
+            }
+            let mut entries = records
+                .iter()
+                .map(|record| record.source().entry().to_owned())
+                .collect::<Vec<_>>();
+            entries.sort();
+            entries.dedup();
+            return Some((signature.clone(), layer.spec.name.clone(), entries));
+        }
+        None
+    }
+
     /// Formats installed declaration and call evidence without a source path.
     fn packaged_thoth_function_evidence(&self, name: &str) -> Option<String> {
         let (parameters, ambiguous, module) = self.packaged_thoth_signature(name)?;
@@ -926,6 +1215,122 @@ impl WorkspaceSnapshot {
             }
         }
         None
+    }
+
+    /// Returns explicit annotation evidence for the effective loose declaration.
+    ///
+    /// Resolution has already applied module precedence and overlay replacement.
+    /// If several declarations share the winning rank, every declaration must
+    /// carry the same contract before typed metadata is exposed.
+    fn loose_thoth_annotation_signature(
+        &self,
+        name: &str,
+        definitions: &[crate::ResolvedDefinition],
+        overlays: &OverlaySet,
+    ) -> Option<AnnotatedSignature> {
+        let first = definitions.first()?;
+        let top_rank = first.rank;
+        let candidates = definitions
+            .iter()
+            .take_while(|definition| definition.rank == top_rank)
+            .collect::<Vec<_>>();
+        let signatures = candidates
+            .iter()
+            .map(|definition| {
+                self.thoth_annotation_for_path(
+                    &definition.path,
+                    name,
+                    definition.definition.selection_range,
+                    overlays,
+                )
+            })
+            .collect::<Vec<_>>();
+        let Some(Some(signature)) = signatures.first() else {
+            return None;
+        };
+        if signatures
+            .iter()
+            .all(|candidate| candidate.as_ref() == Some(signature))
+        {
+            Some(signature.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Renders explicit metadata for a loose function before generic hover.
+    pub(crate) fn annotated_thoth_hover(
+        &self,
+        name: &str,
+        definitions: &[crate::ResolvedDefinition],
+        overlays: &OverlaySet,
+    ) -> Option<String> {
+        let signature = self.loose_thoth_annotation_signature(name, definitions, overlays)?;
+        Some(format!(
+            "**Thoth function** `{name}`\n\nSignature: `{}`\n\n{}",
+            signature.label(name),
+            signature.documentation("Explicit Thoth annotation.")
+        ))
+    }
+
+    fn thoth_annotation_for_path(
+        &self,
+        path: &Path,
+        name: &str,
+        selection_range: TextRange,
+        overlays: &OverlaySet,
+    ) -> Option<AnnotatedSignature> {
+        if let Some(overlay) = overlays.get(path) {
+            return overlay.parsed.thoth.as_ref().and_then(|thoth| {
+                function_annotation_at(&thoth.annotations, name, selection_range)
+            });
+        }
+        let (_, file) = self.layers.iter().find_map(|layer| {
+            layer
+                .file(path)
+                .map(|file| (layer.spec.name.as_str(), file))
+        })?;
+        file.thoth
+            .as_ref()
+            .and_then(|thoth| function_annotation_at(&thoth.annotations, name, selection_range))
+    }
+
+    fn loose_thoth_completion_annotation(
+        &self,
+        module: &str,
+        name: &str,
+        overlays: &OverlaySet,
+    ) -> Option<AnnotatedSignature> {
+        let layer = self.layers.iter().find(|layer| layer.spec.name == module)?;
+        let mut signatures = Vec::new();
+        for (_, overlay) in overlays.for_module(module) {
+            for definition in overlay.parsed.definitions.iter().filter(|definition| {
+                definition.kind == THOTH_FUNCTION_KIND && definition.name == name
+            }) {
+                signatures.push(overlay.parsed.thoth.as_ref().and_then(|thoth| {
+                    function_annotation_at(&thoth.annotations, name, definition.selection_range)
+                }));
+            }
+        }
+        for (path, file) in &layer.files {
+            if overlays.contains(path) {
+                continue;
+            }
+            for definition in file.definitions.iter().filter(|definition| {
+                definition.kind == THOTH_FUNCTION_KIND && definition.name == name
+            }) {
+                signatures.push(file.thoth.as_ref().and_then(|thoth| {
+                    function_annotation_at(&thoth.annotations, name, definition.selection_range)
+                }));
+            }
+        }
+        let Some(Some(signature)) = signatures.first() else {
+            return None;
+        };
+        signatures
+            .iter()
+            .all(|candidate| candidate.as_ref() == Some(signature))
+            .then(|| signature.clone())
     }
 
     /// Returns source-backed signatures for visible user callables and databases.

@@ -463,6 +463,267 @@ fn completes_and_describes_declared_thoth_helpers() {
 }
 
 #[test]
+fn uses_explicit_thoth_annotations_for_editor_evidence() {
+    let (workspace, stats_path) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Scripts/thoth/helpers/Annotated.khn");
+    let text = "---@class Weapon\n---@field IsValid boolean\n---@alias Result string|nil\n---@param weapon Weapon?\n---@return Result\nfunction Annotated(weapon)\n---@type Result\nlocal result = Annotated(weapon)\nreturn result\nend\n";
+    let signature_text =
+        "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"Annotated(value\"";
+    let mut overlays = overlay(&workspace, &stats_path, signature_text);
+    let parsed = parse_source(
+        SourceFile {
+            path: path.clone(),
+            kind: SourceKind::Thoth,
+        },
+        text,
+        &workspace.schema,
+        "English",
+    )
+    .unwrap();
+    overlays.insert(
+        path.clone(),
+        OverlayDocument {
+            module: "MyMod".into(),
+            version: 1,
+            text: text.into(),
+            parsed: Arc::new(parsed),
+        },
+    );
+
+    let completion = workspace.completion(
+        &path,
+        Position {
+            line: 7,
+            character: 22,
+        },
+        &overlays,
+        false,
+    );
+    let item = completion
+        .items
+        .iter()
+        .find(|item| item.label == "Annotated")
+        .expect("annotated completion");
+    assert_eq!(
+        item.detail.as_deref(),
+        Some("Annotated(weapon: Weapon|nil): Result")
+    );
+    assert_eq!(
+        item.documentation.as_deref(),
+        Some("Explicit Thoth annotation.")
+    );
+
+    let signature = workspace
+        .signature_help(
+            &stats_path,
+            Position {
+                line: 2,
+                character: u32::try_from(signature_text.lines().nth(2).unwrap().len()).unwrap(),
+            },
+            &overlays,
+        )
+        .expect("annotated signature");
+    assert_eq!(signature.label, "Annotated(weapon: Weapon|nil): Result");
+    assert_eq!(signature.parameters, vec!["weapon: Weapon|nil"]);
+
+    let hover = workspace
+        .hover(&path, source_position(text, "Annotated"), &overlays)
+        .expect("annotated hover");
+    assert!(hover.contains("Weapon|nil"));
+    assert!(hover.contains("Result"));
+
+    let variable_hover = workspace
+        .language_hover(&path, source_position(text, "result ="), &overlays)
+        .expect("@type hover");
+    assert!(variable_hover.contains("Type: `Result`"));
+
+    let class_hover = workspace
+        .language_hover(&path, source_position(text, "Weapon"), &overlays)
+        .expect("class hover");
+    assert!(class_hover.contains("IsValid"));
+}
+
+#[test]
+fn annotation_precedence_masks_lower_and_conflicting_contracts() {
+    let schema = Arc::new(SchemaCatalog::default());
+    let lower_path = PathBuf::from("/synthetic/Lower/Annotated.khn");
+    let higher_path = PathBuf::from("/synthetic/Higher/Annotated.khn");
+    let caller_path = PathBuf::from("/synthetic/Higher/Caller.khn");
+    let lower_text = "---@param value string\n---@return boolean\nfunction Annotated(value) end\n";
+    let higher_text = "function Annotated(value) end\nlocal result = Annotated(value)\n";
+    let parse = |path: &Path, text: &str| {
+        parse_source(
+            SourceFile {
+                path: path.to_owned(),
+                kind: SourceKind::Thoth,
+            },
+            text,
+            &schema,
+            "English",
+        )
+        .unwrap()
+    };
+    let lower = Arc::new(ModuleIndex::new(
+        ModuleSpec {
+            name: "Lower".into(),
+            root: PathBuf::from("/synthetic/Lower"),
+            role: ModuleRole::Base,
+        },
+        vec![parse(&lower_path, lower_text)],
+    ));
+    let higher = Arc::new(ModuleIndex::new(
+        ModuleSpec {
+            name: "Higher".into(),
+            root: PathBuf::from("/synthetic/Higher"),
+            role: ModuleRole::Base,
+        },
+        vec![parse(&higher_path, higher_text)],
+    ));
+    let workspace = WorkspaceSnapshot::new(schema.clone(), vec![lower, higher], 1, 200, 200);
+    let mut overlays = OverlaySet::default();
+    let caller_text = "local result = Annotated(value, ";
+    overlays.insert(
+        caller_path.clone(),
+        OverlayDocument {
+            module: "Higher".into(),
+            version: 1,
+            text: caller_text.into(),
+            parsed: Arc::new(parse(&caller_path, caller_text)),
+        },
+    );
+    let signature = workspace
+        .signature_help(
+            &caller_path,
+            Position {
+                line: 0,
+                character: u32::try_from(caller_text.len()).unwrap(),
+            },
+            &overlays,
+        )
+        .unwrap();
+    assert_eq!(signature.label, "Annotated(value)");
+    assert!(!signature.documentation.contains("Explicit"));
+
+    let same_a = PathBuf::from("/synthetic/Higher/A.khn");
+    let same_b = PathBuf::from("/synthetic/Higher/B.khn");
+    let same_caller = PathBuf::from("/synthetic/Higher/C.khn");
+    let a_text = "---@param value string\nfunction Conflicting(value) end\n";
+    let b_text = "---@param value number\nfunction Conflicting(value) end\n";
+    let c_text = "local result = Conflicting(value, ";
+    let higher = Arc::new(ModuleIndex::new(
+        ModuleSpec {
+            name: "Higher".into(),
+            root: PathBuf::from("/synthetic/Higher"),
+            role: ModuleRole::Base,
+        },
+        vec![
+            parse(&same_a, a_text),
+            parse(&same_b, b_text),
+            parse(&same_caller, c_text),
+        ],
+    ));
+    let workspace = WorkspaceSnapshot::new(
+        schema.clone(),
+        vec![
+            Arc::new(ModuleIndex::new(
+                ModuleSpec {
+                    name: "Lower".into(),
+                    root: PathBuf::from("/synthetic/Lower"),
+                    role: ModuleRole::Base,
+                },
+                Vec::new(),
+            )),
+            higher,
+        ],
+        1,
+        200,
+        200,
+    );
+    let mut overlays = OverlaySet::default();
+    overlays.insert(
+        same_caller.clone(),
+        OverlayDocument {
+            module: "Higher".into(),
+            version: 1,
+            text: c_text.into(),
+            parsed: Arc::new(parse(&same_caller, c_text)),
+        },
+    );
+    let signature = workspace
+        .signature_help(
+            &same_caller,
+            Position {
+                line: 0,
+                character: u32::try_from(c_text.len()).unwrap(),
+            },
+            &overlays,
+        )
+        .unwrap();
+    assert!(!signature.label.contains("string"));
+    assert!(!signature.label.contains("number"));
+    assert!(!signature.documentation.contains("Explicit"));
+}
+
+#[test]
+fn annotation_overlay_replaces_disk_contract_and_type_hover_is_range_limited() {
+    let schema = Arc::new(SchemaCatalog::default());
+    let path = PathBuf::from("/synthetic/Project/Annotated.khn");
+    let disk_text = "---@param value string\nfunction Annotated(value) end\nlocal result = value\n";
+    let overlay_text =
+        "---@param value number\nfunction Annotated(value) end\nlocal result = value\n";
+    let parse = |text: &str| {
+        parse_source(
+            SourceFile {
+                path: path.clone(),
+                kind: SourceKind::Thoth,
+            },
+            text,
+            &schema,
+            "English",
+        )
+        .unwrap()
+    };
+    let workspace = WorkspaceSnapshot::new(
+        schema.clone(),
+        vec![Arc::new(ModuleIndex::new(
+            ModuleSpec {
+                name: "Project".into(),
+                root: PathBuf::from("/synthetic/Project"),
+                role: ModuleRole::Project,
+            },
+            vec![parse(disk_text)],
+        ))],
+        1,
+        200,
+        200,
+    );
+    let mut overlays = OverlaySet::default();
+    overlays.insert(
+        path.clone(),
+        OverlayDocument {
+            module: "Project".into(),
+            version: 2,
+            text: overlay_text.into(),
+            parsed: Arc::new(parse(overlay_text)),
+        },
+    );
+    let hover = workspace
+        .hover(&path, source_position(overlay_text, "Annotated"), &overlays)
+        .unwrap();
+    assert!(hover.contains("number"));
+    assert!(!hover.contains("string"));
+    let later_use = workspace.language_hover(
+        &path,
+        Position {
+            line: 2,
+            character: 16,
+        },
+        &overlays,
+    );
+    assert!(later_use.is_none());
+}
+
+#[test]
 fn thoth_overlays_replace_and_restore_disk_declarations() {
     let (workspace, _) = fixture_workspace(200);
     let path = fixtures().join("project/Mods/MyMod/Scripts/thoth/helpers/MyMod.khn");

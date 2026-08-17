@@ -264,6 +264,39 @@ Invalid Thoth syntax produces the stable `thoth-syntax-error` diagnostic code;
 valid Thoth produces no syntax diagnostics. Semantic Thoth diagnostics remain
 out of scope.
 
+### Thoth annotations
+
+Thoth helpers support a small, documented subset of
+[LuaLS annotations](https://luals.github.io/wiki/annotations/). These tags are
+line comments, so they are inert when the game loads the script:
+
+```lua
+---@class Weapon
+---@field IsValid boolean
+
+---@param weapon Weapon?
+---@return ConditionResult
+function IsWeaponCandidate(weapon) end
+```
+
+The supported tags are `---@class`, `---@field`, `---@alias`, `---@param`,
+`---@return`, and `---@type`. Supported type syntax includes `boolean`,
+`number`, `string`, `nil`, dotted names such as `Weapon.Properties`, unions
+(`A|B`), nullable types (`Weapon?`), arrays (`Weapon[]`), and function-shaped
+fields such as `fun(value: string): boolean`. A `---@param name? Type` tag
+marks an optional parameter.
+
+An annotation attaches only to the immediately following declaration or to
+the immediately following contiguous annotation block. A blank line or an
+ordinary comment breaks attachment. Malformed supported tags and type syntax
+produce `thoth-annotation-error`; unknown names and unsupported annotation tags
+are ignored. This is not full LuaLS compatibility.
+
+Annotations currently provide explicit declaration, hover, and signature
+evidence. Type propagation through calls, member completion and navigation,
+nil narrowing, and semantic Thoth diagnostics are separate follow-up work. The
+server does not infer those results from an annotation alone.
+
 Osiris navigation includes goals, parent edges, `PROC` and `QRY` declarations,
 and user database occurrences. Procedure and query identity uses name and
 arity in one callable namespace. User databases use a separate name-and-arity
@@ -337,6 +370,7 @@ The stable syntax diagnostic codes are:
 | --- | --- | --- |
 | Legacy Stats | `syntax-error` | Stats syntax |
 | Thoth | `thoth-syntax-error` | Thoth syntax only |
+| Thoth | `thoth-annotation-error` | Supported annotation syntax |
 | Osiris goals | `osiris-syntax-error` | Osiris goal syntax |
 
 Human output uses one-based lines and columns. JSON output uses zero-based
@@ -400,11 +434,11 @@ fields, and inferred function arity. Static tooltip previews do not evaluate
 `DescriptionParams`, live data bindings, runtime values, gender variants, or
 BG3 UI rendering.
 
-Thoth diagnostics are limited to syntax errors reported as
-`thoth-syntax-error`. Indexed Thoth observations do not by themselves create
-semantic diagnostics. LuaCATS-like annotations and type propagation remain
-planned follow-up work, so unknown types stay unknown. Semantic Thoth
-diagnostics remain out of scope.
+Thoth diagnostics cover syntax errors reported as `thoth-syntax-error` and
+malformed supported annotations reported as `thoth-annotation-error`. Indexed
+Thoth observations and annotations do not by themselves create semantic
+diagnostics. Type propagation, member completion and navigation, nil
+narrowing, and semantic Thoth diagnostics remain out of scope.
 
 Osiris support does not execute or compile Story, provide control-flow
 analysis, load a complete engine API catalog, or infer aliases from

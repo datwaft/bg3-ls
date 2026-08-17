@@ -4,7 +4,7 @@ use crate::Error;
 use crate::thoth::{PackagedThothCatalog, PackagedThothSource};
 
 /// Invalidates cached packaged Thoth facts when their semantic shape changes.
-pub const THOTH_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-thoth-facts-v1";
+pub const THOTH_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-thoth-facts-v2";
 
 /// One parsed Thoth fact record with the package entry that produced it.
 ///
