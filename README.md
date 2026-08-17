@@ -245,8 +245,9 @@ unsaved overlays. Closing a buffer restores its disk record. Thoth helper
 declarations provide definition, hover, references, function completion,
 declared-parameter signature help, document symbols, and workspace symbols.
 The server applies the configured module precedence to helper overrides. It
-does not infer Thoth parameter or return types and does not publish Thoth
-diagnostics.
+does not infer Thoth parameter or return types. Invalid Thoth syntax produces
+the stable `thoth-syntax-error` diagnostic code; valid Thoth produces no syntax
+diagnostics. Semantic Thoth diagnostics remain out of scope.
 
 Osiris navigation includes goals, parent edges, `PROC` and `QRY` declarations,
 and user database occurrences. Procedure and query identity uses name and
@@ -307,10 +308,19 @@ bg3-ls check --format json --fail-on warning
 ```
 
 The command finds the nearest `bg3-ls.json` in the current directory or its
-ancestors. With no paths, it reports diagnostics for all legacy Stats files
-and loose Osiris goals in the project module. Explicit files or directories
-limit diagnostic output. The command still indexes visible dependencies and
-base modules for resolution.
+ancestors. With no paths, it reports diagnostics for all legacy Stats files,
+loose Thoth helpers, and loose Osiris goals in the project module. Thoth
+diagnostics are syntax-only. Explicit files or directories limit diagnostic
+output. The command still indexes visible dependencies and base modules for
+resolution.
+
+The stable syntax diagnostic codes are:
+
+| Source | Code | Scope |
+| --- | --- | --- |
+| Legacy Stats | `syntax-error` | Stats syntax |
+| Thoth | `thoth-syntax-error` | Thoth syntax only |
+| Osiris goals | `osiris-syntax-error` | Osiris goal syntax |
 
 Human output uses one-based lines and columns. JSON output uses zero-based
 `line` and `character` values that match LSP positions. `--fail-on` accepts
@@ -372,6 +382,9 @@ generic expression identifiers, root-template UUID resolution, required
 fields, and inferred function arity. Static tooltip previews do not evaluate
 `DescriptionParams`, live data bindings, runtime values, gender variants, or
 BG3 UI rendering.
+
+Thoth diagnostics are limited to syntax errors reported as
+`thoth-syntax-error`. Semantic Thoth diagnostics remain out of scope.
 
 Osiris support does not execute or compile Story, provide control-flow
 analysis, load a complete engine API catalog, or infer aliases from

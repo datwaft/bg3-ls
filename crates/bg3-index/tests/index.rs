@@ -210,6 +210,37 @@ fn parses_thoth_declarations_parameters_and_calls() {
 }
 
 #[test]
+fn reports_thoth_syntax_errors_for_malformed_sources() {
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Broken.khn"),
+            kind: SourceKind::Thoth,
+        },
+        "function Broken(entity)\n  @\nend\n",
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert_eq!(parsed.issues.len(), 1);
+    assert_eq!(parsed.issues[0].code, "thoth-syntax-error");
+    assert_eq!(parsed.issues[0].message, "The Thoth syntax is not valid.");
+    assert_eq!(
+        parsed.issues[0].range,
+        bg3_index::TextRange {
+            start: bg3_index::Position {
+                line: 1,
+                character: 2,
+            },
+            end: bg3_index::Position {
+                line: 1,
+                character: 3,
+            },
+        }
+    );
+}
+
+#[test]
 fn parses_osiris_goals_declarations_calls_and_database_evidence() {
     let root = fixtures();
     let path = root.join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");

@@ -39,10 +39,7 @@ impl WorkspaceSnapshot {
         };
         // The Stats catalogs do not describe LSX nodes. Do not report legacy
         // schema errors until the server has a verified LSX schema source.
-        if matches!(
-            file.source.kind,
-            SourceKind::Lsx | SourceKind::Thoth | SourceKind::Localization
-        ) {
+        if matches!(file.source.kind, SourceKind::Lsx | SourceKind::Localization) {
             return Vec::new();
         }
         let mut diagnostics: Vec<_> = file
@@ -55,7 +52,9 @@ impl WorkspaceSnapshot {
                 message: issue.message.clone(),
             })
             .collect();
-        if file.source.kind == SourceKind::Osiris {
+        // Thoth currently has syntax extraction only. Publish parser issues,
+        // but do not infer semantic or schema diagnostics from its functions.
+        if matches!(file.source.kind, SourceKind::Osiris | SourceKind::Thoth) {
             diagnostics.sort_by_key(|diagnostic| {
                 (
                     diagnostic.range.start.line,
