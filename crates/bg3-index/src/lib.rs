@@ -38,11 +38,12 @@ pub use domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
     OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference, SourceFile, SourceIssue,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment, ThothCall,
-    ThothDeclaration, ThothDeclarationOwner, ThothExpression, ThothExpressionFact,
-    ThothExpressionKind, ThothFile, ThothLexicalScope, ThothLiteralKind, ThothMemberAccess,
-    ThothMemberAccessKind, ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId,
-    ThothStatementId,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment, ThothBinaryOperator,
+    ThothCall, ThothControlFlowFact, ThothDeclaration, ThothDeclarationOwner, ThothExpression,
+    ThothExpressionFact, ThothExpressionKind, ThothFile, ThothIfBranch, ThothIfBranchKind,
+    ThothLexicalScope, ThothLiteralKind, ThothMemberAccess, ThothMemberAccessKind,
+    ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId, ThothStatementId,
+    ThothUnaryOperator,
 };
 pub use localization::{
     LocalizationCatalog, LocalizedText, read_base_localization_package, read_localization_package,

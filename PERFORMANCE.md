@@ -185,3 +185,27 @@ and warm indexing remain below the repository regression limits. The separate
 unrestricted run is provided for context; its timing was 1.336/1.339 seconds
 cold p50/p95, 411/420 ms warm p50/p95, and 1.083/1.125 microseconds navigation
 p50/p95.
+
+## Version 0.11 Thoth type-flow verification
+
+Issue #66 adds structured expression and control-flow facts used for
+conservative query-time type propagation. The verification used five cold and
+five warm trials with the same machine, data revision, modules, project, and
+source composition as the Issue #54 run. Both builds used `tree-sitter-bg3`
+0.4.3 with parser ABI 15.
+
+| Metric | Issue #66 p50 | Issue #66 p95 | Issue #54 p95 | p95 change |
+| --- | ---: | ---: | ---: | ---: |
+| Cold indexing | 1.452 s | 1.488 s | 1.405 s | +5.9% |
+| Warm indexing | 427 ms | 432 ms | 419 ms | +3.1% |
+| Navigation | 1.125 µs | 1.208 µs | 1.208 µs | 0.0% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100%
+- Repeated-trial RSS high-water mark after ten builds: 1,362,984,960 bytes
+- Cache size: 95,563,422 bytes in 3,460 files
+
+The structured facts add 751,866 bytes without adding cache files. Cold and
+warm p95 remain within the repository regression limits. Query-time type flow
+does not change the exact navigation benchmark result.

@@ -259,7 +259,7 @@ expose their archive entries as editable filesystem locations or fake URIs.
 Package priority selects a strictly higher-priority entry; equal-priority
 candidates remain ambiguous. Loose dependency and project sources retain
 their configured higher module precedence. Thoth parameter and return types
-remain unknown unless a later annotation or type-flow feature proves them.
+remain unknown unless an annotation or conservative type flow proves them.
 Invalid Thoth syntax produces the stable `thoth-syntax-error` diagnostic code;
 valid Thoth produces no syntax diagnostics. Semantic Thoth diagnostics remain
 out of scope.
@@ -297,8 +297,19 @@ evidence. Member completion and hover work for direct `---@type` bindings,
 annotated parameters, annotated helper results, and proven field chains. Loose
 fields navigate to their `---@field` name. Packaged fields remain virtual and
 do not create fake locations. Unions expose only fields common to every known
-non-`nil` member. Type propagation through assignments, nil narrowing, and
-semantic Thoth diagnostics are separate follow-up work.
+non-`nil` member. Conservative type flow propagates explicit types through
+direct assignments and uniquely resolved helper return contracts. Reachable
+return statements contribute normalized unions, including incompatible return
+types. Proven literals, schema-backed enum values, and supported primitive
+unary and binary operators retain their known types. The built-in
+`ConditionResult` constructor and its supported operators retain
+`ConditionResult`.
+
+Nil narrowing is limited to exact nil comparisons in a dominated branch or in
+the remainder after a proven early exit. Unknown or ambiguous calls and
+declarations, unsupported operators, and complex or uncertain control flow
+remain unknown and produce no semantic diagnostics. Semantic Thoth diagnostics
+remain out of scope.
 
 Osiris navigation includes goals, parent edges, `PROC` and `QRY` declarations,
 and user database occurrences. Procedure and query identity uses name and

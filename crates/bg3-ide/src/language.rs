@@ -455,6 +455,9 @@ impl WorkspaceSnapshot {
         if let Some(evidence) = self.packaged_thoth_function_evidence(word) {
             return Some(evidence);
         }
+        if let Some(hover) = self.thoth_flow_hover(path, position, overlays) {
+            return Some(hover);
+        }
         None
     }
 

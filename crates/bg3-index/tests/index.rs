@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use bg3_index::{
     CacheStore, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, SchemaCatalog, SourceFile,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, ThothExpressionKind, ThothLiteralKind,
-    ThothMemberAccessKind, ThothParameter, ThothScopeId, discover_module, parse_source,
-    parse_thoth_file, parse_tooltip_catalog, read_base_localization_package,
-    read_base_tooltip_catalog, read_localization_package, source_kind_for_document,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, ThothBinaryOperator, ThothExpressionKind,
+    ThothIfBranchKind, ThothLiteralKind, ThothMemberAccessKind, ThothParameter, ThothScopeId,
+    ThothUnaryOperator, discover_module, parse_source, parse_thoth_file, parse_tooltip_catalog,
+    read_base_localization_package, read_base_tooltip_catalog, read_localization_package,
+    source_kind_for_document,
 };
 
 fn fixtures() -> PathBuf {
@@ -354,7 +355,14 @@ fn classifies_thoth_expression_facts_and_preserves_return_order() {
             "Namespace.Member",
             ThothExpressionKind::MemberAccess(Vec::new()),
         ),
-        ("value + 1", ThothExpressionKind::Unknown),
+        (
+            "value + 1",
+            ThothExpressionKind::Binary {
+                operator: ThothBinaryOperator::Add,
+                left: Default::default(),
+                right: Default::default(),
+            },
+        ),
     ] {
         let fact = expressions
             .iter()
@@ -376,9 +384,107 @@ fn classifies_thoth_expression_facts_and_preserves_return_order() {
             | (ThothExpressionKind::FunctionCall, ThothExpressionKind::FunctionCall)
             | (ThothExpressionKind::Unknown, ThothExpressionKind::Unknown)
             | (ThothExpressionKind::MemberAccess(_), ThothExpressionKind::MemberAccess(_)) => {}
+            (
+                ThothExpressionKind::Binary { operator: left, .. },
+                ThothExpressionKind::Binary {
+                    operator: right, ..
+                },
+            ) => assert_eq!(*left, right),
             _ => panic!("unexpected kind for {text}"),
         }
     }
+}
+
+#[test]
+fn preserves_structured_operators_parentheses_branches_and_return_statements() {
+    let text = "function Flow(value)\n  if value ~= nil then\n    return (value)\n  else\n    return -value\n  end\nend\n";
+    let facts = parse_thoth_file(text).unwrap();
+
+    let guard = facts
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "value ~= nil")
+        .expect("nil guard fact");
+    let ThothExpressionKind::Binary {
+        operator,
+        left,
+        right,
+    } = &guard.kind
+    else {
+        panic!("nil guard must be a binary fact");
+    };
+    assert_eq!(*operator, ThothBinaryOperator::NotEqual);
+    assert_eq!(
+        *left,
+        facts
+            .expression_facts
+            .iter()
+            .find(|fact| fact.text == "value")
+            .unwrap()
+            .range
+    );
+    assert_eq!(
+        *right,
+        facts
+            .expression_facts
+            .iter()
+            .find(|fact| fact.text == "nil")
+            .unwrap()
+            .range
+    );
+
+    let parenthesized = facts
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "(value)")
+        .expect("parenthesized return fact");
+    let ThothExpressionKind::Parenthesized { expression } = &parenthesized.kind else {
+        panic!("parentheses must remain structured");
+    };
+    assert_eq!(
+        *expression,
+        facts
+            .expression_facts
+            .iter()
+            .find(|fact| fact.text == "value" && fact.range.start.line == 2)
+            .unwrap()
+            .range
+    );
+
+    let unary = facts
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "-value")
+        .expect("unary return fact");
+    let ThothExpressionKind::Unary { operator, operand } = &unary.kind else {
+        panic!("unary expression must remain structured");
+    };
+    assert_eq!(*operator, ThothUnaryOperator::Negate);
+    assert_eq!(
+        *operand,
+        facts
+            .expression_facts
+            .iter()
+            .find(|fact| fact.text == "value" && fact.range.start.line == 4)
+            .unwrap()
+            .range
+    );
+
+    let returns = facts.returns.iter().collect::<Vec<_>>();
+    assert_eq!(returns.len(), 2);
+    assert!(
+        returns
+            .iter()
+            .all(|return_fact| return_fact.statement.is_some())
+    );
+
+    let flow = &facts.control_flow;
+    assert_eq!(flow.len(), 1);
+    assert_eq!(flow[0].branches.len(), 2);
+    assert_eq!(flow[0].branches[0].kind, ThothIfBranchKind::Consequence);
+    assert_eq!(flow[0].branches[1].kind, ThothIfBranchKind::Else);
+    assert_eq!(flow[0].branches[0].condition, Some(guard.range));
+    assert!(flow[0].branches.iter().all(|branch| branch.scope.is_some()));
 }
 
 #[test]
@@ -697,7 +803,7 @@ fn repeat_body_facts_precede_the_trailing_until_condition() {
 fn warm_local_cache_preserves_thoth_expression_facts_and_scopes() {
     let directory = tempfile::tempdir().unwrap();
     let source_path = directory.path().join("Facts.khn");
-    let text = "function Facts(value)\n  local result = value\n  return result\nend\n";
+    let text = "function Facts(value)\n  local result = value\n  if value ~= nil then\n    return (result)\n  end\nend\n";
     fs::write(&source_path, text).unwrap();
     let source = SourceFile {
         path: source_path,
@@ -736,6 +842,14 @@ fn warm_local_cache_preserves_thoth_expression_facts_and_scopes() {
     assert_eq!(
         cold[0].thoth.as_ref().unwrap().scopes,
         warm[0].thoth.as_ref().unwrap().scopes
+    );
+    assert_eq!(
+        cold[0].thoth.as_ref().unwrap().control_flow,
+        warm[0].thoth.as_ref().unwrap().control_flow
+    );
+    assert_eq!(
+        cold[0].thoth.as_ref().unwrap().returns,
+        warm[0].thoth.as_ref().unwrap().returns
     );
 }
 
@@ -1011,6 +1125,34 @@ fn reports_thoth_syntax_errors_for_malformed_sources() {
             },
         }
     );
+}
+
+#[test]
+fn incomplete_structured_expressions_keep_the_loose_overlay_parseable() {
+    for text in [
+        "local value = (\n",
+        "local value = -\n",
+        "local value = 1 +\n",
+    ] {
+        let parsed = parse_source(
+            SourceFile {
+                path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Editing.khn"),
+                kind: SourceKind::Thoth,
+            },
+            text,
+            &SchemaCatalog::default(),
+            "English",
+        )
+        .expect("incomplete editor text must still produce an overlay");
+
+        assert!(parsed.thoth.is_some());
+        assert!(
+            parsed
+                .issues
+                .iter()
+                .any(|issue| issue.code == "thoth-syntax-error")
+        );
+    }
 }
 
 #[test]

@@ -452,6 +452,57 @@ assert(member_locations[1].range.start.line == 1, vim.inspect(member_locations))
 assert(member_locations[1].range.start.character == #"---@field ", vim.inspect(member_locations))
 
 replace_buffer({
+  "---@class FlowWeapon",
+  "---@field damage integer",
+  "---@return FlowWeapon",
+  "function make_flow_weapon() end",
+  "local inferred_weapon = make_flow_weapon()",
+  "return inferred_weapon.da",
+})
+local inferred_completion_line = "return inferred_weapon.da"
+assert(vim.wait(5000, function()
+  local response = vim.lsp.buf_request_sync(0, "textDocument/completion", {
+    textDocument = { uri = vim.uri_from_bufnr(0) },
+    position = { line = 5, character = #inferred_completion_line },
+  }, 1000)
+  local result = response and response[client_id] and response[client_id].result
+  local items = result and (result.items or result)
+  return items and vim.iter(items):any(function(item)
+    return item.label == "damage"
+  end)
+end, 50), "inferred Thoth member completion did not include damage")
+
+replace_buffer({
+  "---@class FlowWeapon",
+  "---@field damage integer",
+  "---@return FlowWeapon",
+  "function make_flow_weapon() end",
+  "local inferred_weapon = make_flow_weapon()",
+  "return inferred_weapon.damage",
+})
+local inferred_hover = thoth_hover_at("damage", 5)
+assert(inferred_hover:find("Thoth field", 1, true), inferred_hover)
+assert(inferred_hover:find("integer", 1, true), inferred_hover)
+local inferred_definition = vim.lsp.buf_request_sync(0, "textDocument/definition", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = { line = 5, character = #"return inferred_weapon." + 1 },
+}, 5000)
+local inferred_locations = assert(
+  inferred_definition[client_id] and inferred_definition[client_id].result,
+  vim.inspect(inferred_definition)
+)
+assert(#inferred_locations == 1, vim.inspect(inferred_locations))
+assert(inferred_locations[1].uri == vim.uri_from_bufnr(0), vim.inspect(inferred_locations))
+assert(inferred_locations[1].range.start.line == 1, vim.inspect(inferred_locations))
+
+replace_buffer({
+  "local condition = ConditionResult(false)",
+  "return condition.Result",
+})
+local condition_hover = thoth_hover_at("Result", 1)
+assert(condition_hover:find("boolean", 1, true), condition_hover)
+
+replace_buffer({
   "---@param weapon ???",
   "function IsWeaponCandidate(weapon)",
   "end",
