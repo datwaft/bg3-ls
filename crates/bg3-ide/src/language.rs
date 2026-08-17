@@ -199,7 +199,11 @@ impl WorkspaceSnapshot {
         }
         if file.source.kind == bg3_index::SourceKind::Thoth {
             let prefix = identifier_prefix(before);
-            let mut items = self.complete_thoth_functions(prefix, position, overlays, snippets);
+            let mut items = self
+                .thoth_member_completions(path, position, overlays)
+                .unwrap_or_else(|| {
+                    self.complete_thoth_functions(prefix, position, overlays, snippets)
+                });
             items.sort_by(|left, right| {
                 left.label
                     .to_ascii_lowercase()
@@ -369,6 +373,15 @@ impl WorkspaceSnapshot {
         position: Position,
         overlays: &OverlaySet,
     ) -> Option<String> {
+        if let Some(hover) = self.thoth_member_hover(path, position, overlays) {
+            return Some(hover);
+        }
+        if self
+            .thoth_member_completions(path, position, overlays)
+            .is_some()
+        {
+            return None;
+        }
         let text = overlays.get(path)?.text.as_str();
         let line = source_line(text, position.line)?;
         let word = word_at(line, usize::try_from(position.character).ok()?)?;

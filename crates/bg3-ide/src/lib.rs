@@ -3,6 +3,7 @@
 mod diagnostics;
 mod language;
 mod thoth;
+mod thoth_members;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -302,6 +303,28 @@ impl WorkspaceSnapshot {
     ) -> Vec<ResolvedDefinition> {
         self.target_at(path, position, overlays)
             .map_or_else(Vec::new, |target| self.resolve(&target, overlays))
+    }
+
+    /// Returns navigable locations for the symbol under one source position.
+    ///
+    /// Packaged Thoth members are virtual evidence and therefore return no
+    /// location instead of a fabricated archive-entry URI.
+    pub fn definition_locations_at(
+        &self,
+        path: &Path,
+        position: Position,
+        overlays: &OverlaySet,
+    ) -> Vec<SourceLocation> {
+        if let Some(locations) = self.thoth_member_definition_locations(path, position, overlays) {
+            return locations;
+        }
+        self.definitions_at(path, position, overlays)
+            .into_iter()
+            .map(|definition| SourceLocation {
+                path: definition.path,
+                range: definition.definition.selection_range,
+            })
+            .collect()
     }
 
     /// Returns a rich Markdown description for the symbol under one position.
