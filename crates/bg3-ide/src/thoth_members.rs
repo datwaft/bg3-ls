@@ -2,11 +2,14 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use bg3_index::{
-    ParsedFile, Position, TextRange, ThothExpressionFact, ThothExpressionKind,
+    ParsedFile, Position, PrimitiveType, TextRange, ThothExpressionFact, ThothExpressionKind,
     ThothMemberAccessKind, ThothMemberSegment, ThothScopeId, ThothStatementId, TypeExpression,
 };
 
-use crate::{CompletionItem, CompletionKind, OverlaySet, SourceLocation, WorkspaceSnapshot};
+use crate::{
+    CompletionItem, CompletionKind, OverlaySet, SourceLocation, WorkspaceSnapshot,
+    thoth_flow::Guards,
+};
 
 #[derive(Clone, Debug)]
 struct FieldEvidence {
@@ -19,6 +22,7 @@ struct FieldEvidence {
 
 #[derive(Clone, Debug)]
 struct MemberContext<'a> {
+    path: &'a Path,
     file: &'a ParsedFile,
     fact: &'a ThothExpressionFact,
     segments: Vec<ThothMemberSegment>,
@@ -109,7 +113,7 @@ impl WorkspaceSnapshot {
 
     fn member_context<'a>(
         &'a self,
-        path: &Path,
+        path: &'a Path,
         position: Position,
         overlays: &'a OverlaySet,
         hover: bool,
@@ -151,6 +155,7 @@ impl WorkspaceSnapshot {
         facts.sort_by_key(|(fact, _, _)| range_size(fact.range));
         let (fact, segments, target) = facts.into_iter().next()?;
         Some(MemberContext {
+            path,
             file,
             fact,
             segments,
@@ -184,8 +189,37 @@ impl WorkspaceSnapshot {
             .as_ref()?
             .expression_facts
             .iter()
-            .find(|fact| fact.range == root.range && fact.kind == ThothExpressionKind::FunctionCall)
+            .find(|fact| fact.range == root.range)
             .or_else(|| (context.fact.range == root.range).then_some(context.fact));
+        let inferred = fact.map_or_else(
+            || {
+                let root_fact = ThothExpressionFact {
+                    range: root.range,
+                    text: root.text.clone(),
+                    kind: ThothExpressionKind::Identifier,
+                    statement: context.fact.statement,
+                };
+                self.thoth_type_at_fact(
+                    context.path,
+                    context.file,
+                    &root_fact,
+                    overlays,
+                    &mut Guards::default(),
+                )
+            },
+            |fact| {
+                self.thoth_type_at_fact(
+                    context.path,
+                    context.file,
+                    fact,
+                    overlays,
+                    &mut Guards::default(),
+                )
+            },
+        );
+        if !inferred.is_unknown() {
+            return Some(inferred);
+        }
         if let Some(fact) =
             fact.filter(|fact| matches!(fact.kind, ThothExpressionKind::FunctionCall))
         {
@@ -330,13 +364,34 @@ impl WorkspaceSnapshot {
         };
         let mut classes = Vec::new();
         for member in members {
-            if matches!(member, TypeExpression::Nil | TypeExpression::Unknown) {
+            if matches!(member, TypeExpression::Nil) {
                 continue;
+            }
+            if matches!(member, TypeExpression::Unknown) {
+                return None;
             }
             let mut fields = BTreeMap::new();
             match member {
                 TypeExpression::Name(name) => {
-                    let class = self.resolve_thoth_class(name, overlays)?;
+                    let Some(class) = self.resolve_thoth_class(name, overlays) else {
+                        if name == "ConditionResult" {
+                            fields.insert(
+                                "Result".into(),
+                                FieldEvidence {
+                                    name: "Result".into(),
+                                    ty: TypeExpression::Primitive(PrimitiveType::Boolean),
+                                    definitions: Vec::new(),
+                                    class_names: vec!["ConditionResult".into()],
+                                    provenance: vec![
+                                        "Curated BG3 Thoth `ConditionResult` contract.".into(),
+                                    ],
+                                },
+                            );
+                            classes.push(fields);
+                            continue;
+                        }
+                        return None;
+                    };
                     let (definitions, provenance) = match &class.source {
                         crate::ThothTypeSource::Loose { module, path, .. } => (
                             Some((module, path)),

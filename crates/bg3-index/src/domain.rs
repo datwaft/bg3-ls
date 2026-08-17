@@ -143,6 +143,8 @@ pub struct ThothFile {
     pub expression_facts: Vec<ThothExpressionFact>,
     #[serde(default)]
     pub scopes: Vec<ThothLexicalScope>,
+    #[serde(default)]
+    pub control_flow: Vec<ThothControlFlowFact>,
     pub annotations: crate::annotation::ThothAnnotations,
 }
 
@@ -176,6 +178,10 @@ pub struct ThothReturn {
     pub range: TextRange,
     pub expressions: Vec<ThothExpression>,
     pub owner: Option<ThothDeclarationOwner>,
+    /// The executable statement that owns this return, when parsed by the
+    /// current extractor. The option keeps older cached records readable.
+    #[serde(default)]
+    pub statement: Option<ThothStatementId>,
 }
 
 /// One function call observation, including the exact observed arity.
@@ -231,10 +237,58 @@ pub enum ThothExpressionKind {
     Identifier,
     /// A function-call expression.
     FunctionCall,
+    /// A parenthesized expression and the exact range of its inner value.
+    Parenthesized { expression: TextRange },
+    /// A unary expression and the exact range of its operand.
+    Unary {
+        operator: ThothUnaryOperator,
+        operand: TextRange,
+    },
+    /// A binary expression and the exact ranges of both operands.
+    Binary {
+        operator: ThothBinaryOperator,
+        left: TextRange,
+        right: TextRange,
+    },
     /// A member chain, including the root, with one range per segment.
     MemberAccess(Vec<ThothMemberSegment>),
     /// An expression form that the fact extractor does not classify.
     Unknown,
+}
+
+/// The complete set of unary operators accepted by the Thoth grammar.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum ThothUnaryOperator {
+    Not,
+    Length,
+    Negate,
+    BitNot,
+}
+
+/// The complete set of binary operators accepted by the Thoth grammar.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum ThothBinaryOperator {
+    Or,
+    And,
+    Less,
+    LessOrEqual,
+    Equal,
+    NotEqual,
+    GreaterOrEqual,
+    Greater,
+    BitOr,
+    BitXor,
+    BitAnd,
+    ShiftLeft,
+    ShiftRight,
+    Concatenate,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    FloorDivide,
+    Modulo,
+    Power,
 }
 
 /// The syntax form that produced one member-access segment.
@@ -282,6 +336,29 @@ pub enum ThothScopeId {
 pub struct ThothStatementId {
     pub scope: ThothScopeId,
     pub order: u32,
+}
+
+/// The role of one branch in a Thoth `if` statement.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum ThothIfBranchKind {
+    Consequence,
+    ElseIf,
+    Else,
+}
+
+/// One branch body and its optional condition.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothIfBranch {
+    pub kind: ThothIfBranchKind,
+    pub condition: Option<TextRange>,
+    pub scope: Option<ThothScopeId>,
+}
+
+/// A control-flow fact currently describing one `if` statement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothControlFlowFact {
+    pub statement: ThothStatementId,
+    pub branches: Vec<ThothIfBranch>,
 }
 
 /// One lexical scope and its enclosing scope, if any.
@@ -457,6 +534,19 @@ mod tests {
             scopes: vec![ThothLexicalScope {
                 id: ThothScopeId::File,
                 parent: None,
+            }],
+            control_flow: vec![ThothControlFlowFact {
+                statement: ThothStatementId {
+                    scope: ThothScopeId::File,
+                    order: 1,
+                },
+                branches: vec![ThothIfBranch {
+                    kind: ThothIfBranchKind::Consequence,
+                    condition: None,
+                    scope: Some(ThothScopeId::Block {
+                        range: range(5, 10),
+                    }),
+                }],
             }],
             ..ThothFile::default()
         };

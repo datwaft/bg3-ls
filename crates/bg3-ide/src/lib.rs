@@ -3,6 +3,7 @@
 mod diagnostics;
 mod language;
 mod thoth;
+mod thoth_flow;
 mod thoth_members;
 
 use std::collections::{BTreeMap, BTreeSet};

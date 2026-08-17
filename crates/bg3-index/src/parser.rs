@@ -18,11 +18,12 @@ use crate::domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
     OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference, SourceFile, SourceIssue,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment, ThothCall,
-    ThothDeclaration, ThothDeclarationOwner, ThothExpression, ThothExpressionFact,
-    ThothExpressionKind, ThothFile, ThothLexicalScope, ThothLiteralKind, ThothMemberAccess,
-    ThothMemberAccessKind, ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId,
-    ThothStatementId,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment, ThothBinaryOperator,
+    ThothCall, ThothControlFlowFact, ThothDeclaration, ThothDeclarationOwner, ThothExpression,
+    ThothExpressionFact, ThothExpressionKind, ThothFile, ThothIfBranch, ThothIfBranchKind,
+    ThothLexicalScope, ThothLiteralKind, ThothMemberAccess, ThothMemberAccessKind,
+    ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId, ThothStatementId,
+    ThothUnaryOperator,
 };
 use crate::localization::valid_handle;
 use crate::schema::{SchemaCatalog, SchemaDefinition};
@@ -168,6 +169,7 @@ fn thoth_facts(root: Node<'_>, text: &str) -> Result<(ThothFile, Vec<SourceIssue
                     range: node_range(node),
                     expressions,
                     owner: None,
+                    statement: None,
                 });
             }
             "function_call" => {
@@ -330,13 +332,24 @@ fn collect_thoth_statement(
         }
         "function_call" => collect_thoth_expression(node, statement, text, facts)?,
         "return_statement" => {
+            if let Some(return_fact) = facts
+                .returns
+                .iter_mut()
+                .find(|return_fact| return_fact.range == node_range(node))
+            {
+                return_fact.statement = Some(statement);
+            }
             if let Some(expressions) = direct_child(node, "expression_list") {
                 collect_thoth_expression_children(expressions, statement, text, facts)?;
             }
         }
         "if_statement" => {
             collect_thoth_field_expression(node, "condition", statement, text, facts)?;
-            collect_thoth_if_branches(node, statement, text, facts)?;
+            let branches = collect_thoth_if_branches(node, statement, text, facts)?;
+            facts.control_flow.push(ThothControlFlowFact {
+                statement,
+                branches,
+            });
         }
         "while_statement" => {
             collect_thoth_field_expression(node, "condition", statement, text, facts)?;
@@ -418,9 +431,23 @@ fn collect_thoth_if_branches(
     statement: ThothStatementId,
     text: &str,
     facts: &mut ThothFile,
-) -> Result<(), Error> {
+) -> Result<Vec<ThothIfBranch>, Error> {
+    let mut branches = Vec::new();
     if let Some(consequence) = field(node, "consequence") {
         collect_thoth_block(consequence, statement.scope, text, facts)?;
+        branches.push(ThothIfBranch {
+            kind: ThothIfBranchKind::Consequence,
+            condition: field(node, "condition").map(node_range),
+            scope: Some(ThothScopeId::Block {
+                range: node_range(consequence),
+            }),
+        });
+    } else {
+        branches.push(ThothIfBranch {
+            kind: ThothIfBranchKind::Consequence,
+            condition: field(node, "condition").map(node_range),
+            scope: None,
+        });
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -429,17 +456,43 @@ fn collect_thoth_if_branches(
                 collect_thoth_field_expression(child, "condition", statement, text, facts)?;
                 if let Some(body) = field(child, "consequence") {
                     collect_thoth_block(body, statement.scope, text, facts)?;
+                    branches.push(ThothIfBranch {
+                        kind: ThothIfBranchKind::ElseIf,
+                        condition: field(child, "condition").map(node_range),
+                        scope: Some(ThothScopeId::Block {
+                            range: node_range(body),
+                        }),
+                    });
+                } else {
+                    branches.push(ThothIfBranch {
+                        kind: ThothIfBranchKind::ElseIf,
+                        condition: field(child, "condition").map(node_range),
+                        scope: None,
+                    });
                 }
             }
             "else_statement" => {
                 if let Some(body) = field(child, "body") {
                     collect_thoth_block(body, statement.scope, text, facts)?;
+                    branches.push(ThothIfBranch {
+                        kind: ThothIfBranchKind::Else,
+                        condition: None,
+                        scope: Some(ThothScopeId::Block {
+                            range: node_range(body),
+                        }),
+                    });
+                } else {
+                    branches.push(ThothIfBranch {
+                        kind: ThothIfBranchKind::Else,
+                        condition: None,
+                        scope: None,
+                    });
                 }
             }
             _ => {}
         }
     }
-    Ok(())
+    Ok(branches)
 }
 
 fn collect_thoth_field_block(
@@ -509,6 +562,32 @@ fn collect_thoth_expression(
         "string" => ThothExpressionKind::Literal(ThothLiteralKind::String),
         "identifier" => ThothExpressionKind::Identifier,
         "function_call" => ThothExpressionKind::FunctionCall,
+        "parenthesized_expression" => {
+            first_named_child(node).map_or(ThothExpressionKind::Unknown, |expression| {
+                ThothExpressionKind::Parenthesized {
+                    expression: node_range(expression),
+                }
+            })
+        }
+        "unary_expression" => match (thoth_unary_operator(node).ok(), field(node, "operand")) {
+            (Some(operator), Some(operand)) => ThothExpressionKind::Unary {
+                operator,
+                operand: node_range(operand),
+            },
+            _ => ThothExpressionKind::Unknown,
+        },
+        "binary_expression" => match (
+            thoth_binary_operator(node).ok(),
+            field(node, "left"),
+            field(node, "right"),
+        ) {
+            (Some(operator), Some(left), Some(right)) => ThothExpressionKind::Binary {
+                operator,
+                left: node_range(left),
+                right: node_range(right),
+            },
+            _ => ThothExpressionKind::Unknown,
+        },
         "dot_index_expression" | "method_index_expression" | "bracket_index_expression" => {
             thoth_member_segments(node, text)?.map_or(
                 ThothExpressionKind::Unknown,
@@ -556,6 +635,53 @@ fn collect_thoth_expression(
         _ => collect_thoth_unknown_children(node, statement, text, facts)?,
     }
     Ok(())
+}
+
+fn thoth_unary_operator(node: Node<'_>) -> Result<ThothUnaryOperator, Error> {
+    let operator = field(node, "operator")
+        .ok_or_else(|| Error::Parse("a unary Thoth expression has no operator".into()))?
+        .kind();
+    match operator {
+        "not" => Ok(ThothUnaryOperator::Not),
+        "#" => Ok(ThothUnaryOperator::Length),
+        "-" => Ok(ThothUnaryOperator::Negate),
+        "~" => Ok(ThothUnaryOperator::BitNot),
+        _ => Err(Error::Parse(format!(
+            "unsupported Thoth unary operator `{operator}`"
+        ))),
+    }
+}
+
+fn thoth_binary_operator(node: Node<'_>) -> Result<ThothBinaryOperator, Error> {
+    let operator = field(node, "operator")
+        .ok_or_else(|| Error::Parse("a binary Thoth expression has no operator".into()))?
+        .kind();
+    match operator {
+        "or" => Ok(ThothBinaryOperator::Or),
+        "and" => Ok(ThothBinaryOperator::And),
+        "<" => Ok(ThothBinaryOperator::Less),
+        "<=" => Ok(ThothBinaryOperator::LessOrEqual),
+        "==" => Ok(ThothBinaryOperator::Equal),
+        "~=" => Ok(ThothBinaryOperator::NotEqual),
+        ">=" => Ok(ThothBinaryOperator::GreaterOrEqual),
+        ">" => Ok(ThothBinaryOperator::Greater),
+        "|" => Ok(ThothBinaryOperator::BitOr),
+        "~" => Ok(ThothBinaryOperator::BitXor),
+        "&" => Ok(ThothBinaryOperator::BitAnd),
+        "<<" => Ok(ThothBinaryOperator::ShiftLeft),
+        ">>" => Ok(ThothBinaryOperator::ShiftRight),
+        ".." => Ok(ThothBinaryOperator::Concatenate),
+        "+" => Ok(ThothBinaryOperator::Add),
+        "-" => Ok(ThothBinaryOperator::Subtract),
+        "*" => Ok(ThothBinaryOperator::Multiply),
+        "/" => Ok(ThothBinaryOperator::Divide),
+        "//" => Ok(ThothBinaryOperator::FloorDivide),
+        "%" => Ok(ThothBinaryOperator::Modulo),
+        "^" => Ok(ThothBinaryOperator::Power),
+        _ => Err(Error::Parse(format!(
+            "unsupported Thoth binary operator `{operator}`"
+        ))),
+    }
 }
 
 fn collect_thoth_unknown_children(
@@ -2915,6 +3041,12 @@ fn direct_child<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
         .find(|child| child.kind() == kind)
+}
+
+/// Returns the first direct named child regardless of its expression subtype.
+fn first_named_child<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).next()
 }
 
 /// Returns the first Tree-sitter child assigned to a grammar field.
