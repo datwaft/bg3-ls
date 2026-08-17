@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use bg3_index::{
     CacheStore, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, SchemaCatalog, SourceFile,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, discover_module, parse_source,
-    parse_tooltip_catalog, read_base_localization_package, read_base_tooltip_catalog,
-    read_localization_package, source_kind_for_document,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, ThothParameter, discover_module, parse_source,
+    parse_thoth_file, parse_tooltip_catalog, read_base_localization_package,
+    read_base_tooltip_catalog, read_localization_package, source_kind_for_document,
 };
 
 fn fixtures() -> PathBuf {
@@ -207,6 +207,106 @@ fn parses_thoth_declarations_parameters_and_calls() {
             }
     }));
     assert!(parsed.issues.is_empty());
+}
+
+#[test]
+fn extracts_cacheable_thoth_facts_without_inventing_types() {
+    let text = "function Compute(entity, ...)\n  local result = Namespace.Enum.Value\n  result = Helper(entity, Namespace.Enum.Value)\n  return result, Namespace.Enum.Value\nend\n";
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Compute.khn"),
+            kind: SourceKind::Thoth,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    let facts = parsed.thoth.expect("Thoth facts");
+    assert_eq!(parse_thoth_file(text).unwrap(), facts);
+    assert_eq!(facts.declarations.len(), 1);
+    assert_eq!(facts.declarations[0].name, "Compute");
+    assert_eq!(
+        facts.declarations[0].parameters,
+        vec![
+            ThothParameter {
+                name: "entity".into(),
+                range: bg3_index::TextRange {
+                    start: bg3_index::Position {
+                        line: 0,
+                        character: 17,
+                    },
+                    end: bg3_index::Position {
+                        line: 0,
+                        character: 23,
+                    },
+                },
+                variadic: false,
+            },
+            ThothParameter {
+                name: "...".into(),
+                range: bg3_index::TextRange {
+                    start: bg3_index::Position {
+                        line: 0,
+                        character: 25,
+                    },
+                    end: bg3_index::Position {
+                        line: 0,
+                        character: 28,
+                    },
+                },
+                variadic: true,
+            },
+        ]
+    );
+    assert_eq!(facts.returns.len(), 1);
+    assert_eq!(facts.returns[0].expressions.len(), 2);
+    assert_eq!(facts.returns[0].expressions[0].text, "result");
+    assert_eq!(facts.returns[0].expressions[1].text, "Namespace.Enum.Value");
+    assert_eq!(facts.calls.len(), 1);
+    assert_eq!(facts.calls[0].name, "Helper");
+    assert_eq!(facts.calls[0].arity, 2);
+    assert_eq!(facts.calls[0].arguments[1].text, "Namespace.Enum.Value");
+    assert_eq!(
+        facts.calls[0]
+            .owner
+            .as_ref()
+            .map(|owner| owner.name.as_str()),
+        Some("Compute")
+    );
+    assert_eq!(parsed.observed_functions.len(), 1);
+    assert_eq!(parsed.observed_functions[0].name, "Helper");
+    assert_eq!(parsed.observed_functions[0].count, 1);
+    assert_eq!(parsed.observed_functions[0].min_arity, 2);
+    assert_eq!(parsed.observed_functions[0].max_arity, 2);
+    assert_eq!(facts.assignments.len(), 2);
+    assert!(facts.assignments[0].local);
+    assert!(!facts.assignments[1].local);
+    assert_eq!(
+        facts.assignments[0]
+            .owner
+            .as_ref()
+            .map(|owner| owner.name.as_str()),
+        Some("Compute")
+    );
+    assert_eq!(facts.assignments[0].targets[0].text, "result");
+    assert_eq!(facts.assignments[0].values[0].text, "Namespace.Enum.Value");
+    assert!(
+        facts
+            .member_accesses
+            .iter()
+            .any(|member| member.text == "Namespace.Enum.Value"
+                && member.root == "Namespace"
+                && member.members == ["Enum", "Value"])
+    );
+}
+
+#[test]
+fn rejects_partial_facts_from_malformed_virtual_thoth_sources() {
+    let error = parse_thoth_file("function Broken(entity)\n  @\nend\n").unwrap_err();
+
+    assert!(error.to_string().contains("invalid syntax"));
 }
 
 #[test]

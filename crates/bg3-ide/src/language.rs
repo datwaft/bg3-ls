@@ -3,9 +3,10 @@ use std::path::Path;
 
 use crate::{OverlaySet, WorkspaceSnapshot, range_contains};
 use bg3_index::{
-    Definition, FUNCTIONS, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
-    OSIRIS_QUERY_KIND, Position, SchemaDefinition, SchemaField, SourceKind, SymbolTarget,
-    THOTH_FUNCTION_KIND, TextRange, field_kind, function_spec, is_lsx_value_field,
+    Definition, FUNCTIONS, ModuleRole, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
+    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothCatalog, Position, SchemaDefinition,
+    SchemaField, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, field_kind,
+    function_spec, is_lsx_value_field,
 };
 
 /// The semantic category of one completion result.
@@ -188,16 +189,32 @@ impl WorkspaceSnapshot {
 
         let target = SymbolTarget::Named {
             kind: Some(THOTH_FUNCTION_KIND.into()),
-            name: context.function,
+            name: context.function.clone(),
         };
-        let definition = self.resolve(&target, overlays).into_iter().next()?;
-        let parameters = thoth_parameters(&definition.definition);
+        if let Some(definition) = self.resolve(&target, overlays).into_iter().next() {
+            let parameters = thoth_parameters(&definition.definition);
+            return Some(SignatureHelp {
+                label: format!("{}({})", definition.definition.name, parameters.join(", ")),
+                documentation: format!(
+                    "Declared Thoth helper from module `{}`. Parameter types are not inferred.",
+                    definition.module
+                ),
+                parameters,
+                active_parameter: context.argument,
+            });
+        }
+        let (parameters, ambiguous, module) = self.packaged_thoth_signature(&context.function)?;
         Some(SignatureHelp {
-            label: format!("{}({})", definition.definition.name, parameters.join(", ")),
-            documentation: format!(
-                "Declared Thoth helper from module `{}`. Parameter types are not inferred.",
-                definition.module
-            ),
+            label: format!("{}({})", context.function, parameters.join(", ")),
+            documentation: if ambiguous {
+                format!(
+                    "Installed Thoth evidence from module `{module}` has same-priority ambiguity. Parameter types are not inferred."
+                )
+            } else {
+                format!(
+                    "Installed Thoth evidence from module `{module}`. Parameter types are not inferred."
+                )
+            },
             parameters,
             active_parameter: context.argument,
         })
@@ -243,13 +260,11 @@ impl WorkspaceSnapshot {
                 }
             }
         }
-        for layer in &self.layers {
-            if let Some(function) = layer.functions.get(word) {
-                return Some(format!(
-                    "**Observed function** `{}`\n\nSeen {} times with {} to {} arguments. No verified signature is available.",
-                    function.name, function.count, function.min_arity, function.max_arity
-                ));
-            }
+        if let Some(evidence) = self.loose_thoth_hover(word, overlays) {
+            return Some(evidence);
+        }
+        if let Some(evidence) = self.packaged_thoth_function_evidence(word) {
+            return Some(evidence);
         }
         None
     }
@@ -409,7 +424,20 @@ impl WorkspaceSnapshot {
             }
         }
         for item in self.complete_thoth_functions(prefix, position, overlays, snippets) {
-            if !items.iter().any(|existing| existing.label == item.label) {
+            let ambiguous = item
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("same-rank ambiguity"));
+            let installed_variant = items.iter().any(|existing| {
+                existing.label == item.label
+                    && existing.detail == item.detail
+                    && existing.documentation == item.documentation
+                    && existing.new_text != item.new_text
+            });
+            if ambiguous
+                || installed_variant
+                || !items.iter().any(|existing| existing.label == item.label)
+            {
                 items.push(item);
             }
         }
@@ -486,6 +514,38 @@ impl WorkspaceSnapshot {
                     }
                     items.push(item);
                 }
+            }
+        }
+        for (name, parameter_lists, module, ambiguous) in self.packaged_thoth_candidates(prefix) {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            for parameters in parameter_lists {
+                let mut item = basic_item(&name, prefix, position, CompletionKind::Function);
+                item.detail = Some(if ambiguous {
+                    format!("installed {module} (same-rank ambiguity)")
+                } else {
+                    format!("installed {module}")
+                });
+                item.documentation = Some(
+                    "Installed Thoth declaration from configured package data. Parameter types are not inferred."
+                        .into(),
+                );
+                if snippets {
+                    if parameters.is_empty() {
+                        item.new_text = format!("{name}()");
+                    } else {
+                        let placeholders = parameters
+                            .iter()
+                            .enumerate()
+                            .map(|(index, parameter)| format!("${{{}:{parameter}}}", index + 1))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        item.new_text = format!("{name}({placeholders})");
+                        item.snippet = true;
+                    }
+                }
+                items.push(item);
             }
         }
         items
@@ -622,6 +682,250 @@ impl WorkspaceSnapshot {
             }
         }
         items
+    }
+
+    /// Returns installed declarations and call observations by effective base rank.
+    fn packaged_thoth_candidates(
+        &self,
+        prefix: &str,
+    ) -> Vec<(String, Vec<Vec<String>>, String, bool)> {
+        let catalog = self.packaged_thoth();
+        let facts = self.packaged_thoth_facts();
+        let mut results = Vec::new();
+        for layer in self
+            .layers
+            .iter()
+            .rev()
+            .filter(|layer| layer.spec.role == ModuleRole::Base)
+        {
+            let mut by_entry = BTreeMap::<String, (u8, bool, Vec<_>)>::new();
+            for source in catalog
+                .sources()
+                .filter(|source| source.module() == layer.spec.name)
+            {
+                let Some((priority, ambiguous)) =
+                    packaged_thoth_entry_priority(&catalog, source.module(), source.entry())
+                else {
+                    continue;
+                };
+                by_entry
+                    .entry(source.entry().to_owned())
+                    .or_insert_with(|| (priority, ambiguous, Vec::new()));
+            }
+            for record in facts.iter() {
+                if record.source().module() != layer.spec.name {
+                    continue;
+                }
+                let entry = record.source().entry().to_owned();
+                let Some((priority, _, records)) = by_entry.get_mut(&entry) else {
+                    continue;
+                };
+                let source_is_catalog_candidate = catalog
+                    .sources_for(record.source().module(), record.source().entry())
+                    .iter()
+                    .any(|candidate| candidate == record.source());
+                if source_is_catalog_candidate && record.source().priority() == *priority {
+                    records.push(record);
+                }
+            }
+            let mut candidates = BTreeMap::<String, (Vec<Vec<String>>, bool)>::new();
+            for (_, entry_ambiguous, records) in by_entry.values() {
+                for record in records {
+                    for declaration in &record.facts().declarations {
+                        if starts_with_case_insensitive(&declaration.name, prefix) {
+                            let candidate = candidates.entry(declaration.name.clone()).or_default();
+                            candidate.1 |= *entry_ambiguous || !candidate.0.is_empty();
+                            candidate.0.push(
+                                declaration
+                                    .parameters
+                                    .iter()
+                                    .map(|parameter| parameter.name.clone())
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+            }
+            let declared = candidates.keys().cloned().collect::<BTreeSet<_>>();
+            for (_, entry_ambiguous, records) in by_entry.values() {
+                for record in records {
+                    for call in &record.facts().calls {
+                        if starts_with_case_insensitive(&call.name, prefix)
+                            && !declared.contains(&call.name)
+                        {
+                            let parameters = vec!["unknown".to_owned(); usize::from(call.arity)];
+                            let candidate = candidates.entry(call.name.clone()).or_default();
+                            candidate.1 |= *entry_ambiguous;
+                            if !candidate.0.iter().any(|existing| existing == &parameters) {
+                                candidate.0.push(parameters);
+                            }
+                        }
+                    }
+                }
+            }
+            results.extend(candidates.into_iter().map(
+                |(name, (parameter_lists, entry_ambiguous))| {
+                    (
+                        name,
+                        parameter_lists,
+                        layer.spec.name.clone(),
+                        entry_ambiguous,
+                    )
+                },
+            ));
+        }
+        results
+    }
+
+    /// Returns the highest-priority installed declaration signature.
+    fn packaged_thoth_signature(&self, name: &str) -> Option<(Vec<String>, bool, String)> {
+        let (_, candidates, module, ambiguous) = self
+            .packaged_thoth_candidates(name)
+            .into_iter()
+            .find(|(candidate, _, _, _)| candidate == name)?;
+        let width = candidates.iter().map(Vec::len).max().unwrap_or_default();
+        let parameters = (0..width)
+            .map(|index| {
+                let mut values = candidates
+                    .iter()
+                    .filter_map(|parameters| parameters.get(index))
+                    .collect::<BTreeSet<_>>();
+                if values.len() == 1 {
+                    values
+                        .pop_first()
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".into())
+                } else {
+                    "unknown".into()
+                }
+            })
+            .collect();
+        Some((parameters, ambiguous, module))
+    }
+
+    /// Formats installed declaration and call evidence without a source path.
+    fn packaged_thoth_function_evidence(&self, name: &str) -> Option<String> {
+        let (parameters, ambiguous, module) = self.packaged_thoth_signature(name)?;
+        let mut calls = BTreeSet::new();
+        let mut entries = BTreeSet::new();
+        let catalog = self.packaged_thoth();
+        let base_modules: BTreeSet<_> = self
+            .layers
+            .iter()
+            .filter(|layer| layer.spec.role == ModuleRole::Base)
+            .map(|layer| layer.spec.name.as_str())
+            .collect();
+        for record in self.packaged_thoth_facts().iter() {
+            if record.source().module() != module || !base_modules.contains(module.as_str()) {
+                continue;
+            }
+            let Some((top_priority, _)) = packaged_thoth_entry_priority(
+                &catalog,
+                record.source().module(),
+                record.source().entry(),
+            ) else {
+                continue;
+            };
+            let source_is_catalog_candidate = catalog
+                .sources_for(record.source().module(), record.source().entry())
+                .iter()
+                .any(|candidate| candidate == record.source());
+            if record.source().priority() != top_priority {
+                continue;
+            }
+            if !source_is_catalog_candidate {
+                continue;
+            }
+            let has_name = record
+                .facts()
+                .declarations
+                .iter()
+                .any(|declaration| declaration.name == name)
+                || record.facts().calls.iter().any(|call| call.name == name);
+            if !has_name {
+                continue;
+            }
+            entries.insert(record.source().entry().to_owned());
+            for call in &record.facts().calls {
+                if call.name == name {
+                    calls.insert(call.arity);
+                }
+            }
+        }
+        let mut markdown = format!("**Installed Thoth function** `{name}`\n\nModule: `{module}`");
+        if !parameters.is_empty() {
+            markdown.push_str(&format!(
+                "\n\nSignature evidence: `{}({})`",
+                name,
+                parameters.join(", ")
+            ));
+        }
+        if !calls.is_empty() {
+            let arities = calls
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            markdown.push_str(&format!("\n\nObserved call arities: `{arities}`"));
+        }
+        if ambiguous {
+            markdown.push_str("\n\nSame-priority package evidence is ambiguous.");
+        }
+        if !entries.is_empty() {
+            markdown.push_str("\n\nPackage entries: ");
+            markdown.push_str(
+                &entries
+                    .into_iter()
+                    .map(|entry| format!("`{entry}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        Some(markdown)
+    }
+
+    /// Resolves loose Thoth evidence by configured module precedence.
+    fn loose_thoth_hover(&self, name: &str, overlays: &OverlaySet) -> Option<String> {
+        for layer in self.layers.iter().rev() {
+            for (_, overlay) in overlays.for_module(&layer.spec.name) {
+                if let Some(definition) = overlay.parsed.definitions.iter().find(|definition| {
+                    definition.kind == THOTH_FUNCTION_KIND && definition.name == name
+                }) {
+                    let parameters = thoth_parameters(definition);
+                    return Some(format!(
+                        "**Thoth function** `{name}`\n\nModule: `{}`\n\nSignature: `{}({})`",
+                        layer.spec.name,
+                        name,
+                        parameters.join(", ")
+                    ));
+                }
+            }
+            if let Some(definition) =
+                layer
+                    .definitions_of_kind(THOTH_FUNCTION_KIND)
+                    .find(|record| {
+                        !overlays.contains(record.path.as_ref()) && record.definition().name == name
+                    })
+            {
+                let definition = definition.definition();
+                let parameters = thoth_parameters(definition);
+                return Some(format!(
+                    "**Thoth function** `{name}`\n\nModule: `{}`\n\nSignature: `{}({})`",
+                    layer.spec.name,
+                    name,
+                    parameters.join(", ")
+                ));
+            }
+        }
+        for layer in self.layers.iter().rev() {
+            if let Some(function) = layer.functions.get(name) {
+                return Some(format!(
+                    "**Observed function** `{}`\n\nSeen {} times with {} to {} arguments. No verified signature is available.",
+                    function.name, function.count, function.min_arity, function.max_arity
+                ));
+            }
+        }
+        None
     }
 
     /// Returns source-backed signatures for visible user callables and databases.
@@ -1232,6 +1536,26 @@ fn starts_with_case_insensitive(value: &str, prefix: &str) -> bool {
     value
         .get(..prefix.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+/// Returns the effective priority and ambiguity for one complete package entry.
+///
+/// Fact extraction can reject a source. Resolution must still use the source
+/// catalog, so a rejected higher-priority entry suppresses lower-priority
+/// facts while equal-priority ambiguity remains visible.
+fn packaged_thoth_entry_priority(
+    catalog: &PackagedThothCatalog,
+    module: &str,
+    entry: &str,
+) -> Option<(u8, bool)> {
+    let candidates = catalog.sources_for(module, entry);
+    let priority = candidates.first()?.priority();
+    let ambiguous = candidates
+        .iter()
+        .take_while(|candidate| candidate.priority() == priority)
+        .count()
+        > 1;
+    Some((priority, ambiguous))
 }
 
 /// Returns the identifier under a byte column.

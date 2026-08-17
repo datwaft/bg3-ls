@@ -6,7 +6,8 @@ use bg3_ide::{DiagnosticSeverity, OverlayDocument, OverlaySet, WorkspaceSnapshot
 use bg3_index::{
     LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, PackagedThothCatalog,
     PackagedThothSource, Position, SchemaCatalog, SourceFile, SourceKind, SymbolTarget,
-    discover_module, parse_source, parse_tooltip_catalog,
+    discover_module, parse_packaged_thoth_facts, parse_source, parse_thoth_file,
+    parse_tooltip_catalog,
 };
 
 fn fixtures() -> PathBuf {
@@ -182,6 +183,131 @@ fn packaged_thoth_catalogs_remain_immutable_across_snapshot_replacement() {
         replacement_snapshot.packaged_thoth().as_ref(),
         replacement_catalog.as_ref()
     );
+}
+
+#[test]
+fn packaged_thoth_is_editor_evidence_without_fake_definition_locations() {
+    let (workspace, stats_path) = fixture_workspace(200);
+    let entry = "Mods/Shared/Scripts/thoth/helpers/Installed.khn";
+    let catalog = Arc::new(
+        PackagedThothCatalog::from_sources([
+            PackagedThothSource::new(
+                "Shared",
+                "/game/Data/Shared.pak",
+                entry,
+                0,
+                "function InstalledHelper(value)\n  return value\nend\nfunction ApplyNative(value)\n  return value\nend\n",
+            )
+            .unwrap(),
+            PackagedThothSource::new(
+                "Shared",
+                "/game/Data/Patch1.pak",
+                "Mods/Shared/Scripts/thoth/helpers/Ambiguous.khn",
+                0,
+                "function Ambiguous(first)\n  return first\nend\n",
+            )
+            .unwrap(),
+            PackagedThothSource::new(
+                "Shared",
+                "/game/Data/Patch2.pak",
+                "Mods/Shared/Scripts/thoth/helpers/Ambiguous.khn",
+                0,
+                "function Ambiguous(second)\n  return second\nend\n",
+            )
+            .unwrap(),
+        ])
+        .unwrap(),
+    );
+    let facts = Arc::new(
+        parse_packaged_thoth_facts(catalog.as_ref(), "test", |source| {
+            parse_thoth_file(source.text())
+        })
+        .unwrap(),
+    );
+    let workspace = workspace
+        .with_packaged_thoth(catalog)
+        .with_packaged_thoth_facts(facts);
+    let text = "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"Installed\"";
+    let overlays = overlay(&workspace, &stats_path, text);
+    let completion = workspace.completion(
+        &stats_path,
+        Position {
+            line: 2,
+            character: 28,
+        },
+        &overlays,
+        true,
+    );
+    let installed = completion
+        .items
+        .iter()
+        .find(|item| item.label == "InstalledHelper")
+        .unwrap();
+    assert_eq!(installed.detail.as_deref(), Some("installed Shared"));
+    assert_eq!(installed.new_text, "InstalledHelper(${1:value})");
+
+    let signature_text =
+        "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"InstalledHelper(value, ";
+    let signature_overlays = overlay(&workspace, &stats_path, signature_text);
+    let signature = workspace
+        .signature_help(
+            &stats_path,
+            Position {
+                line: 2,
+                character: u32::try_from(signature_text.lines().nth(2).unwrap().len()).unwrap(),
+            },
+            &signature_overlays,
+        )
+        .unwrap();
+    assert_eq!(signature.label, "InstalledHelper(value)");
+    assert_eq!(signature.active_parameter, 1);
+    assert!(signature.documentation.contains("Installed Thoth evidence"));
+
+    let hover = workspace
+        .language_hover(
+            &stats_path,
+            source_position(signature_text, "InstalledHelper"),
+            &signature_overlays,
+        )
+        .unwrap();
+    assert!(hover.contains("**Installed Thoth function** `InstalledHelper`"));
+    assert!(hover.contains("Package entries:"));
+    assert!(
+        workspace
+            .definitions_at(
+                &stats_path,
+                source_position(signature_text, "InstalledHelper"),
+                &signature_overlays,
+            )
+            .is_empty()
+    );
+
+    let ambiguous_text = "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"Ambi\"";
+    let ambiguous_overlays = overlay(&workspace, &stats_path, ambiguous_text);
+    let ambiguous = workspace.completion(
+        &stats_path,
+        Position {
+            line: 2,
+            character: 23,
+        },
+        &ambiguous_overlays,
+        true,
+    );
+    assert_eq!(
+        ambiguous
+            .items
+            .iter()
+            .filter(|item| item.label == "Ambiguous")
+            .count(),
+        2
+    );
+    assert!(ambiguous.items.iter().any(|item| {
+        item.label == "Ambiguous"
+            && item
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("same-rank ambiguity"))
+    }));
 }
 
 #[test]

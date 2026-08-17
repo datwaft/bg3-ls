@@ -126,6 +126,93 @@ pub struct OsirisFile {
     pub occurrences: Vec<OsirisDatabaseOccurrence>,
 }
 
+/// Cacheable semantic facts extracted from one Thoth source file.
+///
+/// Declarations are stored separately from observations. In particular, a
+/// member access or call is not treated as a declaration of the referenced
+/// name. Types are intentionally absent until syntax or an explicit contract
+/// supplies them.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothFile {
+    pub declarations: Vec<ThothDeclaration>,
+    pub returns: Vec<ThothReturn>,
+    pub calls: Vec<ThothCall>,
+    pub assignments: Vec<ThothAssignment>,
+    pub member_accesses: Vec<ThothMemberAccess>,
+}
+
+/// Identifies the containing Thoth function for an expression observation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothDeclarationOwner {
+    pub name: String,
+    pub range: TextRange,
+}
+
+/// A function declaration observed in a Thoth source file.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothDeclaration {
+    pub name: String,
+    pub range: TextRange,
+    pub name_range: TextRange,
+    pub parameters: Vec<ThothParameter>,
+}
+
+/// One declared Thoth function parameter.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothParameter {
+    pub name: String,
+    pub range: TextRange,
+    pub variadic: bool,
+}
+
+/// One return statement and its exact expression spans.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothReturn {
+    pub range: TextRange,
+    pub expressions: Vec<ThothExpression>,
+    pub owner: Option<ThothDeclarationOwner>,
+}
+
+/// One function call observation, including the exact observed arity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothCall {
+    pub name: String,
+    pub name_range: TextRange,
+    pub range: TextRange,
+    pub arguments: Vec<ThothExpression>,
+    pub arity: u16,
+    pub owner: Option<ThothDeclarationOwner>,
+}
+
+/// One assignment or local/global declaration observation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothAssignment {
+    pub range: TextRange,
+    pub local: bool,
+    pub global: bool,
+    pub targets: Vec<ThothExpression>,
+    pub values: Vec<ThothExpression>,
+    pub owner: Option<ThothDeclarationOwner>,
+}
+
+/// One complete member-access chain such as `Namespace.Member.Value`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothMemberAccess {
+    pub range: TextRange,
+    pub text: String,
+    pub root: String,
+    pub members: Vec<String>,
+    pub owner: Option<ThothDeclarationOwner>,
+}
+
+/// A source-backed expression observation. Its type remains unknown unless a
+/// later analysis layer proves one.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothExpression {
+    pub range: TextRange,
+    pub text: String,
+}
+
 /// Aggregate information about a function observed in indexed expressions.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ObservedFunction {
@@ -152,6 +239,7 @@ pub struct ParsedFile {
     pub observed_functions: Vec<ObservedFunction>,
     pub issues: Vec<SourceIssue>,
     pub osiris: Option<OsirisFile>,
+    pub thoth: Option<ThothFile>,
 }
 
 /// Converts byte offsets to line and UTF-8 column positions.

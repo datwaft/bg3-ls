@@ -8,8 +8,10 @@ use arc_swap::ArcSwapOption;
 use bg3_ide::WorkspaceSnapshot;
 use bg3_index::{
     CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, PackagedThothCatalog,
-    THOTH_FUNCTION_KIND, TooltipCatalog, base_tooltip_package_path, discover_module,
-    module_watch_roots, packaged_thoth_package_candidates, read_packaged_thoth_catalog,
+    PackagedThothFacts, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, ThothFile,
+    TooltipCatalog, base_tooltip_package_path, discover_module, module_watch_roots,
+    packaged_thoth_package_candidates, parse_packaged_thoth_facts, parse_thoth_file,
+    read_packaged_thoth_catalog,
 };
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -18,6 +20,15 @@ use tower_lsp_server::ls_types::{MessageType, ProgressToken, request};
 
 use crate::Error;
 use crate::config::ResolvedConfig;
+
+fn empty_packaged_thoth_facts() -> PackagedThothFacts<ThothFile> {
+    parse_packaged_thoth_facts(
+        &PackagedThothCatalog::default(),
+        THOTH_FACTS_EXTRACTOR_VERSION,
+        |_| Ok(ThothFile::default()),
+    )
+    .expect("an empty packaged Thoth catalog must parse")
+}
 
 /// Observable lifecycle state for initial requests and status reporting.
 #[derive(Clone, Debug)]
@@ -271,9 +282,16 @@ impl Coordinator {
                 .collect();
             tokio::task::spawn_blocking(move || {
                 let candidates = packaged_thoth_package_candidates(&game_data, &base_modules)?;
-                thoth_cache.load_packaged_thoth(&base_modules, &candidates, || {
-                    read_packaged_thoth_catalog(&game_data, &base_modules)
-                })
+                let (catalog, catalog_hit) =
+                    thoth_cache.load_packaged_thoth(&base_modules, &candidates, || {
+                        read_packaged_thoth_catalog(&game_data, &base_modules)
+                    })?;
+                let (facts, facts_hit) = thoth_cache.load_packaged_thoth_facts(
+                    &catalog,
+                    THOTH_FACTS_EXTRACTOR_VERSION,
+                    |source| parse_thoth_file(source.text()),
+                )?;
+                Ok::<_, Error>((catalog, catalog_hit, facts, facts_hit))
             })
         };
         let schema = if affected.is_some() {
@@ -388,14 +406,35 @@ impl Coordinator {
                 }
             }
         };
-        let packaged_thoth = match thoth_task.await {
-            Ok(Ok((catalog, hit))) => {
-                if hit {
+        let (packaged_thoth, packaged_thoth_facts) = match thoth_task.await {
+            Ok(Ok((catalog, catalog_hit, facts, facts_hit))) => {
+                if catalog_hit {
                     cache_stats.hits += 1;
                 } else {
                     cache_stats.misses += 1;
                 }
-                Arc::new(catalog)
+                if facts_hit {
+                    cache_stats.hits += 1;
+                } else {
+                    cache_stats.misses += 1;
+                }
+                if facts.rejected_count() > 0 {
+                    client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "{} packaged Thoth {} rejected; packaged Thoth evidence is incomplete",
+                                facts.rejected_count(),
+                                if facts.rejected_count() == 1 {
+                                    "entry was"
+                                } else {
+                                    "entries were"
+                                },
+                            ),
+                        )
+                        .await;
+                }
+                (Arc::new(catalog), Arc::new(facts))
             }
             Ok(Err(error)) => {
                 client
@@ -406,10 +445,15 @@ impl Coordinator {
                         ),
                     )
                     .await;
-                previous
-                    .as_ref()
-                    .map(|workspace| workspace.packaged_thoth())
-                    .unwrap_or_else(|| Arc::new(PackagedThothCatalog::default()))
+                previous.as_ref().map_or_else(
+                    || {
+                        (
+                            Arc::new(PackagedThothCatalog::default()),
+                            Arc::new(empty_packaged_thoth_facts()),
+                        )
+                    },
+                    |workspace| (workspace.packaged_thoth(), workspace.packaged_thoth_facts()),
+                )
             }
             Err(error) => {
                 client
@@ -420,10 +464,15 @@ impl Coordinator {
                         ),
                     )
                     .await;
-                previous
-                    .as_ref()
-                    .map(|workspace| workspace.packaged_thoth())
-                    .unwrap_or_else(|| Arc::new(PackagedThothCatalog::default()))
+                previous.as_ref().map_or_else(
+                    || {
+                        (
+                            Arc::new(PackagedThothCatalog::default()),
+                            Arc::new(empty_packaged_thoth_facts()),
+                        )
+                    },
+                    |workspace| (workspace.packaged_thoth(), workspace.packaged_thoth_facts()),
+                )
             }
         };
 
@@ -538,6 +587,7 @@ impl Coordinator {
         )
         .with_base_localization(base_localization)
         .with_packaged_thoth(packaged_thoth)
+        .with_packaged_thoth_facts(packaged_thoth_facts)
         .with_tooltips(tooltips)
         .with_incomplete_kinds(incomplete_kinds);
         let info = index_info(&workspace, cache_stats);

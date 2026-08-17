@@ -13,7 +13,9 @@ use crate::domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
     OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference, SourceFile, SourceIssue,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment, ThothCall,
+    ThothDeclaration, ThothDeclarationOwner, ThothExpression, ThothFile, ThothMemberAccess,
+    ThothParameter, ThothReturn,
 };
 use crate::localization::valid_handle;
 use crate::schema::{SchemaCatalog, SchemaDefinition};
@@ -36,6 +38,26 @@ pub fn parse_source(
         SourceKind::Osiris => parse_osiris(source, text),
         SourceKind::Localization => parse_localization(source, text, language),
     }
+}
+
+/// Parses one Thoth document without assigning it a filesystem path.
+///
+/// This entry point is used for virtual package entries. It retains only
+/// source ranges and syntax-backed observations, so callers can attach their
+/// own package provenance without manufacturing a local document path.
+pub fn parse_thoth_file(text: &str) -> Result<ThothFile, Error> {
+    let mut parser = Parser::new();
+    parser.set_language(&tree_sitter_bg3::BG3_THOTH_LANGUAGE.into())?;
+    let tree = parser
+        .parse(text, None)
+        .ok_or_else(|| Error::Parse("the Thoth parser returned no tree".into()))?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Err(Error::Parse(
+            "the packaged Thoth source contains invalid syntax".into(),
+        ));
+    }
+    thoth_facts(root, text)
 }
 
 /// Extracts top-level helper declarations and call references from Thoth source.
@@ -84,32 +106,309 @@ fn parse_thoth(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
     }
 
     let references = thoth_call_references(root, text)?;
+    let thoth = thoth_facts(root, text)?;
+    let observed_functions = thoth_observed_functions(&thoth);
     Ok(ParsedFile {
         source,
         definitions,
         references,
-        observed_functions: Vec::new(),
+        observed_functions,
         issues,
         osiris: None,
+        thoth: Some(thoth),
     })
 }
 
 /// Returns declared parameter names without inventing types from function bodies.
 fn thoth_parameters(node: Node<'_>, text: &str) -> Vec<String> {
+    thoth_parameter_facts(node, text)
+        .into_iter()
+        .map(|parameter| parameter.name)
+        .collect()
+}
+
+/// Extracts syntax-backed Thoth facts without assigning types to expressions.
+fn thoth_facts(root: Node<'_>, text: &str) -> Result<ThothFile, Error> {
+    let mut facts = ThothFile::default();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        match node.kind() {
+            "function_declaration" => {
+                if let Some(name_node) = field(node, "name") {
+                    facts.declarations.push(ThothDeclaration {
+                        name: node_text(name_node, text)?,
+                        range: node_range(node),
+                        name_range: node_range(name_node),
+                        parameters: field(node, "parameters")
+                            .map(|parameters| thoth_parameter_facts(parameters, text))
+                            .unwrap_or_default(),
+                    });
+                }
+            }
+            "return_statement" => {
+                let expressions = direct_child(node, "expression_list")
+                    .map(|list| thoth_expression_children(list, text))
+                    .transpose()?
+                    .unwrap_or_default();
+                facts.returns.push(ThothReturn {
+                    range: node_range(node),
+                    expressions,
+                    owner: None,
+                });
+            }
+            "function_call" => {
+                if let (Some(name_node), Some(arguments_node)) =
+                    (field(node, "name"), field(node, "arguments"))
+                {
+                    let arguments = thoth_expression_children(arguments_node, text)?;
+                    let arity = u16::try_from(arguments.len()).map_err(|_| {
+                        Error::Parse("a Thoth call has more than 65535 arguments".into())
+                    })?;
+                    facts.calls.push(ThothCall {
+                        name: node_text(name_node, text)?,
+                        name_range: node_range(name_node),
+                        range: node_range(node),
+                        arguments,
+                        arity,
+                        owner: None,
+                    });
+                }
+            }
+            "variable_declaration" => {
+                if let Some(assignment) = direct_child(node, "assignment_statement") {
+                    facts.assignments.push(thoth_assignment(
+                        assignment,
+                        text,
+                        node_range(node),
+                        true,
+                        is_global_declaration(node),
+                    )?);
+                } else if let Some(targets) = direct_child(node, "variable_list") {
+                    facts.assignments.push(ThothAssignment {
+                        range: node_range(node),
+                        local: !is_global_declaration(node),
+                        global: is_global_declaration(node),
+                        targets: thoth_expression_children(targets, text)?,
+                        values: Vec::new(),
+                        owner: None,
+                    });
+                }
+            }
+            "assignment_statement" if !has_variable_declaration_parent(node) => {
+                facts.assignments.push(thoth_assignment(
+                    node,
+                    text,
+                    node_range(node),
+                    false,
+                    false,
+                )?);
+            }
+            "dot_index_expression" | "method_index_expression" | "bracket_index_expression"
+                if !has_member_parent(node) =>
+            {
+                if let Some(member_access) = thoth_member_access(node, text)? {
+                    facts.member_accesses.push(member_access);
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    facts
+        .declarations
+        .sort_by_key(|fact| (fact.range.start.line, fact.range.start.character));
+    facts
+        .returns
+        .sort_by_key(|fact| (fact.range.start.line, fact.range.start.character));
+    facts
+        .calls
+        .sort_by_key(|fact| (fact.range.start.line, fact.range.start.character));
+    facts
+        .assignments
+        .sort_by_key(|fact| (fact.range.start.line, fact.range.start.character));
+    facts
+        .member_accesses
+        .sort_by_key(|fact| (fact.range.start.line, fact.range.start.character));
+    assign_thoth_owners(&mut facts);
+    Ok(facts)
+}
+
+fn assign_thoth_owners(facts: &mut ThothFile) {
+    let declarations = facts.declarations.clone();
+    for fact in &mut facts.returns {
+        fact.owner = thoth_owner(&declarations, fact.range);
+    }
+    for fact in &mut facts.calls {
+        fact.owner = thoth_owner(&declarations, fact.range);
+    }
+    for fact in &mut facts.assignments {
+        fact.owner = thoth_owner(&declarations, fact.range);
+    }
+    for fact in &mut facts.member_accesses {
+        fact.owner = thoth_owner(&declarations, fact.range);
+    }
+}
+
+fn thoth_owner(
+    declarations: &[ThothDeclaration],
+    range: TextRange,
+) -> Option<ThothDeclarationOwner> {
+    declarations
+        .iter()
+        .rev()
+        .find(|declaration| range_contains(declaration.range, range))
+        .map(|declaration| ThothDeclarationOwner {
+            name: declaration.name.clone(),
+            range: declaration.range,
+        })
+}
+
+fn range_contains(outer: TextRange, inner: TextRange) -> bool {
+    range_position_le(outer.start, inner.start) && range_position_le(inner.end, outer.end)
+}
+
+fn range_position_le(left: Position, right: Position) -> bool {
+    left.line < right.line || (left.line == right.line && left.character <= right.character)
+}
+
+fn thoth_observed_functions(facts: &ThothFile) -> Vec<ObservedFunction> {
+    let mut observed = HashMap::<String, ObservedFunction>::new();
+    for call in &facts.calls {
+        let entry = observed
+            .entry(call.name.clone())
+            .or_insert_with(|| ObservedFunction {
+                name: call.name.clone(),
+                count: 0,
+                min_arity: call.arity,
+                max_arity: call.arity,
+            });
+        entry.count += 1;
+        entry.min_arity = entry.min_arity.min(call.arity);
+        entry.max_arity = entry.max_arity.max(call.arity);
+    }
+    sorted_functions(observed)
+}
+
+fn thoth_parameter_facts(node: Node<'_>, text: &str) -> Vec<ThothParameter> {
     let mut parameters = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
-            "identifier" | "vararg_expression" => parameters.push(
-                child
+            "identifier" => parameters.push(ThothParameter {
+                name: child
                     .utf8_text(text.as_bytes())
                     .unwrap_or_default()
                     .to_owned(),
-            ),
+                range: node_range(child),
+                variadic: false,
+            }),
+            "vararg_expression" => parameters.push(ThothParameter {
+                name: child
+                    .utf8_text(text.as_bytes())
+                    .unwrap_or_default()
+                    .to_owned(),
+                range: node_range(child),
+                variadic: true,
+            }),
             _ => {}
         }
     }
     parameters
+}
+
+fn thoth_assignment(
+    node: Node<'_>,
+    text: &str,
+    range: TextRange,
+    local: bool,
+    global: bool,
+) -> Result<ThothAssignment, Error> {
+    let targets = direct_child(node, "variable_list")
+        .map(|list| thoth_expression_children(list, text))
+        .transpose()?
+        .unwrap_or_default();
+    let values = direct_child(node, "expression_list")
+        .map(|list| thoth_expression_children(list, text))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(ThothAssignment {
+        range,
+        local,
+        global,
+        targets,
+        values,
+        owner: None,
+    })
+}
+
+fn thoth_expression_children(node: Node<'_>, text: &str) -> Result<Vec<ThothExpression>, Error> {
+    let mut expressions = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        expressions.push(ThothExpression {
+            range: node_range(child),
+            text: node_text(child, text)?,
+        });
+    }
+    Ok(expressions)
+}
+
+fn thoth_member_access(node: Node<'_>, text: &str) -> Result<Option<ThothMemberAccess>, Error> {
+    let Some((root, members)) = thoth_member_parts(node, text)? else {
+        return Ok(None);
+    };
+    Ok(Some(ThothMemberAccess {
+        range: node_range(node),
+        text: node_text(node, text)?,
+        root,
+        members,
+        owner: None,
+    }))
+}
+
+fn thoth_member_parts(node: Node<'_>, text: &str) -> Result<Option<(String, Vec<String>)>, Error> {
+    let (table, member) = match node.kind() {
+        "dot_index_expression" => (field(node, "table"), field(node, "field")),
+        "method_index_expression" => (field(node, "table"), field(node, "method")),
+        "bracket_index_expression" => (field(node, "table"), field(node, "field")),
+        _ => return Ok(None),
+    };
+    let (Some(table), Some(member)) = (table, member) else {
+        return Ok(None);
+    };
+    let member = node_text(member, text)?;
+    let (root, mut members) = if let Some((root, members)) = thoth_member_parts(table, text)? {
+        (root, members)
+    } else {
+        (node_text(table, text)?, Vec::new())
+    };
+    members.push(member);
+    Ok(Some((root, members)))
+}
+
+fn has_member_parent(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        matches!(
+            parent.kind(),
+            "dot_index_expression" | "method_index_expression" | "bracket_index_expression"
+        )
+    })
+}
+
+fn has_variable_declaration_parent(node: Node<'_>) -> bool {
+    node.parent()
+        .is_some_and(|parent| parent.kind() == "variable_declaration")
+}
+
+fn is_global_declaration(node: Node<'_>) -> bool {
+    node.parent()
+        .and_then(|parent| field(parent, "global_declaration"))
+        .is_some()
+}
+
+fn node_text(node: Node<'_>, text: &str) -> Result<String, Error> {
+    Ok(node.utf8_text(text.as_bytes())?.to_owned())
 }
 
 /// Collects every call name, including nested calls, as a semantic helper target.
@@ -242,6 +541,7 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         observed_functions: Vec::new(),
         issues,
         osiris: Some(OsirisFile { goal, occurrences }),
+        thoth: None,
     })
 }
 
@@ -629,6 +929,7 @@ fn parse_plain(
         observed_functions: sorted_functions(observed),
         issues,
         osiris: None,
+        thoth: None,
     })
 }
 
@@ -849,6 +1150,7 @@ fn parse_toolkit(
         observed_functions: sorted_functions(observed),
         issues: Vec::new(),
         osiris: None,
+        thoth: None,
     })
 }
 
@@ -943,6 +1245,7 @@ fn parse_lsx(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         observed_functions: sorted_functions(observed),
         issues: Vec::new(),
         osiris: None,
+        thoth: None,
     })
 }
 
@@ -1050,6 +1353,7 @@ fn parse_localization(source: SourceFile, text: &str, language: &str) -> Result<
         observed_functions: Vec::new(),
         issues: Vec::new(),
         osiris: None,
+        thoth: None,
     })
 }
 
