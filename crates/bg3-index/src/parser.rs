@@ -190,12 +190,13 @@ fn thoth_facts(root: Node<'_>, text: &str) -> Result<(ThothFile, Vec<SourceIssue
             }
             "variable_declaration" => {
                 if let Some(assignment) = direct_child(node, "assignment_statement") {
+                    let global = is_global_declaration(node);
                     facts.assignments.push(thoth_assignment(
                         assignment,
                         text,
                         node_range(node),
-                        true,
-                        is_global_declaration(node),
+                        !global,
+                        global,
                     )?);
                 } else if let Some(targets) = direct_child(node, "variable_list") {
                     facts.assignments.push(ThothAssignment {
@@ -1370,9 +1371,11 @@ fn has_variable_declaration_parent(node: Node<'_>) -> bool {
 }
 
 fn is_global_declaration(node: Node<'_>) -> bool {
-    node.parent()
-        .and_then(|parent| field(parent, "global_declaration"))
-        .is_some()
+    node.child(0).is_some_and(|child| child.kind() == "global")
+        || node
+            .parent()
+            .and_then(|parent| field(parent, "global_declaration"))
+            .is_some()
 }
 
 fn node_text(node: Node<'_>, text: &str) -> Result<String, Error> {
