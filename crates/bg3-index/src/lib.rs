@@ -9,6 +9,7 @@ mod module;
 mod package;
 mod parser;
 mod schema;
+mod thoth;
 mod tooltip;
 mod xml;
 
@@ -35,8 +36,13 @@ pub use localization::{
     LocalizationCatalog, LocalizedText, read_base_localization_package, read_localization_package,
 };
 pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
+pub use package::{PackageEntry, PackageHeader, PackageReader};
 pub use parser::{canonical_kind, is_uuid, parse_source, schema_for_toolkit, schemas_for_plain};
 pub use schema::{SchemaCatalog, SchemaDefinition, SchemaField, is_schema_discriminator};
+pub use thoth::{
+    PackagedThothCatalog, PackagedThothResolution, PackagedThothSource,
+    packaged_thoth_package_candidates, read_packaged_thoth_catalog, thoth_module_from_entry,
+};
 pub use tooltip::{
     TooltipCatalog, TooltipText, base_tooltip_package_path, parse_tooltip_catalog,
     read_base_tooltip_catalog,

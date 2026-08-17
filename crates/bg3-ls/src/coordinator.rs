@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -7,8 +7,9 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use bg3_ide::WorkspaceSnapshot;
 use bg3_index::{
-    CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, THOTH_FUNCTION_KIND,
-    TooltipCatalog, base_tooltip_package_path, discover_module, module_watch_roots,
+    CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, PackagedThothCatalog,
+    THOTH_FUNCTION_KIND, TooltipCatalog, base_tooltip_package_path, discover_module,
+    module_watch_roots, packaged_thoth_package_candidates, read_packaged_thoth_catalog,
 };
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -40,6 +41,7 @@ pub struct IndexInfo {
     pub resources: usize,
     pub localizations: usize,
     pub tooltips: usize,
+    pub packaged_thoth_sources: usize,
     pub functions: usize,
     pub cache_hits: usize,
     pub cache_misses: usize,
@@ -258,6 +260,22 @@ impl Coordinator {
         } else {
             None
         };
+        let thoth_task = {
+            let thoth_cache = cache.clone();
+            let game_data = config.game_data.clone();
+            let base_modules: Vec<_> = config
+                .modules
+                .iter()
+                .filter(|module| module.role == ModuleRole::Base)
+                .map(|module| module.name.clone())
+                .collect();
+            tokio::task::spawn_blocking(move || {
+                let candidates = packaged_thoth_package_candidates(&game_data, &base_modules)?;
+                thoth_cache.load_packaged_thoth(&base_modules, &candidates, || {
+                    read_packaged_thoth_catalog(&game_data, &base_modules)
+                })
+            })
+        };
         let schema = if affected.is_some() {
             previous
                 .as_ref()
@@ -368,6 +386,44 @@ impl Coordinator {
                         .await;
                     Arc::new(TooltipCatalog::default())
                 }
+            }
+        };
+        let packaged_thoth = match thoth_task.await {
+            Ok(Ok((catalog, hit))) => {
+                if hit {
+                    cache_stats.hits += 1;
+                } else {
+                    cache_stats.misses += 1;
+                }
+                Arc::new(catalog)
+            }
+            Ok(Err(error)) => {
+                client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!(
+                            "BG3 packaged Thoth sources are unavailable; keeping the previous catalog when possible: {error}"
+                        ),
+                    )
+                    .await;
+                previous
+                    .as_ref()
+                    .map(|workspace| workspace.packaged_thoth())
+                    .unwrap_or_else(|| Arc::new(PackagedThothCatalog::default()))
+            }
+            Err(error) => {
+                client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!(
+                            "BG3 packaged-Thoth task failed; keeping the previous catalog when possible: {error}"
+                        ),
+                    )
+                    .await;
+                previous
+                    .as_ref()
+                    .map(|workspace| workspace.packaged_thoth())
+                    .unwrap_or_else(|| Arc::new(PackagedThothCatalog::default()))
             }
         };
 
@@ -481,6 +537,7 @@ impl Coordinator {
             config.max_completion_items,
         )
         .with_base_localization(base_localization)
+        .with_packaged_thoth(packaged_thoth)
         .with_tooltips(tooltips)
         .with_incomplete_kinds(incomplete_kinds);
         let info = index_info(&workspace, cache_stats);
@@ -511,6 +568,9 @@ impl Coordinator {
                     watcher.watch(&root, RecursiveMode::Recursive)?;
                 }
             }
+        }
+        if watched.insert(config.game_data.clone()) {
+            watcher.watch(&config.game_data, RecursiveMode::NonRecursive)?;
         }
         for relative in ["Editor/Config/Stats", "Editor/Config/UuidObjects"] {
             watcher.watch(&config.game_data.join(relative), RecursiveMode::Recursive)?;
@@ -556,6 +616,15 @@ impl Coordinator {
                     }
                 }
 
+                if paths
+                    .iter()
+                    .any(|path| is_packaged_thoth_package(path, &config.game_data, &config.modules))
+                {
+                    coordinator
+                        .rebuild_affected(Arc::clone(&config), &client, HashSet::new())
+                        .await;
+                    continue;
+                }
                 let full_rebuild_required = paths.iter().any(|path| {
                     path.starts_with(config.game_data.join("Editor/Config/Stats"))
                         || path.starts_with(config.game_data.join("Editor/Config/UuidObjects"))
@@ -587,6 +656,26 @@ impl Coordinator {
     }
 }
 
+/// Tests whether a top-level package can contribute configured base Thoth sources.
+fn is_packaged_thoth_package(
+    path: &Path,
+    game_data: &Path,
+    modules: &[bg3_index::ModuleSpec],
+) -> bool {
+    if path.parent() != Some(game_data) {
+        return false;
+    }
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if file_name.starts_with("Patch") && file_name.ends_with(".pak") {
+        return true;
+    }
+    modules.iter().any(|module| {
+        module.role == ModuleRole::Base && file_name == format!("{}.pak", module.name)
+    })
+}
+
 /// Computes user-facing counts from one published workspace generation.
 fn index_info(workspace: &WorkspaceSnapshot, cache: CacheStats) -> IndexInfo {
     let mut info = IndexInfo {
@@ -596,6 +685,7 @@ fn index_info(workspace: &WorkspaceSnapshot, cache: CacheStats) -> IndexInfo {
         enumerations: workspace.schema.enumerations.len(),
         localizations: workspace.base_localization_count(),
         tooltips: workspace.tooltip_count(),
+        packaged_thoth_sources: workspace.packaged_thoth_count(),
         cache_hits: cache.hits,
         cache_misses: cache.misses,
         ..IndexInfo::default()
@@ -617,4 +707,63 @@ fn index_info(workspace: &WorkspaceSnapshot, cache: CacheStats) -> IndexInfo {
         }
     }
     info
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packaged_thoth_events_accept_selected_top_level_packages_only() {
+        let game_data = Path::new("/game/Data");
+        let modules = vec![
+            bg3_index::ModuleSpec {
+                name: "Shared".into(),
+                root: game_data.join("Editor/Mods/Shared"),
+                role: ModuleRole::Base,
+            },
+            bg3_index::ModuleSpec {
+                name: "Dependency".into(),
+                root: PathBuf::from("/mods/Dependency"),
+                role: ModuleRole::Dependency,
+            },
+        ];
+
+        assert!(is_packaged_thoth_package(
+            &game_data.join("Shared.pak"),
+            game_data,
+            &modules
+        ));
+        assert!(is_packaged_thoth_package(
+            &game_data.join("Patch3.pak"),
+            game_data,
+            &modules
+        ));
+        assert!(is_packaged_thoth_package(
+            &game_data.join("Patch.pak"),
+            game_data,
+            &modules
+        ));
+
+        assert!(!is_packaged_thoth_package(
+            &game_data.join("Dependency.pak"),
+            game_data,
+            &modules
+        ));
+        assert!(!is_packaged_thoth_package(
+            &game_data.join("Other.pak"),
+            game_data,
+            &modules
+        ));
+        assert!(!is_packaged_thoth_package(
+            &game_data.join("nested/Patch4.pak"),
+            game_data,
+            &modules
+        ));
+        assert!(!is_packaged_thoth_package(
+            &game_data.join("Shared.PAK"),
+            game_data,
+            &modules
+        ));
+    }
 }

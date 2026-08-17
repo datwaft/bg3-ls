@@ -119,3 +119,37 @@ objects no longer call `fsync` once per source. Cache writes still use
 checksums and atomic renames. An interrupted or incomplete write becomes a
 cache miss. Parser-context fingerprints are also computed once per source kind
 instead of once per file.
+
+## Version 0.11 packaged Thoth verification
+
+Issue #58 adds a cached, read-only catalog for selected Thoth sources in
+configured base-module and patch packages. The verification used five cold and
+five warm trials on the same machine, data revision, base modules, project, and
+source composition as an isolated build of main at `854b541b`. Both builds used
+`tree-sitter-bg3` 0.4.3 with parser ABI 15.
+
+The loose index contained 3,450 documents and 89,136 definitions in both
+builds. The new virtual catalog contained two packaged sources, 110,015 source
+bytes, and one contributing package.
+
+| Metric | Main p50 | Main p95 | Issue #58 p50 | Issue #58 p95 | p95 change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold indexing | 1.555 s | 1.624 s | 1.409 s | 1.454 s | -10.5% |
+| Warm indexing | 494 ms | 509 ms | 432 ms | 447 ms | -12.2% |
+| Navigation | 1.083 µs | 1.125 µs | 1.125 µs | 1.167 µs | +3.7% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100% for both builds
+- Issue #58 repeated-trial RSS high-water mark from a separate unrestricted
+  run of the same build after ten builds:
+  1,342,898,176 bytes
+- Main cache: 94,217,988 bytes in 3,458 files
+- Issue #58 cache: 94,329,398 bytes in 3,459 files
+
+The isolated main run could not inspect RSS, so it has no directly comparable
+memory value. The nearest published repeated-trial measurement was
+1,299,922,944 bytes for version 0.7, but its loose source composition differed
+by one document and three definitions. The issue #58 value is 3.3% higher than
+that contextual measurement. Timing remains within the repository regression
+limits, and the packaged catalog adds one cache file and 111,410 bytes.

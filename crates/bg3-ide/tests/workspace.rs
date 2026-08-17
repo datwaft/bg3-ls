@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use bg3_ide::{DiagnosticSeverity, OverlayDocument, OverlaySet, WorkspaceSnapshot};
 use bg3_index::{
-    LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, Position, SchemaCatalog, SourceFile,
-    SourceKind, SymbolTarget, discover_module, parse_source, parse_tooltip_catalog,
+    LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, PackagedThothCatalog,
+    PackagedThothSource, Position, SchemaCatalog, SourceFile, SourceKind, SymbolTarget,
+    discover_module, parse_source, parse_tooltip_catalog,
 };
 
 fn fixtures() -> PathBuf {
@@ -122,6 +123,65 @@ fn source_position(text: &str, needle: &str) -> Position {
             })
         })
         .unwrap()
+}
+
+#[test]
+fn packaged_thoth_catalogs_remain_immutable_across_snapshot_replacement() {
+    let schema = Arc::new(SchemaCatalog::default());
+    let entry = "Mods/Shared/Scripts/thoth/helpers/WeaponMastery.khn";
+    let old_catalog = Arc::new(
+        PackagedThothCatalog::from_sources([PackagedThothSource::new(
+            "Shared",
+            "/game/Data/Shared.pak",
+            entry,
+            0,
+            "function Old() end\n",
+        )
+        .unwrap()])
+        .unwrap(),
+    );
+    let old_snapshot = WorkspaceSnapshot::new(Arc::clone(&schema), Vec::new(), 1, 200, 200)
+        .with_packaged_thoth(Arc::clone(&old_catalog));
+
+    let replacement_catalog = Arc::new(
+        PackagedThothCatalog::from_sources([PackagedThothSource::new(
+            "Shared",
+            "/game/Data/Patch1.pak",
+            entry,
+            1,
+            "function New() end\n",
+        )
+        .unwrap()])
+        .unwrap(),
+    );
+    let replacement_snapshot = WorkspaceSnapshot::new(schema, Vec::new(), 2, 200, 200)
+        .with_packaged_thoth(Arc::clone(&replacement_catalog));
+
+    assert_eq!(old_snapshot.packaged_thoth_count(), 1);
+    assert_eq!(replacement_snapshot.packaged_thoth_count(), 1);
+    assert_eq!(
+        old_snapshot
+            .packaged_thoth()
+            .sources()
+            .next()
+            .unwrap()
+            .text(),
+        "function Old() end\n"
+    );
+    assert_eq!(
+        replacement_snapshot
+            .packaged_thoth()
+            .sources()
+            .next()
+            .unwrap()
+            .text(),
+        "function New() end\n"
+    );
+    assert_eq!(old_snapshot.packaged_thoth().as_ref(), old_catalog.as_ref());
+    assert_eq!(
+        replacement_snapshot.packaged_thoth().as_ref(),
+        replacement_catalog.as_ref()
+    );
 }
 
 #[test]

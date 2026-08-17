@@ -15,6 +15,7 @@ use std::time::Instant;
 use bg3_ide::{DiagnosticSeverity, OverlaySet, WorkspaceSnapshot, definition_target};
 use bg3_index::{
     CacheStats, CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SourceKind, discover_module,
+    packaged_thoth_package_candidates, read_packaged_thoth_catalog,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -473,6 +474,9 @@ struct BenchmarkReport {
     parser_abi: usize,
     documents: usize,
     definitions: usize,
+    packaged_thoth_sources: usize,
+    packaged_thoth_bytes: usize,
+    packaged_thoth_packages: usize,
     cold: MillisecondDistribution,
     warm: MillisecondDistribution,
     warm_cache_hit_rate: f64,
@@ -538,6 +542,17 @@ fn run_benchmark(options: BenchmarkOptions, cache: CacheStore) -> Result<Benchma
         .iter()
         .map(|layer| layer.definitions.len())
         .sum();
+    let packaged_thoth = workspace.packaged_thoth();
+    let packaged_thoth_sources = packaged_thoth.len();
+    let packaged_thoth_bytes = packaged_thoth
+        .sources()
+        .map(|source| source.bytes().len())
+        .sum();
+    let packaged_thoth_packages = packaged_thoth
+        .sources()
+        .map(|source| source.package())
+        .collect::<HashSet<_>>()
+        .len();
     let total = warm_hits + warm_misses;
     Ok(BenchmarkReport {
         trials: options.trials,
@@ -546,6 +561,9 @@ fn run_benchmark(options: BenchmarkOptions, cache: CacheStore) -> Result<Benchma
         parser_abi: tree_sitter::Language::from(tree_sitter_bg3::BG3_STATS_LANGUAGE).abi_version(),
         documents,
         definitions,
+        packaged_thoth_sources,
+        packaged_thoth_bytes,
+        packaged_thoth_packages,
         cold: MillisecondDistribution {
             p50: percentile(&mut cold, 50),
             p95: percentile(&mut cold, 95),
@@ -676,6 +694,21 @@ fn build_workspace(
         totals.misses += stats.misses;
         layers.push(Arc::new(ModuleIndex::new(module.clone(), files)));
     }
+    let base_modules: Vec<_> = modules
+        .iter()
+        .filter(|module| module.role == ModuleRole::Base)
+        .map(|module| module.name.clone())
+        .collect();
+    let package_candidates = packaged_thoth_package_candidates(game_data, &base_modules)?;
+    let (packaged_thoth, hit) =
+        cache.load_packaged_thoth(&base_modules, &package_candidates, || {
+            read_packaged_thoth_catalog(game_data, &base_modules)
+        })?;
+    if hit {
+        totals.hits += 1;
+    } else {
+        totals.misses += 1;
+    }
     Ok((
         WorkspaceSnapshot::new(
             schema,
@@ -684,6 +717,7 @@ fn build_workspace(
             max_workspace_symbols,
             max_completion_items,
         )
+        .with_packaged_thoth(Arc::new(packaged_thoth))
         .with_incomplete_kinds(incomplete_kinds.iter().copied()),
         totals,
     ))

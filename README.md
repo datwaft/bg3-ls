@@ -33,14 +33,15 @@ parser.
 
 - Neovim nightly or Neovim 0.12+
 - the `bg3_stats`, `bg3_lsx`, `bg3_localization`, `bg3_thoth`, and
-  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.4.2
+  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.4.3
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
-The server reads two narrow binary sources for hover previews: the canonical
-LOCA entry in `Localization/<Language>.pak` and the static `LSTag` glossary in
-`Game.pak`. It reads only those selected package entries. It does not extract
-packages or index general `.pak`, `.loca`, `.lsf`, or other binary resources.
+The server reads three narrow package-backed data sources: the canonical LOCA
+entry in `Localization/<Language>.pak`, the static `LSTag` glossary in
+`Game.pak`, and Thoth helpers owned by configured base modules. It reads only
+selected package entries and does not extract them. It does not provide general
+`.pak` browsing or index arbitrary `.loca`, `.lsf`, or other binary resources.
 
 ## Install
 
@@ -51,8 +52,8 @@ directories. The colocated path keeps local grammar work testable, and release
 CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
-git clone --branch v0.10.1 https://github.com/datwaft/bg3-ls
-git clone --branch v0.4.2 https://github.com/datwaft/tree-sitter-bg3
+git clone https://github.com/datwaft/bg3-ls
+git clone --branch v0.4.3 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```
@@ -219,6 +220,8 @@ The server reads:
 - legacy `Public/*/Stats/Generated/Data/*.txt` files;
 - relevant loose `.lsx` resources below `Public` and `Mods`;
 - loose `Mods/<module>/Scripts/thoth/**/*.khn` helpers;
+- `Mods/<configured-module>/Scripts/thoth/**/*.khn` helpers selected from each
+  configured base module package and top-level patch packages;
 - loose `Mods/<module>/Story/RawFiles/Goals/*.txt` Osiris goals;
 - loose localization XML for the configured language;
 - the canonical configured-language LOCA catalog in the base-game localization
@@ -245,7 +248,11 @@ unsaved overlays. Closing a buffer restores its disk record. Thoth helper
 declarations provide definition, hover, references, function completion,
 declared-parameter signature help, document symbols, and workspace symbols.
 The server applies the configured module precedence to helper overrides. It
-does not infer Thoth parameter or return types. Invalid Thoth syntax produces
+keeps packaged helpers as immutable virtual sources and does not expose their
+archive entries as editable filesystem locations. Package priority selects a
+strictly higher-priority entry; equal-priority candidates remain ambiguous.
+Loose dependency and project sources retain their configured higher module
+precedence. The server does not infer Thoth parameter or return types. Invalid Thoth syntax produces
 the stable `thoth-syntax-error` diagnostic code; valid Thoth produces no syntax
 diagnostics. Semantic Thoth diagnostics remain out of scope.
 
@@ -274,7 +281,9 @@ not attach to Toolkit Stats XML documents.
 The watcher coalesces events for 250 ms. It rebuilds only affected modules and
 publishes a complete immutable snapshot atomically. Queries continue to use the
 previous snapshot during a refresh. A failed changed-module build keeps the
-previous valid layer and reports a warning.
+previous valid layer and reports a warning. A configured base or patch package
+change refreshes the packaged Thoth catalog while reusing all unchanged module
+layers.
 
 ## Commands and cache
 
