@@ -292,10 +292,13 @@ ordinary comment breaks attachment. Malformed supported tags and type syntax
 produce `thoth-annotation-error`; unknown names and unsupported annotation tags
 are ignored. This is not full LuaLS compatibility.
 
-Annotations currently provide explicit declaration, hover, and signature
-evidence. Type propagation through calls, member completion and navigation,
-nil narrowing, and semantic Thoth diagnostics are separate follow-up work. The
-server does not infer those results from an annotation alone.
+Annotations provide explicit declaration, hover, signature, and typed member
+evidence. Member completion and hover work for direct `---@type` bindings,
+annotated parameters, annotated helper results, and proven field chains. Loose
+fields navigate to their `---@field` name. Packaged fields remain virtual and
+do not create fake locations. Unions expose only fields common to every known
+non-`nil` member. Type propagation through assignments, nil narrowing, and
+semantic Thoth diagnostics are separate follow-up work.
 
 Osiris navigation includes goals, parent edges, `PROC` and `QRY` declarations,
 and user database occurrences. Procedure and query identity uses name and
@@ -437,8 +440,9 @@ BG3 UI rendering.
 Thoth diagnostics cover syntax errors reported as `thoth-syntax-error` and
 malformed supported annotations reported as `thoth-annotation-error`. Indexed
 Thoth observations and annotations do not by themselves create semantic
-diagnostics. Type propagation, member completion and navigation, nil
-narrowing, and semantic Thoth diagnostics remain out of scope.
+diagnostics. General type propagation, nil narrowing, and semantic Thoth
+diagnostics remain out of scope. Typed member features require explicit,
+unambiguous annotations and stay silent for unknown receivers or fields.
 
 Osiris support does not execute or compile Story, provide control-flow
 analysis, load a complete engine API catalog, or infer aliases from

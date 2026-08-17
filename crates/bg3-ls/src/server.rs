@@ -370,9 +370,9 @@ impl LanguageServer for Backend {
         let position = to_bg3_position(params.text_document_position_params.position);
         let overlays = self.inner.overlays.read().await;
         let locations = snapshot
-            .definitions_at(&path, position, &overlays)
+            .definition_locations_at(&path, position, &overlays)
             .into_iter()
-            .map(|definition| location(&definition.path, definition.definition.selection_range))
+            .map(|source| location(&source.path, source.range))
             .collect::<Result<Vec<_>, _>>()
             .map_err(rpc_error)?;
         Ok((!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations)))

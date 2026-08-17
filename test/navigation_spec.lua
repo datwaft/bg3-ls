@@ -404,6 +404,53 @@ local type_hover = thoth_hover_at("candidate", 9)
 assert(type_hover:find("Thoth type", 1, true), type_hover)
 assert(type_hover:find("Weapon|nil", 1, true), type_hover)
 
+local member_completion_line = "return candidate.IsV"
+replace_buffer({
+  "---@class Weapon",
+  "---@field IsValid boolean",
+  "",
+  "---@type Weapon",
+  "local candidate = nil",
+  member_completion_line,
+})
+assert(vim.wait(5000, function()
+  local response = vim.lsp.buf_request_sync(0, "textDocument/completion", {
+    textDocument = { uri = vim.uri_from_bufnr(0) },
+    position = { line = 5, character = #member_completion_line },
+  }, 1000)
+  local result = response and response[client_id] and response[client_id].result
+  local items = result and (result.items or result)
+  return items and vim.iter(items):any(function(item)
+    return item.label == "IsValid" and item.kind == vim.lsp.protocol.CompletionItemKind.Field
+  end)
+end, 50), "typed Thoth member completion did not include IsValid")
+
+replace_buffer({
+  "---@class Weapon",
+  "---@field IsValid boolean",
+  "",
+  "---@type Weapon",
+  "local candidate = nil",
+  "return candidate.IsValid",
+})
+local member_hover = thoth_hover_at("IsValid", 5)
+assert(member_hover:find("Thoth field", 1, true), member_hover)
+assert(member_hover:find("Weapon", 1, true), member_hover)
+assert(member_hover:find("boolean", 1, true), member_hover)
+
+local member_definition = vim.lsp.buf_request_sync(0, "textDocument/definition", {
+  textDocument = { uri = vim.uri_from_bufnr(0) },
+  position = { line = 5, character = #"return candidate." + 1 },
+}, 5000)
+local member_locations = assert(
+  member_definition[client_id] and member_definition[client_id].result,
+  vim.inspect(member_definition)
+)
+assert(#member_locations == 1, vim.inspect(member_locations))
+assert(member_locations[1].uri == vim.uri_from_bufnr(0), vim.inspect(member_locations))
+assert(member_locations[1].range.start.line == 1, vim.inspect(member_locations))
+assert(member_locations[1].range.start.character == #"---@field ", vim.inspect(member_locations))
+
 replace_buffer({
   "---@param weapon ???",
   "function IsWeaponCandidate(weapon)",
