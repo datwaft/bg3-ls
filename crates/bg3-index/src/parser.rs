@@ -8,6 +8,11 @@ use tree_sitter::{Node, Parser};
 use uuid::Uuid;
 
 use crate::Error;
+use crate::annotation::{
+    ThothAliasAnnotation, ThothClassAnnotation, ThothFieldAnnotation, ThothFunctionAnnotation,
+    ThothFunctionContract, ThothParameterAnnotation, ThothReturnAnnotation,
+    ThothVariableAnnotation, TypeExpression, parse_type_expression,
+};
 use crate::catalog::{field_kind, function_spec, is_lsx_value_field};
 use crate::domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
@@ -57,7 +62,13 @@ pub fn parse_thoth_file(text: &str) -> Result<ThothFile, Error> {
             "the packaged Thoth source contains invalid syntax".into(),
         ));
     }
-    thoth_facts(root, text)
+    let (facts, annotation_issues) = thoth_facts(root, text)?;
+    if !annotation_issues.is_empty() {
+        return Err(Error::Parse(
+            "the packaged Thoth source contains invalid annotations".into(),
+        ));
+    }
+    Ok(facts)
 }
 
 /// Extracts top-level helper declarations and call references from Thoth source.
@@ -106,7 +117,8 @@ fn parse_thoth(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
     }
 
     let references = thoth_call_references(root, text)?;
-    let thoth = thoth_facts(root, text)?;
+    let (thoth, annotation_issues) = thoth_facts(root, text)?;
+    issues.extend(annotation_issues);
     let observed_functions = thoth_observed_functions(&thoth);
     Ok(ParsedFile {
         source,
@@ -128,7 +140,7 @@ fn thoth_parameters(node: Node<'_>, text: &str) -> Vec<String> {
 }
 
 /// Extracts syntax-backed Thoth facts without assigning types to expressions.
-fn thoth_facts(root: Node<'_>, text: &str) -> Result<ThothFile, Error> {
+fn thoth_facts(root: Node<'_>, text: &str) -> Result<(ThothFile, Vec<SourceIssue>), Error> {
     let mut facts = ThothFile::default();
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
@@ -230,8 +242,541 @@ fn thoth_facts(root: Node<'_>, text: &str) -> Result<ThothFile, Error> {
     facts
         .member_accesses
         .sort_by_key(|fact| (fact.range.start.line, fact.range.start.character));
+    let mut annotation_issues = Vec::new();
+    collect_thoth_annotations(root, text, &mut facts.annotations, &mut annotation_issues)?;
     assign_thoth_owners(&mut facts);
-    Ok(facts)
+    Ok((facts, annotation_issues))
+}
+
+#[derive(Clone, Debug)]
+struct ThothAnnotationComment {
+    range: TextRange,
+    line: u32,
+    tag: ThothAnnotationTag,
+}
+
+#[derive(Clone, Debug)]
+enum ThothAnnotationTag {
+    Class {
+        name: String,
+        name_range: TextRange,
+    },
+    Field {
+        name: String,
+        name_range: TextRange,
+        ty: TypeExpression,
+        type_range: TextRange,
+    },
+    Alias {
+        name: String,
+        name_range: TextRange,
+        ty: TypeExpression,
+        type_range: TextRange,
+    },
+    Param {
+        name: String,
+        name_range: TextRange,
+        ty: TypeExpression,
+        type_range: TextRange,
+        variadic: bool,
+    },
+    Return {
+        ty: TypeExpression,
+        type_range: TextRange,
+    },
+    Type {
+        ty: TypeExpression,
+        type_range: TextRange,
+    },
+    Unsupported,
+    Invalid,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ThothAnnotationTarget<'tree> {
+    Function(Node<'tree>),
+    Variable(Node<'tree>),
+}
+
+/// Extracts LuaCATS-like line annotations and attaches them only across an
+/// uninterrupted row boundary. Tree-sitter exposes comments as named extras;
+/// retaining all comments in the ordered stream makes ordinary comments and
+/// blank rows explicit attachment barriers.
+fn collect_thoth_annotations(
+    root: Node<'_>,
+    text: &str,
+    annotations: &mut crate::annotation::ThothAnnotations,
+    issues: &mut Vec<SourceIssue>,
+) -> Result<(), Error> {
+    let mut comments = Vec::new();
+    let mut targets = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "comment"
+            && let Some(comment) = parse_thoth_annotation_comment(node, text, issues)?
+        {
+            comments.push(comment);
+        }
+        match node.kind() {
+            "function_declaration" => targets.push(ThothAnnotationTarget::Function(node)),
+            "variable_declaration" => targets.push(ThothAnnotationTarget::Variable(node)),
+            "assignment_statement" if !has_variable_declaration_parent(node) => {
+                targets.push(ThothAnnotationTarget::Variable(node));
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+    }
+
+    comments.sort_by_key(|comment| (comment.range.start.line, comment.range.start.character));
+    targets.sort_by_key(|target| match target {
+        ThothAnnotationTarget::Function(node) | ThothAnnotationTarget::Variable(node) => {
+            (node.start_position().row, node.start_position().column)
+        }
+    });
+
+    let mut groups: Vec<Vec<ThothAnnotationComment>> = Vec::new();
+    for comment in comments {
+        if matches!(comment.tag, ThothAnnotationTag::Unsupported) {
+            groups.push(vec![comment]);
+        } else if groups.last().is_some_and(|group| {
+            !matches!(
+                group.last().expect("non-empty group").tag,
+                ThothAnnotationTag::Unsupported
+            ) && comment.line == group.last().expect("non-empty group").line + 1
+        }) {
+            groups.last_mut().expect("group exists").push(comment);
+        } else {
+            groups.push(vec![comment]);
+        }
+    }
+
+    for group in groups {
+        collect_class_annotations(&group, annotations);
+        collect_alias_annotations(&group, annotations);
+
+        let last_line = group.last().expect("annotation group is non-empty").line;
+        let target = targets.iter().find(|target| match target {
+            ThothAnnotationTarget::Function(node) | ThothAnnotationTarget::Variable(node) => {
+                u32::try_from(node.start_position().row).unwrap_or(u32::MAX) == last_line + 1
+            }
+        });
+        if let Some(ThothAnnotationTarget::Function(function)) = target
+            && let Some(annotation) = function_annotation(&group, *function, text)
+        {
+            annotations.functions.push(annotation);
+        }
+        if let Some(ThothAnnotationTarget::Variable(variable)) = target
+            && let Some(variable_annotations) = variable_annotations(&group, *variable, text)?
+        {
+            annotations.variables.extend(variable_annotations);
+        }
+    }
+    Ok(())
+}
+
+fn parse_thoth_annotation_comment(
+    node: Node<'_>,
+    text: &str,
+    issues: &mut Vec<SourceIssue>,
+) -> Result<Option<ThothAnnotationComment>, Error> {
+    let Some(content) = field(node, "content") else {
+        return Ok(Some(ThothAnnotationComment {
+            range: node_range(node),
+            line: u32::try_from(node.start_position().row).unwrap_or(u32::MAX),
+            tag: ThothAnnotationTag::Unsupported,
+        }));
+    };
+    let content_text = content.utf8_text(text.as_bytes())?;
+    let Some(tag_text) = content_text.strip_prefix("-@") else {
+        return Ok(Some(ThothAnnotationComment {
+            range: node_range(node),
+            line: u32::try_from(node.start_position().row).unwrap_or(u32::MAX),
+            tag: ThothAnnotationTag::Unsupported,
+        }));
+    };
+    let range = node_range(node);
+    let line = u32::try_from(node.start_position().row).unwrap_or(u32::MAX);
+    let content_start = content.start_byte() + 2;
+    let tag = parse_thoth_annotation_tag(tag_text, content_start, text)?;
+    if matches!(tag, ThothAnnotationTag::Invalid) {
+        issues.push(SourceIssue {
+            code: "thoth-annotation-error".into(),
+            message: "The Thoth annotation is malformed.".into(),
+            range,
+        });
+    }
+    Ok(Some(ThothAnnotationComment { range, line, tag }))
+}
+
+fn parse_thoth_annotation_tag(
+    input: &str,
+    source_start: usize,
+    source: &str,
+) -> Result<ThothAnnotationTag, Error> {
+    let (tag, rest, rest_offset) = take_annotation_word(input);
+    let Some(tag) = tag else {
+        return Ok(ThothAnnotationTag::Invalid);
+    };
+    let rest_start = source_start + rest_offset + tag.len();
+    match tag {
+        "class" => {
+            let (Some(name), _, offset) = take_annotation_word(rest) else {
+                return Ok(ThothAnnotationTag::Invalid);
+            };
+            if !valid_annotation_name(name, true) {
+                return Ok(ThothAnnotationTag::Invalid);
+            }
+            Ok(ThothAnnotationTag::Class {
+                name: name.to_owned(),
+                name_range: byte_range(
+                    source,
+                    rest_start + offset,
+                    rest_start + offset + name.len(),
+                ),
+            })
+        }
+        "field" => {
+            let (Some(name), type_input, offset) = take_annotation_word(rest) else {
+                return Ok(ThothAnnotationTag::Invalid);
+            };
+            if !valid_annotation_name(name, false) {
+                return Ok(ThothAnnotationTag::Invalid);
+            }
+            let Some((ty, type_range)) =
+                parse_annotation_type(type_input, source, rest_start + offset + name.len())?
+            else {
+                return Ok(ThothAnnotationTag::Invalid);
+            };
+            Ok(ThothAnnotationTag::Field {
+                name: name.to_owned(),
+                name_range: byte_range(
+                    source,
+                    rest_start + offset,
+                    rest_start + offset + name.len(),
+                ),
+                ty,
+                type_range,
+            })
+        }
+        "alias" => {
+            let (Some(name), type_input, offset) = take_annotation_word(rest) else {
+                return Ok(ThothAnnotationTag::Invalid);
+            };
+            if !valid_annotation_name(name, true) {
+                return Ok(ThothAnnotationTag::Invalid);
+            }
+            let Some((ty, type_range)) =
+                parse_annotation_type(type_input, source, rest_start + offset + name.len())?
+            else {
+                return Ok(ThothAnnotationTag::Invalid);
+            };
+            Ok(ThothAnnotationTag::Alias {
+                name: name.to_owned(),
+                name_range: byte_range(
+                    source,
+                    rest_start + offset,
+                    rest_start + offset + name.len(),
+                ),
+                ty,
+                type_range,
+            })
+        }
+        "param" => {
+            let (Some(raw_name), type_input, offset) = take_annotation_word(rest) else {
+                return Ok(ThothAnnotationTag::Invalid);
+            };
+            let raw_name_len = raw_name.len();
+            let (raw_name, variadic) = raw_name
+                .strip_prefix("...")
+                .map_or((raw_name, false), |name| (name, true));
+            let (name, optional) = raw_name
+                .strip_suffix('?')
+                .map_or((raw_name, false), |name| (name, true));
+            if !valid_annotation_name(name, false) {
+                return Ok(ThothAnnotationTag::Invalid);
+            }
+            let name_offset = rest_start + offset + usize::from(variadic) * 3;
+            let Some((ty, type_range)) =
+                parse_annotation_type(type_input, source, rest_start + offset + raw_name_len)?
+            else {
+                return Ok(ThothAnnotationTag::Invalid);
+            };
+            let ty = if optional {
+                TypeExpression::union([ty, TypeExpression::Nil])
+            } else {
+                ty
+            };
+            Ok(ThothAnnotationTag::Param {
+                name: name.to_owned(),
+                name_range: byte_range(source, name_offset, name_offset + name.len()),
+                ty,
+                type_range,
+                variadic,
+            })
+        }
+        "return" => {
+            let Some((ty, type_range)) = parse_annotation_type(rest, source, rest_start)? else {
+                return Ok(ThothAnnotationTag::Invalid);
+            };
+            Ok(ThothAnnotationTag::Return { ty, type_range })
+        }
+        "type" => {
+            let Some((ty, type_range)) = parse_annotation_type(rest, source, rest_start)? else {
+                return Ok(ThothAnnotationTag::Invalid);
+            };
+            Ok(ThothAnnotationTag::Type { ty, type_range })
+        }
+        _ => Ok(ThothAnnotationTag::Unsupported),
+    }
+}
+
+fn take_annotation_word(input: &str) -> (Option<&str>, &str, usize) {
+    let trimmed = input.trim_start_matches(char::is_whitespace);
+    let offset = input.len() - trimmed.len();
+    let end = trimmed
+        .char_indices()
+        .find_map(|(index, character)| character.is_whitespace().then_some(index))
+        .unwrap_or(trimmed.len());
+    if end == 0 {
+        (None, trimmed, offset)
+    } else {
+        (Some(&trimmed[..end]), &trimmed[end..], offset)
+    }
+}
+
+fn parse_annotation_type(
+    input: &str,
+    source: &str,
+    source_start: usize,
+) -> Result<Option<(TypeExpression, TextRange)>, Error> {
+    let trimmed = input.trim_start_matches(char::is_whitespace);
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let leading = input.len() - trimmed.len();
+    let parsed = match parse_type_expression(trimmed) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(None),
+    };
+    let start = source_start + leading;
+    let consumed = parsed.consumed();
+    if trimmed[consumed..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Ok(None);
+    }
+    Ok(Some((
+        parsed.ty,
+        byte_range(source, start, start + consumed),
+    )))
+}
+
+fn valid_annotation_name(name: &str, dotted: bool) -> bool {
+    if dotted {
+        name.split('.').all(valid_annotation_identifier)
+    } else {
+        valid_annotation_identifier(name)
+    }
+}
+
+fn valid_annotation_identifier(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && is_identifier_start(bytes[0])
+        && bytes[1..].iter().copied().all(is_identifier_continue)
+}
+
+fn collect_class_annotations(
+    group: &[ThothAnnotationComment],
+    annotations: &mut crate::annotation::ThothAnnotations,
+) {
+    for (index, comment) in group.iter().enumerate() {
+        let ThothAnnotationTag::Class { name, name_range } = &comment.tag else {
+            continue;
+        };
+        let mut fields = Vec::new();
+        for field_comment in group.iter().skip(index + 1) {
+            let ThothAnnotationTag::Field {
+                name,
+                name_range,
+                ty,
+                type_range,
+            } = &field_comment.tag
+            else {
+                break;
+            };
+            fields.push(ThothFieldAnnotation {
+                name: name.clone(),
+                ty: ty.clone(),
+                range: field_comment.range,
+                name_range: *name_range,
+                type_range: *type_range,
+            });
+        }
+        let end = fields
+            .last()
+            .map_or(comment.range.end, |field| field.range.end);
+        annotations.classes.push(ThothClassAnnotation {
+            name: name.clone(),
+            range: TextRange {
+                start: comment.range.start,
+                end,
+            },
+            name_range: *name_range,
+            fields,
+        });
+    }
+}
+
+fn collect_alias_annotations(
+    group: &[ThothAnnotationComment],
+    annotations: &mut crate::annotation::ThothAnnotations,
+) {
+    for comment in group {
+        if let ThothAnnotationTag::Alias {
+            name,
+            name_range,
+            ty,
+            type_range,
+        } = &comment.tag
+        {
+            annotations.aliases.push(ThothAliasAnnotation {
+                name: name.clone(),
+                ty: ty.clone(),
+                range: comment.range,
+                name_range: *name_range,
+                type_range: *type_range,
+            });
+        }
+    }
+}
+
+fn function_annotation(
+    group: &[ThothAnnotationComment],
+    function: Node<'_>,
+    text: &str,
+) -> Option<ThothFunctionAnnotation> {
+    let parameters = group
+        .iter()
+        .filter_map(|comment| match &comment.tag {
+            ThothAnnotationTag::Param {
+                name,
+                name_range,
+                ty,
+                type_range,
+                variadic,
+            } => Some(ThothParameterAnnotation {
+                name: name.clone(),
+                ty: ty.clone(),
+                range: comment.range,
+                name_range: *name_range,
+                type_range: *type_range,
+                variadic: *variadic,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let returns = group
+        .iter()
+        .filter_map(|comment| match &comment.tag {
+            ThothAnnotationTag::Return { ty, type_range } => Some(ThothReturnAnnotation {
+                ty: ty.clone(),
+                range: comment.range,
+                type_range: *type_range,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parameters.is_empty() && returns.is_empty() {
+        return None;
+    }
+    let name = field(function, "name");
+    let name_range = name.map(node_range);
+    Some(ThothFunctionAnnotation {
+        name: name.and_then(|node| node.utf8_text(text.as_bytes()).ok().map(str::to_owned)),
+        range: TextRange {
+            start: group.first()?.range.start,
+            end: group.last()?.range.end,
+        },
+        name_range,
+        contracts: vec![ThothFunctionContract {
+            parameters,
+            returns,
+            range: TextRange {
+                start: group.first()?.range.start,
+                end: group.last()?.range.end,
+            },
+        }],
+    })
+}
+
+fn variable_annotations(
+    group: &[ThothAnnotationComment],
+    variable: Node<'_>,
+    text: &str,
+) -> Result<Option<Vec<ThothVariableAnnotation>>, Error> {
+    let types = group
+        .iter()
+        .filter_map(|comment| match &comment.tag {
+            ThothAnnotationTag::Type { ty, type_range } => {
+                Some((comment.range, ty.clone(), *type_range))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if types.is_empty() {
+        return Ok(None);
+    }
+    if types.len() != 1 {
+        return Ok(None);
+    }
+    let targets = if variable.kind() == "variable_declaration" {
+        direct_child(variable, "assignment_statement")
+            .or(Some(variable))
+            .and_then(|node| direct_child(node, "variable_list"))
+    } else {
+        direct_child(variable, "variable_list")
+    };
+    let Some(targets) = targets else {
+        return Ok(None);
+    };
+    let mut cursor = targets.walk();
+    let target_nodes = targets.named_children(&mut cursor).collect::<Vec<_>>();
+    if target_nodes.len() != 1 {
+        return Ok(None);
+    }
+    let target = target_nodes[0];
+    let target_text = target.utf8_text(text.as_bytes())?.to_owned();
+    let (range, ty, type_range) = types.first().expect("non-empty type annotations");
+    Ok(Some(vec![ThothVariableAnnotation {
+        target: target_text,
+        ty: ty.clone(),
+        range: *range,
+        target_range: node_range(target),
+        type_range: *type_range,
+    }]))
+}
+
+fn byte_range(source: &str, start: usize, end: usize) -> TextRange {
+    TextRange {
+        start: byte_position(source, start),
+        end: byte_position(source, end),
+    }
+}
+
+fn byte_position(source: &str, offset: usize) -> Position {
+    let offset = offset.min(source.len());
+    let prefix = &source[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let character = prefix.rsplit('\n').next().map_or(prefix.len(), str::len);
+    Position {
+        line: u32::try_from(line).unwrap_or(u32::MAX),
+        character: u32::try_from(character).unwrap_or(u32::MAX),
+    }
 }
 
 fn assign_thoth_owners(facts: &mut ThothFile) {

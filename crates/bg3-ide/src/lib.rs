@@ -321,6 +321,12 @@ impl WorkspaceSnapshot {
         }
         let definitions = self.resolve(&target, overlays);
         let effective = definitions.first()?;
+        if effective.definition.kind == THOTH_FUNCTION_KIND
+            && let Some(hover) =
+                self.annotated_thoth_hover(&effective.definition.name, &definitions, overlays)
+        {
+            return Some(hover);
+        }
         let heading = match effective.definition.kind.as_str() {
             THOTH_FUNCTION_KIND => "Thoth function",
             OSIRIS_GOAL_KIND => "Osiris goal",

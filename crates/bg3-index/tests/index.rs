@@ -303,6 +303,242 @@ fn extracts_cacheable_thoth_facts_without_inventing_types() {
 }
 
 #[test]
+fn attaches_thoth_annotations_only_across_adjacent_rows() {
+    let text = "---@alias WeaponId integer\n---@class Weapon\n---@field id integer\n---@field label string\n\n---@param item? Weapon\n-- ordinary comment breaks the contract\n---@return boolean\nfunction IsWeapon(item)\n  return item ~= nil\nend\n\n---@type Weapon\nlocal value\n";
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Types.khn"),
+            kind: SourceKind::Thoth,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    let facts = parsed.thoth.expect("Thoth facts");
+    assert_eq!(facts.annotations.classes.len(), 1);
+    assert_eq!(facts.annotations.classes[0].name, "Weapon");
+    assert_eq!(facts.annotations.classes[0].name_range.start.character, 10);
+    assert_eq!(facts.annotations.classes[0].name_range.end.character, 16);
+    assert_eq!(facts.annotations.classes[0].fields.len(), 2);
+    assert_eq!(facts.annotations.classes[0].fields[0].name, "id");
+    assert_eq!(
+        facts.annotations.classes[0].fields[0].ty.to_string(),
+        "integer"
+    );
+    assert_eq!(
+        facts.annotations.classes[0].fields[0]
+            .name_range
+            .start
+            .character,
+        10
+    );
+    assert_eq!(
+        facts.annotations.classes[0].fields[0]
+            .name_range
+            .end
+            .character,
+        12
+    );
+    assert_eq!(
+        facts.annotations.classes[0].fields[0]
+            .type_range
+            .start
+            .character,
+        13
+    );
+    assert_eq!(
+        facts.annotations.classes[0].fields[0]
+            .type_range
+            .end
+            .character,
+        20
+    );
+    assert_eq!(
+        facts.annotations.classes[0].fields[1]
+            .name_range
+            .start
+            .character,
+        10
+    );
+    assert_eq!(
+        facts.annotations.classes[0].fields[1]
+            .name_range
+            .end
+            .character,
+        15
+    );
+    assert_eq!(
+        facts.annotations.classes[0].fields[1]
+            .type_range
+            .start
+            .character,
+        16
+    );
+    assert_eq!(
+        facts.annotations.classes[0].fields[1]
+            .type_range
+            .end
+            .character,
+        22
+    );
+    assert_eq!(facts.annotations.aliases[0].name, "WeaponId");
+    assert_eq!(facts.annotations.aliases[0].name_range.start.character, 10);
+    assert_eq!(facts.annotations.aliases[0].name_range.end.character, 18);
+    assert_eq!(facts.annotations.aliases[0].type_range.start.character, 19);
+    assert_eq!(facts.annotations.aliases[0].type_range.end.character, 26);
+
+    assert_eq!(facts.annotations.functions.len(), 1);
+    let contract = &facts.annotations.functions[0].contracts[0];
+    assert!(contract.parameters.is_empty());
+    assert_eq!(contract.returns[0].ty.to_string(), "boolean");
+
+    assert_eq!(facts.annotations.variables.len(), 1);
+    assert_eq!(facts.annotations.variables[0].target, "value");
+    assert_eq!(facts.annotations.variables[0].ty.to_string(), "Weapon");
+}
+
+#[test]
+fn optional_and_variadic_parameter_annotations_preserve_ranges() {
+    let text =
+        "---@param item? Weapon\n---@param ...rest string\nfunction Inspect(item, ...)\nend\n";
+    let facts = parse_thoth_file(text).unwrap();
+    let parameters = &facts.annotations.functions[0].contracts[0].parameters;
+
+    assert_eq!(parameters[0].name, "item");
+    assert_eq!(parameters[0].ty.to_string(), "Weapon|nil");
+    assert!(!parameters[0].variadic);
+    assert_eq!(parameters[0].name_range.start.character, 10);
+    assert_eq!(parameters[0].type_range.start.character, 16);
+    assert_eq!(parameters[1].name, "rest");
+    assert!(parameters[1].variadic);
+    assert_eq!(parameters[1].type_range.start.character, 18);
+}
+
+#[test]
+fn unsupported_annotation_tags_break_function_attachment() {
+    let text = "---@param item string\n---@unsupported ignored\n---@return boolean\nfunction IsValid(item)\nend\n";
+    let facts = parse_thoth_file(text).unwrap();
+    let contract = &facts.annotations.functions[0].contracts[0];
+    assert!(contract.parameters.is_empty());
+    assert_eq!(contract.returns.len(), 1);
+}
+
+#[test]
+fn rejects_non_whitespace_type_suffixes() {
+    for suffix in ["Weapon$", "boolean)", "Weapon[]foo"] {
+        let text = format!("---@param item {suffix}\nfunction Broken(item)\nend\n");
+        let parsed = parse_source(
+            SourceFile {
+                path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Broken.khn"),
+                kind: SourceKind::Thoth,
+            },
+            &text,
+            &SchemaCatalog::default(),
+            "English",
+        )
+        .unwrap();
+        assert!(
+            parsed
+                .issues
+                .iter()
+                .any(|issue| { issue.code == "thoth-annotation-error" }),
+            "suffix {suffix:?} was accepted"
+        );
+        assert!(parse_thoth_file(&text).is_err());
+    }
+}
+
+#[test]
+fn rejects_malformed_annotation_names_but_accepts_dotted_nominal_names() {
+    for annotation in [
+        "---@class Bad-Name",
+        "---@field bad-name string",
+        "---@alias Bad..Name string",
+        "---@param bad-name string",
+    ] {
+        let text = format!("{annotation}\nfunction Broken(item)\nend\n");
+        let parsed = parse_source(
+            SourceFile {
+                path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Broken.khn"),
+                kind: SourceKind::Thoth,
+            },
+            &text,
+            &SchemaCatalog::default(),
+            "English",
+        )
+        .unwrap();
+        assert!(
+            parsed
+                .issues
+                .iter()
+                .any(|issue| { issue.code == "thoth-annotation-error" }),
+            "name in {annotation:?} was accepted"
+        );
+    }
+
+    let facts =
+        parse_thoth_file("---@class Namespace.Weapon\n---@alias Namespace.WeaponId integer\n")
+            .unwrap();
+    assert_eq!(facts.annotations.classes[0].name, "Namespace.Weapon");
+    assert_eq!(facts.annotations.aliases[0].name, "Namespace.WeaponId");
+}
+
+#[test]
+fn omits_ambiguous_type_annotations_without_an_issue() {
+    let text = "---@type Weapon\nlocal left, right\n";
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Ambiguous.khn"),
+            kind: SourceKind::Thoth,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    let facts = parsed.thoth.expect("Thoth facts");
+    assert!(facts.annotations.variables.is_empty());
+    assert!(parsed.issues.is_empty());
+    assert!(parse_thoth_file(text).is_ok());
+}
+
+#[test]
+fn omits_multiple_type_annotations_and_ignores_four_dash_comments() {
+    let multiple = "---@type Weapon\n---@type Armor\nlocal value\n";
+    let facts = parse_thoth_file(multiple).unwrap();
+    assert!(facts.annotations.variables.is_empty());
+
+    let ignored = "----@class NotAnAnnotation\nfunction Example()\nend\n";
+    let facts = parse_thoth_file(ignored).unwrap();
+    assert!(facts.annotations.classes.is_empty());
+    assert!(facts.annotations.functions.is_empty());
+}
+
+#[test]
+fn malformed_supported_annotations_are_issues_and_rejected_from_virtual_sources() {
+    let text = "---@param item\nfunction Broken(item)\nend\n";
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Broken.khn"),
+            kind: SourceKind::Thoth,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(
+        parsed
+            .issues
+            .iter()
+            .any(|issue| issue.code == "thoth-annotation-error")
+    );
+    assert!(parse_thoth_file(text).is_err());
+}
+
+#[test]
 fn rejects_partial_facts_from_malformed_virtual_thoth_sources() {
     let error = parse_thoth_file("function Broken(entity)\n  @\nend\n").unwrap_err();
 

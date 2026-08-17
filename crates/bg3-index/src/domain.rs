@@ -139,6 +139,7 @@ pub struct ThothFile {
     pub calls: Vec<ThothCall>,
     pub assignments: Vec<ThothAssignment>,
     pub member_accesses: Vec<ThothMemberAccess>,
+    pub annotations: crate::annotation::ThothAnnotations,
 }
 
 /// Identifies the containing Thoth function for an expression observation.
