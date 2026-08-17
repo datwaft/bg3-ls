@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use bg3_index::{
     CacheStore, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, SchemaCatalog, SourceFile,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, ThothParameter, discover_module, parse_source,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, ThothExpressionKind, ThothLiteralKind,
+    ThothMemberAccessKind, ThothParameter, ThothScopeId, discover_module, parse_source,
     parse_thoth_file, parse_tooltip_catalog, read_base_localization_package,
     read_base_tooltip_catalog, read_localization_package, source_kind_for_document,
 };
@@ -299,6 +300,431 @@ fn extracts_cacheable_thoth_facts_without_inventing_types() {
             .any(|member| member.text == "Namespace.Enum.Value"
                 && member.root == "Namespace"
                 && member.members == ["Enum", "Value"])
+    );
+}
+
+#[test]
+fn classifies_thoth_expression_facts_and_preserves_return_order() {
+    let text = "function Facts(value)\n  return nil, false, 42, \"text\", value, Call(value), Namespace.Member, value + 1\nend\n";
+    let facts = parse_thoth_file(text).unwrap();
+    let expressions = &facts.expression_facts;
+    let returned = &facts.returns[0].expressions;
+    assert_eq!(
+        returned
+            .iter()
+            .map(|expression| expression.text.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "nil",
+            "false",
+            "42",
+            "\"text\"",
+            "value",
+            "Call(value)",
+            "Namespace.Member",
+            "value + 1"
+        ]
+    );
+
+    for (text, kind) in [
+        ("nil", ThothExpressionKind::Literal(ThothLiteralKind::Nil)),
+        (
+            "false",
+            ThothExpressionKind::Literal(ThothLiteralKind::Boolean),
+        ),
+        ("42", ThothExpressionKind::Literal(ThothLiteralKind::Number)),
+        (
+            "\"text\"",
+            ThothExpressionKind::Literal(ThothLiteralKind::String),
+        ),
+        ("value", ThothExpressionKind::Identifier),
+        ("Call(value)", ThothExpressionKind::FunctionCall),
+        (
+            "Namespace.Member",
+            ThothExpressionKind::MemberAccess(Vec::new()),
+        ),
+        ("value + 1", ThothExpressionKind::Unknown),
+    ] {
+        let fact = expressions
+            .iter()
+            .find(|fact| fact.text == text)
+            .expect("expression fact");
+        assert_eq!(
+            fact.range,
+            returned
+                .iter()
+                .find(|expression| expression.text == text)
+                .unwrap()
+                .range
+        );
+        match (&fact.kind, kind) {
+            (ThothExpressionKind::Literal(left), ThothExpressionKind::Literal(right)) => {
+                assert_eq!(left, &right)
+            }
+            (ThothExpressionKind::Identifier, ThothExpressionKind::Identifier)
+            | (ThothExpressionKind::FunctionCall, ThothExpressionKind::FunctionCall)
+            | (ThothExpressionKind::Unknown, ThothExpressionKind::Unknown)
+            | (ThothExpressionKind::MemberAccess(_), ThothExpressionKind::MemberAccess(_)) => {}
+            _ => panic!("unexpected kind for {text}"),
+        }
+    }
+}
+
+#[test]
+fn records_each_member_segment_and_direct_assignment_target() {
+    let text = "function Members(value)\n  local target = Namespace.Member\n  target.field = value\n  target:Method(value)\n  target[\"key\"] = value\n  return a.b[c], a[b]\nend\n";
+    let facts = parse_thoth_file(text).unwrap();
+    let member_fact = facts
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "target:Method")
+        .expect("method member fact");
+    let ThothExpressionKind::MemberAccess(segments) = &member_fact.kind else {
+        panic!("method access must be a member fact");
+    };
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["target", "Method"]
+    );
+    assert_eq!(segments[0].access, ThothMemberAccessKind::Root);
+    assert_eq!(segments[1].access, ThothMemberAccessKind::Method);
+    assert_eq!(segments[0].text, "target");
+    assert_eq!(segments[1].text, "Method");
+    assert_eq!(segments[0].range.start.line, member_fact.range.start.line);
+    assert_eq!(
+        segments[0].range.start.character,
+        member_fact.range.start.character
+    );
+    assert_eq!(
+        segments[0].range.end.character - segments[0].range.start.character,
+        6
+    );
+    assert_eq!(
+        segments[1].range.start.character,
+        member_fact.range.start.character + 7
+    );
+    assert_eq!(
+        segments[1].range.end.character,
+        member_fact.range.end.character
+    );
+
+    let dotted = facts
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "Namespace.Member")
+        .unwrap();
+    let ThothExpressionKind::MemberAccess(segments) = &dotted.kind else {
+        panic!("dotted access")
+    };
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Namespace", "Member"]
+    );
+    assert_eq!(segments[1].access, ThothMemberAccessKind::Dot);
+    assert_eq!(segments[0].range.start.character, 17);
+    assert_eq!(segments[0].range.end.character, 26);
+    assert_eq!(segments[1].range.start.character, 27);
+    assert_eq!(segments[1].range.end.character, 33);
+    let bracket = facts
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "target[\"key\"]")
+        .unwrap();
+    let ThothExpressionKind::MemberAccess(segments) = &bracket.kind else {
+        panic!("bracket access")
+    };
+    assert_eq!(segments[1].access, ThothMemberAccessKind::Bracket);
+    assert_eq!(segments[0].text, "target");
+    assert_eq!(segments[1].text, "\"key\"");
+
+    let chain = facts
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "a.b[c]")
+        .unwrap();
+    let ThothExpressionKind::MemberAccess(segments) = &chain.kind else {
+        panic!("three-segment chain")
+    };
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| (segment.text.as_str(), segment.access))
+            .collect::<Vec<_>>(),
+        vec![
+            ("a", ThothMemberAccessKind::Root),
+            ("b", ThothMemberAccessKind::Dot),
+            ("c", ThothMemberAccessKind::Bracket),
+        ]
+    );
+    assert_eq!(segments[0].range.start.character, 9);
+    assert_eq!(segments[0].range.end.character, 10);
+    assert_eq!(segments[1].range.start.character, 11);
+    assert_eq!(segments[1].range.end.character, 12);
+    assert_eq!(segments[2].range.start.character, 13);
+    assert_eq!(segments[2].range.end.character, 14);
+
+    let dynamic = facts
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "a[b]")
+        .unwrap();
+    let ThothExpressionKind::MemberAccess(segments) = &dynamic.kind else {
+        panic!("dynamic bracket access")
+    };
+    assert_eq!(segments[0].text, "a");
+    assert_eq!(segments[0].access, ThothMemberAccessKind::Root);
+    assert_eq!(segments[1].text, "b");
+    assert_eq!(segments[1].access, ThothMemberAccessKind::Bracket);
+
+    let assignment_targets = facts
+        .assignments
+        .iter()
+        .flat_map(|assignment| assignment.targets.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assignment_targets
+            .iter()
+            .map(|target| target.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["target", "target.field", "target[\"key\"]"]
+    );
+    assert!(matches!(
+        facts
+            .expression_facts
+            .iter()
+            .find(|fact| fact.text == "target")
+            .unwrap()
+            .kind,
+        ThothExpressionKind::Identifier
+    ));
+    assert!(matches!(
+        facts
+            .expression_facts
+            .iter()
+            .find(|fact| fact.text == "target.field")
+            .unwrap()
+            .kind,
+        ThothExpressionKind::MemberAccess(_)
+    ));
+    assert!(matches!(
+        facts
+            .expression_facts
+            .iter()
+            .find(|fact| fact.text == "target[\"key\"]")
+            .unwrap()
+            .kind,
+        ThothExpressionKind::MemberAccess(_)
+    ));
+}
+
+#[test]
+fn assigns_deterministic_scope_hierarchy_and_statement_order() {
+    let text = "local top = 1; top = 2\nfunction Outer(unusedOuter)\n  local first = function(unusedAnonymous) return 1 end\n  local chained = GetObject().Field\n  local parenthesized = (top).Field\n  if top then\n    function Inner(unusedInner) return 2 end\n  end\nend\n";
+    let first = parse_thoth_file(text).unwrap();
+    let second = parse_thoth_file(text).unwrap();
+    assert_eq!(first.scopes, second.scopes);
+    assert_eq!(first.expression_facts, second.expression_facts);
+    let file = first
+        .scopes
+        .iter()
+        .find(|scope| scope.id == ThothScopeId::File)
+        .unwrap();
+    assert_eq!(file.parent, None);
+    let functions = first
+        .scopes
+        .iter()
+        .filter(|scope| matches!(scope.id, ThothScopeId::Function { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        functions.len(),
+        3,
+        "Outer, Inner, and anonymous function scopes"
+    );
+    let outer = functions
+        .iter()
+        .find(|scope| matches!(scope.id, ThothScopeId::Function { range } if range.start.line == 1))
+        .unwrap();
+    assert_eq!(outer.parent, Some(ThothScopeId::File));
+    let nested = functions
+        .iter()
+        .find(|scope| matches!(scope.id, ThothScopeId::Function { range } if range.start.line == 6))
+        .unwrap();
+    let anonymous = functions
+        .iter()
+        .find(|scope| matches!(scope.id, ThothScopeId::Function { range } if range.start.line == 2))
+        .unwrap();
+    assert!(matches!(nested.parent, Some(ThothScopeId::Block { .. })));
+    assert!(matches!(anonymous.parent, Some(ThothScopeId::Block { .. })));
+    let block = first
+        .scopes
+        .iter()
+        .find(|scope| scope.parent == Some(outer.id))
+        .unwrap();
+    assert_eq!(block.parent, Some(outer.id));
+
+    let file_orders = first
+        .expression_facts
+        .iter()
+        .filter_map(|fact| {
+            (fact.statement.scope == ThothScopeId::File).then_some(fact.statement.order)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(file_orders, vec![0, 0, 1, 1]);
+    let outer_orders = first
+        .expression_facts
+        .iter()
+        .filter_map(|fact| (fact.statement.scope == block.id).then_some(fact.statement.order))
+        .collect::<Vec<_>>();
+    // Nested call/member roots retain the same statement identity as their
+    // containing expression, so one statement can contribute several facts.
+    assert_eq!(outer_orders, vec![0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3]);
+    for (text, root) in [
+        ("GetObject().Field", "GetObject()"),
+        ("(top).Field", "(top)"),
+    ] {
+        let fact = first
+            .expression_facts
+            .iter()
+            .find(|fact| fact.text == text)
+            .unwrap();
+        let ThothExpressionKind::MemberAccess(segments) = &fact.kind else {
+            panic!("{text} must remain a member access");
+        };
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| (segment.text.as_str(), segment.access))
+                .collect::<Vec<_>>(),
+            vec![
+                (root, ThothMemberAccessKind::Root),
+                ("Field", ThothMemberAccessKind::Dot),
+            ]
+        );
+        assert_eq!(segments[0].range.start, fact.range.start);
+        assert_eq!(
+            segments[0].range.end.character,
+            fact.range.start.character + u32::try_from(root.len()).unwrap()
+        );
+        assert_eq!(
+            segments[1].range.start.character,
+            segments[0].range.end.character + 1
+        );
+        assert_eq!(segments[1].range.end, fact.range.end);
+    }
+    assert!(
+        !first
+            .expression_facts
+            .iter()
+            .any(|fact| fact.text == "Outer")
+    );
+    assert!(
+        !first
+            .expression_facts
+            .iter()
+            .any(|fact| fact.text == "Inner")
+    );
+    let anonymous_return = first
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "1" && fact.range.start.line == 2)
+        .unwrap();
+    let inner_return = first
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "2" && fact.range.start.line == 6)
+        .unwrap();
+    for parameter in ["unusedOuter", "unusedAnonymous", "unusedInner"] {
+        assert!(
+            !first
+                .expression_facts
+                .iter()
+                .any(|fact| fact.text == parameter)
+        );
+    }
+    let anonymous_scope = functions
+        .iter()
+        .find(|scope| matches!(scope.id, ThothScopeId::Function { range } if range.start.line == 2))
+        .unwrap();
+    let inner_scope = functions
+        .iter()
+        .find(|scope| matches!(scope.id, ThothScopeId::Function { range } if range.start.line == 6))
+        .unwrap();
+    assert!(first.scopes.iter().any(|scope| {
+        scope.parent == Some(anonymous_scope.id) && scope.id == anonymous_return.statement.scope
+    }));
+    assert!(first.scopes.iter().any(|scope| {
+        scope.parent == Some(inner_scope.id) && scope.id == inner_return.statement.scope
+    }));
+}
+
+#[test]
+fn repeat_body_facts_precede_the_trailing_until_condition() {
+    let facts = parse_thoth_file("repeat\n  Tick(value)\nuntil Ready(value)\n").unwrap();
+    let body = facts
+        .expression_facts
+        .iter()
+        .position(|fact| fact.text == "Tick(value)")
+        .expect("repeat body call fact");
+    let condition = facts
+        .expression_facts
+        .iter()
+        .position(|fact| fact.text == "Ready(value)")
+        .expect("repeat condition call fact");
+    assert!(
+        body < condition,
+        "body facts must precede the until condition"
+    );
+}
+
+#[test]
+fn warm_local_cache_preserves_thoth_expression_facts_and_scopes() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("Facts.khn");
+    let text = "function Facts(value)\n  local result = value\n  return result\nend\n";
+    fs::write(&source_path, text).unwrap();
+    let source = SourceFile {
+        path: source_path,
+        kind: SourceKind::Thoth,
+    };
+    let module = ModuleSpec {
+        name: "Synthetic".into(),
+        root: directory.path().into(),
+        role: ModuleRole::Project,
+    };
+    let cache = CacheStore::new(directory.path().join("cache")).unwrap();
+    let (cold, cold_stats) = cache
+        .build_module(
+            &module,
+            std::slice::from_ref(&source),
+            &SchemaCatalog::default(),
+            "English",
+        )
+        .unwrap();
+    let (warm, warm_stats) = cache
+        .build_module(
+            &module,
+            std::slice::from_ref(&source),
+            &SchemaCatalog::default(),
+            "English",
+        )
+        .unwrap();
+    assert_eq!(cold_stats.misses, 1);
+    assert_eq!(warm_stats.hits, 1);
+    assert_eq!(warm_stats.misses, 0);
+    assert_eq!(cold[0].thoth, warm[0].thoth);
+    assert_eq!(
+        cold[0].thoth.as_ref().unwrap().expression_facts,
+        warm[0].thoth.as_ref().unwrap().expression_facts
+    );
+    assert_eq!(
+        cold[0].thoth.as_ref().unwrap().scopes,
+        warm[0].thoth.as_ref().unwrap().scopes
     );
 }
 

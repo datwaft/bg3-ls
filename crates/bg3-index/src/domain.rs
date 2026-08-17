@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// A zero-based UTF-8 source position.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct Position {
     pub line: u32,
     pub character: u32,
 }
 
 /// A half-open source range.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct TextRange {
     pub start: Position,
     pub end: Position,
@@ -139,6 +139,10 @@ pub struct ThothFile {
     pub calls: Vec<ThothCall>,
     pub assignments: Vec<ThothAssignment>,
     pub member_accesses: Vec<ThothMemberAccess>,
+    #[serde(default)]
+    pub expression_facts: Vec<ThothExpressionFact>,
+    #[serde(default)]
+    pub scopes: Vec<ThothLexicalScope>,
     pub annotations: crate::annotation::ThothAnnotations,
 }
 
@@ -204,6 +208,101 @@ pub struct ThothMemberAccess {
     pub root: String,
     pub members: Vec<String>,
     pub owner: Option<ThothDeclarationOwner>,
+}
+
+/// The literal classes that can be established directly from Thoth syntax.
+///
+/// This records syntax evidence only. It does not retain a parsed value or
+/// infer a wider semantic type.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum ThothLiteralKind {
+    Nil,
+    Boolean,
+    Number,
+    String,
+}
+
+/// The syntax class of one Thoth expression fact.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ThothExpressionKind {
+    /// A literal whose class is known from its syntax.
+    Literal(ThothLiteralKind),
+    /// A single identifier expression.
+    Identifier,
+    /// A function-call expression.
+    FunctionCall,
+    /// A member chain, including the root, with one range per segment.
+    MemberAccess(Vec<ThothMemberSegment>),
+    /// An expression form that the fact extractor does not classify.
+    Unknown,
+}
+
+/// The syntax form that produced one member-access segment.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum ThothMemberAccessKind {
+    /// The root expression of a member-access chain.
+    Root,
+    /// A named field selected with dot syntax.
+    Dot,
+    /// A named method selected with colon syntax.
+    Method,
+    /// A key selected with bracket syntax.
+    Bracket,
+}
+
+/// One source span in a member-access chain.
+///
+/// Segments include the root expression. For example, `GetObject().Member`
+/// contains `GetObject()` and `Member`, each with its own exact source range.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothMemberSegment {
+    pub text: String,
+    pub range: TextRange,
+    pub access: ThothMemberAccessKind,
+}
+
+/// A stable identity for a lexical Thoth scope.
+///
+/// The identity is source-backed and does not contain a filesystem path. A
+/// parser assigns `Function` to a function declaration and `Block` to a
+/// nested lexical block. `File` identifies top-level statements.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum ThothScopeId {
+    File,
+    Function { range: TextRange },
+    Block { range: TextRange },
+}
+
+/// A stable identity for a statement within one lexical scope.
+///
+/// `order` is the zero-based source order within `scope`; it is intentionally
+/// not a global counter so independently cached facts can be compared and
+/// merged without a source path.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct ThothStatementId {
+    pub scope: ThothScopeId,
+    pub order: u32,
+}
+
+/// One lexical scope and its enclosing scope, if any.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothLexicalScope {
+    pub id: ThothScopeId,
+    pub parent: Option<ThothScopeId>,
+}
+
+/// A cacheable, syntax-classified Thoth expression.
+///
+/// This model is intentionally separate from [`ThothExpression`], whose
+/// source text is retained for existing callers. It adds only the stable
+/// scope and statement identity required by later flow analysis; it does not
+/// resolve names or infer expression types.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThothExpressionFact {
+    pub range: TextRange,
+    pub text: String,
+    pub kind: ThothExpressionKind,
+    pub statement: ThothStatementId,
 }
 
 /// A source-backed expression observation. Its type remains unknown unless a
@@ -277,5 +376,93 @@ impl LineMap {
             start: self.position(start),
             end: self.position(end),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(start: u32, end: u32) -> TextRange {
+        TextRange {
+            start: Position {
+                line: 0,
+                character: start,
+            },
+            end: Position {
+                line: 0,
+                character: end,
+            },
+        }
+    }
+
+    #[test]
+    fn expression_fact_preserves_syntax_class_and_member_ranges() {
+        let statement = ThothStatementId {
+            scope: ThothScopeId::Function {
+                range: range(0, 20),
+            },
+            order: 3,
+        };
+        let fact = ThothExpressionFact {
+            range: range(4, 20),
+            text: "Namespace.Member".into(),
+            kind: ThothExpressionKind::MemberAccess(vec![
+                ThothMemberSegment {
+                    text: "Namespace".into(),
+                    range: range(4, 13),
+                    access: ThothMemberAccessKind::Root,
+                },
+                ThothMemberSegment {
+                    text: "Member".into(),
+                    range: range(14, 20),
+                    access: ThothMemberAccessKind::Dot,
+                },
+            ]),
+            statement,
+        };
+
+        assert_eq!(fact.statement.scope, statement.scope);
+        assert_eq!(fact.statement.order, 3);
+        assert_eq!(
+            fact.kind,
+            ThothExpressionKind::MemberAccess(vec![
+                ThothMemberSegment {
+                    text: "Namespace".into(),
+                    range: range(4, 13),
+                    access: ThothMemberAccessKind::Root,
+                },
+                ThothMemberSegment {
+                    text: "Member".into(),
+                    range: range(14, 20),
+                    access: ThothMemberAccessKind::Dot,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn complete_thoth_file_with_expression_facts_is_postcard_cacheable() {
+        let fact = ThothExpressionFact {
+            range: range(0, 4),
+            text: "true".into(),
+            kind: ThothExpressionKind::Literal(ThothLiteralKind::Boolean),
+            statement: ThothStatementId {
+                scope: ThothScopeId::File,
+                order: 0,
+            },
+        };
+        let file = ThothFile {
+            expression_facts: vec![fact],
+            scopes: vec![ThothLexicalScope {
+                id: ThothScopeId::File,
+                parent: None,
+            }],
+            ..ThothFile::default()
+        };
+
+        let encoded = postcard::to_stdvec(&file).expect("encode Thoth file");
+        let decoded: ThothFile = postcard::from_bytes(&encoded).expect("decode Thoth file");
+        assert_eq!(decoded, file);
     }
 }

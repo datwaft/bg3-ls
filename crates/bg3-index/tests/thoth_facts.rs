@@ -79,3 +79,29 @@ fn malformed_packaged_facts_are_rejected_without_discarding_valid_records() {
     assert_eq!(facts.rejected_count(), 1);
     assert_eq!(facts.records()[0].source().entry(), valid_entry);
 }
+
+#[test]
+fn packaged_thoth_parsing_is_path_free_and_matches_direct_facts() {
+    let entry = "Mods/Shared/Scripts/thoth/helpers/Virtual.khn";
+    let text = "function Virtual(value)\n  return value, Namespace.Member\nend\n";
+    let catalog = PackagedThothCatalog::from_sources([source(
+        "Shared",
+        entry,
+        "/does/not/exist/virtual.pak",
+        4,
+        text,
+    )])
+    .expect("catalog");
+    let direct = parse_thoth_file(text).expect("direct facts");
+    let packaged = parse_packaged_thoth_facts(&catalog, "test-v2", |source| {
+        parse_thoth_file(source.text())
+    })
+    .expect("packaged facts");
+    assert_eq!(packaged.len(), 1);
+    assert_eq!(packaged.records()[0].facts(), &direct);
+    assert_eq!(packaged.records()[0].source().entry(), entry);
+    assert_eq!(
+        packaged.records()[0].source().package().to_string_lossy(),
+        "/does/not/exist/virtual.pak"
+    );
+}

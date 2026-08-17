@@ -19,8 +19,10 @@ use crate::domain::{
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
     OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference, SourceFile, SourceIssue,
     SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment, ThothCall,
-    ThothDeclaration, ThothDeclarationOwner, ThothExpression, ThothFile, ThothMemberAccess,
-    ThothParameter, ThothReturn,
+    ThothDeclaration, ThothDeclarationOwner, ThothExpression, ThothExpressionFact,
+    ThothExpressionKind, ThothFile, ThothLexicalScope, ThothLiteralKind, ThothMemberAccess,
+    ThothMemberAccessKind, ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId,
+    ThothStatementId,
 };
 use crate::localization::valid_handle;
 use crate::schema::{SchemaCatalog, SchemaDefinition};
@@ -245,7 +247,428 @@ fn thoth_facts(root: Node<'_>, text: &str) -> Result<(ThothFile, Vec<SourceIssue
     let mut annotation_issues = Vec::new();
     collect_thoth_annotations(root, text, &mut facts.annotations, &mut annotation_issues)?;
     assign_thoth_owners(&mut facts);
+    collect_thoth_expression_facts(root, text, &mut facts)?;
     Ok((facts, annotation_issues))
+}
+
+/// Extracts ordered, syntax-only expression facts in a separate pass.
+///
+/// The legacy fact vectors above intentionally keep their existing traversal
+/// and ordering. This pass follows executable children of each lexical scope
+/// so statement identity remains stable when expressions are nested or when
+/// two statements share a source row.
+fn collect_thoth_expression_facts(
+    root: Node<'_>,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    facts.scopes.push(ThothLexicalScope {
+        id: ThothScopeId::File,
+        parent: None,
+    });
+    collect_thoth_scope_children(root, ThothScopeId::File, text, facts)
+}
+
+fn collect_thoth_scope_children(
+    container: Node<'_>,
+    scope: ThothScopeId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    let mut cursor = container.walk();
+    let children = container.named_children(&mut cursor).collect::<Vec<_>>();
+    let mut order = 0;
+    for child in children {
+        if !is_thoth_executable_statement(child) {
+            continue;
+        }
+        let statement = ThothStatementId { scope, order };
+        order = order.saturating_add(1);
+        collect_thoth_statement(child, statement, text, facts)?;
+    }
+    Ok(())
+}
+
+fn is_thoth_executable_statement(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "assignment_statement"
+            | "break_statement"
+            | "do_statement"
+            | "for_statement"
+            | "function_call"
+            | "function_declaration"
+            | "goto_statement"
+            | "if_statement"
+            | "label_statement"
+            | "repeat_statement"
+            | "return_statement"
+            | "try_statement"
+            | "variable_declaration"
+            | "while_statement"
+    )
+}
+
+fn collect_thoth_statement(
+    node: Node<'_>,
+    statement: ThothStatementId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    match node.kind() {
+        "function_declaration" => collect_thoth_function(node, statement.scope, text, facts)?,
+        "assignment_statement" => {
+            collect_thoth_assignment_expressions(node, statement, text, facts)?
+        }
+        "variable_declaration" => {
+            if let Some(assignment) = direct_child(node, "assignment_statement") {
+                collect_thoth_assignment_expressions(assignment, statement, text, facts)?;
+            } else if let Some(targets) = direct_child(node, "variable_list") {
+                collect_thoth_expression_children(targets, statement, text, facts)?;
+            }
+        }
+        "function_call" => collect_thoth_expression(node, statement, text, facts)?,
+        "return_statement" => {
+            if let Some(expressions) = direct_child(node, "expression_list") {
+                collect_thoth_expression_children(expressions, statement, text, facts)?;
+            }
+        }
+        "if_statement" => {
+            collect_thoth_field_expression(node, "condition", statement, text, facts)?;
+            collect_thoth_if_branches(node, statement, text, facts)?;
+        }
+        "while_statement" => {
+            collect_thoth_field_expression(node, "condition", statement, text, facts)?;
+            collect_thoth_field_block(node, "body", statement.scope, text, facts)?;
+        }
+        "repeat_statement" => {
+            collect_thoth_field_block(node, "body", statement.scope, text, facts)?;
+            collect_thoth_field_expression(node, "condition", statement, text, facts)?;
+        }
+        "do_statement" => collect_thoth_field_block(node, "body", statement.scope, text, facts)?,
+        "for_statement" => {
+            if let Some(clause) = field(node, "clause") {
+                match clause.kind() {
+                    "for_generic_clause" => {
+                        if let Some(targets) = direct_child(clause, "variable_list") {
+                            collect_thoth_expression_children(targets, statement, text, facts)?;
+                        }
+                        if let Some(values) = direct_child(clause, "expression_list") {
+                            collect_thoth_expression_children(values, statement, text, facts)?;
+                        }
+                    }
+                    "for_numeric_clause" => {
+                        collect_thoth_field_expression(clause, "name", statement, text, facts)?;
+                        for name in ["start", "end", "step"] {
+                            collect_thoth_field_expression(clause, name, statement, text, facts)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            collect_thoth_field_block(node, "body", statement.scope, text, facts)?;
+        }
+        "try_statement" => {
+            collect_thoth_field_block(node, "body", statement.scope, text, facts)?;
+            collect_thoth_field_block(node, "handler", statement.scope, text, facts)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_thoth_function(
+    node: Node<'_>,
+    parent: ThothScopeId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    let scope = ThothScopeId::Function {
+        range: node_range(node),
+    };
+    facts.scopes.push(ThothLexicalScope {
+        id: scope,
+        parent: Some(parent),
+    });
+    if let Some(body) = field(node, "body") {
+        collect_thoth_block(body, scope, text, facts)?;
+    }
+    Ok(())
+}
+
+fn collect_thoth_block(
+    node: Node<'_>,
+    parent: ThothScopeId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    let scope = ThothScopeId::Block {
+        range: node_range(node),
+    };
+    facts.scopes.push(ThothLexicalScope {
+        id: scope,
+        parent: Some(parent),
+    });
+    collect_thoth_scope_children(node, scope, text, facts)
+}
+
+fn collect_thoth_if_branches(
+    node: Node<'_>,
+    statement: ThothStatementId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    if let Some(consequence) = field(node, "consequence") {
+        collect_thoth_block(consequence, statement.scope, text, facts)?;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "elseif_statement" => {
+                collect_thoth_field_expression(child, "condition", statement, text, facts)?;
+                if let Some(body) = field(child, "consequence") {
+                    collect_thoth_block(body, statement.scope, text, facts)?;
+                }
+            }
+            "else_statement" => {
+                if let Some(body) = field(child, "body") {
+                    collect_thoth_block(body, statement.scope, text, facts)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_thoth_field_block(
+    node: Node<'_>,
+    name: &str,
+    parent: ThothScopeId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    if let Some(body) = field(node, name) {
+        collect_thoth_block(body, parent, text, facts)?;
+    }
+    Ok(())
+}
+
+fn collect_thoth_field_expression(
+    node: Node<'_>,
+    name: &str,
+    statement: ThothStatementId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    if let Some(expression) = field(node, name) {
+        collect_thoth_expression(expression, statement, text, facts)?;
+    }
+    Ok(())
+}
+
+fn collect_thoth_assignment_expressions(
+    node: Node<'_>,
+    statement: ThothStatementId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    if let Some(targets) = direct_child(node, "variable_list") {
+        collect_thoth_expression_children(targets, statement, text, facts)?;
+    }
+    if let Some(values) = direct_child(node, "expression_list") {
+        collect_thoth_expression_children(values, statement, text, facts)?;
+    }
+    Ok(())
+}
+
+fn collect_thoth_expression_children(
+    node: Node<'_>,
+    statement: ThothStatementId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_thoth_expression(child, statement, text, facts)?;
+    }
+    Ok(())
+}
+
+fn collect_thoth_expression(
+    node: Node<'_>,
+    statement: ThothStatementId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    let kind = match node.kind() {
+        "nil" => ThothExpressionKind::Literal(ThothLiteralKind::Nil),
+        "false" | "true" => ThothExpressionKind::Literal(ThothLiteralKind::Boolean),
+        "number" => ThothExpressionKind::Literal(ThothLiteralKind::Number),
+        "string" => ThothExpressionKind::Literal(ThothLiteralKind::String),
+        "identifier" => ThothExpressionKind::Identifier,
+        "function_call" => ThothExpressionKind::FunctionCall,
+        "dot_index_expression" | "method_index_expression" | "bracket_index_expression" => {
+            thoth_member_segments(node, text)?.map_or(
+                ThothExpressionKind::Unknown,
+                ThothExpressionKind::MemberAccess,
+            )
+        }
+        _ => ThothExpressionKind::Unknown,
+    };
+    facts.expression_facts.push(ThothExpressionFact {
+        range: node_range(node),
+        text: node_text(node, text)?,
+        kind,
+        statement,
+    });
+
+    match node.kind() {
+        "function_call" => {
+            if let Some(name) = field(node, "name") {
+                collect_thoth_expression(name, statement, text, facts)?;
+            }
+            if let Some(arguments) = field(node, "arguments") {
+                if arguments.kind() == "arguments" {
+                    collect_thoth_expression_children(arguments, statement, text, facts)?;
+                } else {
+                    collect_thoth_expression(arguments, statement, text, facts)?;
+                }
+            }
+        }
+        "function_definition" => {
+            let scope = ThothScopeId::Function {
+                range: node_range(node),
+            };
+            facts.scopes.push(ThothLexicalScope {
+                id: scope,
+                parent: Some(statement.scope),
+            });
+            if let Some(body) = field(node, "body") {
+                collect_thoth_block(body, scope, text, facts)?;
+            }
+        }
+        "dot_index_expression" | "method_index_expression" | "bracket_index_expression" => {
+            collect_thoth_member_children(node, statement, text, facts)?;
+        }
+        "field" => collect_thoth_table_field(node, statement, text, facts)?,
+        _ => collect_thoth_unknown_children(node, statement, text, facts)?,
+    }
+    Ok(())
+}
+
+fn collect_thoth_unknown_children(
+    node: Node<'_>,
+    statement: ThothStatementId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "field" => collect_thoth_table_field(child, statement, text, facts)?,
+            "expression_list" | "variable_list" | "arguments" => {
+                collect_thoth_expression_children(child, statement, text, facts)?
+            }
+            "block" | "parameters" => {}
+            _ => collect_thoth_expression(child, statement, text, facts)?,
+        }
+    }
+    Ok(())
+}
+
+fn collect_thoth_table_field(
+    node: Node<'_>,
+    statement: ThothStatementId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    if let Some(name) = field(node, "name") {
+        let source = node_text(node, text)?;
+        let is_bracket_key = source.trim_start().starts_with('[');
+        if is_bracket_key {
+            collect_thoth_expression(name, statement, text, facts)?;
+        }
+    }
+    if let Some(value) = field(node, "value") {
+        collect_thoth_expression(value, statement, text, facts)?;
+    }
+    Ok(())
+}
+
+fn collect_thoth_member_children(
+    node: Node<'_>,
+    statement: ThothStatementId,
+    text: &str,
+    facts: &mut ThothFile,
+) -> Result<(), Error> {
+    if let Some(table) = field(node, "table") {
+        if matches!(
+            table.kind(),
+            "dot_index_expression" | "method_index_expression" | "bracket_index_expression"
+        ) {
+            collect_thoth_member_children(table, statement, text, facts)?;
+        } else if matches!(table.kind(), "function_call" | "parenthesized_expression") {
+            collect_thoth_expression(table, statement, text, facts)?;
+        }
+    }
+    if node.kind() == "bracket_index_expression"
+        && let Some(field) = field(node, "field")
+    {
+        collect_thoth_expression(field, statement, text, facts)?;
+    }
+    Ok(())
+}
+
+fn thoth_member_segments(
+    node: Node<'_>,
+    text: &str,
+) -> Result<Option<Vec<ThothMemberSegment>>, Error> {
+    match node.kind() {
+        "identifier" | "function_call" | "parenthesized_expression" => {
+            Ok(Some(vec![ThothMemberSegment {
+                text: node_text(node, text)?,
+                range: node_range(node),
+                access: ThothMemberAccessKind::Root,
+            }]))
+        }
+        "dot_index_expression" | "method_index_expression" | "bracket_index_expression" => {
+            let Some(table) = field(node, "table") else {
+                return Ok(None);
+            };
+            let Some(mut segments) = thoth_member_segments(table, text)? else {
+                return Ok(None);
+            };
+            let (access, member) = match node.kind() {
+                "dot_index_expression" => {
+                    let Some(member) = field(node, "field") else {
+                        return Ok(None);
+                    };
+                    (ThothMemberAccessKind::Dot, member)
+                }
+                "method_index_expression" => {
+                    let Some(member) = field(node, "method") else {
+                        return Ok(None);
+                    };
+                    (ThothMemberAccessKind::Method, member)
+                }
+                "bracket_index_expression" => {
+                    let Some(member) = field(node, "field") else {
+                        return Ok(None);
+                    };
+                    (ThothMemberAccessKind::Bracket, member)
+                }
+                _ => return Ok(None),
+            };
+            segments.push(ThothMemberSegment {
+                text: node_text(member, text)?,
+                range: node_range(member),
+                access,
+            });
+            Ok(Some(segments))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[derive(Clone, Debug)]
