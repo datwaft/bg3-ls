@@ -502,6 +502,32 @@ replace_buffer({
 local condition_hover = thoth_hover_at("Result", 1)
 assert(condition_hover:find("boolean", 1, true), condition_hover)
 
+local condition_operator_prefix = "local combined = "
+local condition_operator_expression = "first and second"
+replace_buffer({
+  "local first = ConditionResult(false)",
+  "local second = ConditionResult(true)",
+  condition_operator_prefix .. condition_operator_expression,
+})
+assert(vim.wait(5000, function()
+  return vim.iter(vim.diagnostic.get(0)):any(function(diagnostic)
+    return diagnostic.code == "thoth-condition-result-overloaded-operator"
+      and diagnostic.source == "bg3"
+  end)
+end, 50), "the server did not publish the ConditionResult operator diagnostic")
+local condition_operator_diagnostics = vim.diagnostic.get(0)
+local condition_operator_diagnostic = assert(
+  vim.iter(condition_operator_diagnostics):find(function(diagnostic)
+    return diagnostic.code == "thoth-condition-result-overloaded-operator"
+  end),
+  vim.inspect(condition_operator_diagnostics)
+)
+assert(condition_operator_diagnostic.severity == vim.diagnostic.severity.WARN)
+assert(condition_operator_diagnostic.lnum == 2)
+assert(condition_operator_diagnostic.col == #condition_operator_prefix)
+assert(condition_operator_diagnostic.end_lnum == 2)
+assert(condition_operator_diagnostic.end_col == #condition_operator_prefix + #condition_operator_expression)
+
 replace_buffer({
   "---@param weapon ???",
   "function IsWeaponCandidate(weapon)",

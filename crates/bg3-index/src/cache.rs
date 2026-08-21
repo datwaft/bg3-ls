@@ -23,10 +23,10 @@ use crate::{Error, ModuleSpec};
 
 const CACHE_MAGIC: &[u8; 8] = b"BG3LSIDX";
 const CACHE_VERSION: u32 = 2;
-const EXTRACTOR_VERSION: &str = "bg3-ls-index-v5";
+const EXTRACTOR_VERSION: &str = "bg3-ls-index-v6";
 const LOCALIZATION_EXTRACTOR_VERSION: &str = "bg3-ls-localization-v1";
 const TOOLTIP_EXTRACTOR_VERSION: &str = "bg3-ls-tooltips-v1";
-const THOTH_EXTRACTOR_VERSION: &str = "bg3-ls-thoth-v2";
+const THOTH_EXTRACTOR_VERSION: &str = "bg3-ls-thoth-v3";
 const ABANDONED_OBJECT_AGE: Duration = Duration::from_hours(720);
 
 /// Summary of cache use during one module build.
