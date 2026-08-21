@@ -11,6 +11,7 @@ mod package;
 mod parser;
 mod schema;
 mod thoth;
+mod thoth_api;
 mod thoth_facts;
 mod tooltip;
 mod xml;
@@ -59,6 +60,10 @@ pub use thoth::{
     PackagedThothPackageRejection, PackagedThothResolution, PackagedThothSource,
     PackagedThothSourceRejection, inventory_packaged_thoth, packaged_thoth_package_candidates,
     read_packaged_thoth_catalog, thoth_module_from_entry,
+};
+pub use thoth_api::{
+    PackagedThothApiCandidate, PackagedThothApiIndex, PackagedThothApiResolution,
+    PackagedThothApiSymbol, PackagedThothApiSymbolKind,
 };
 pub use thoth_facts::{
     CachedThothFacts, PackagedThothFact, PackagedThothFacts, THOTH_FACTS_EXTRACTOR_VERSION,
