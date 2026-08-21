@@ -4,8 +4,9 @@ use std::path::Path;
 use crate::{OverlaySet, WorkspaceSnapshot, range_contains};
 use bg3_index::{
     Definition, FUNCTIONS, ModuleRole, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
-    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothCatalog, Position, SchemaDefinition,
-    SchemaField, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
+    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothApiResolution, PackagedThothApiSymbol,
+    PackagedThothApiSymbolKind, PackagedThothCatalog, Position, SchemaDefinition, SchemaField,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
     ThothFunctionContract, field_kind, function_spec, is_lsx_value_field,
 };
 
@@ -1023,87 +1024,39 @@ impl WorkspaceSnapshot {
         Some((parameters, ambiguous, module))
     }
 
-    /// Resolves explicit contracts from the effective packaged declarations.
+    /// Resolves explicit contracts from the configured packaged API index.
     /// Package entries remain provenance labels; they are never converted to
     /// navigable filesystem locations.
     fn packaged_thoth_annotation(
         &self,
         name: &str,
     ) -> Option<(AnnotatedSignature, String, Vec<String>)> {
-        let catalog = self.packaged_thoth();
-        let facts = self.packaged_thoth_facts();
+        let api = self.packaged_thoth_api();
         for layer in self
             .layers
             .iter()
             .rev()
             .filter(|layer| layer.spec.role == ModuleRole::Base)
         {
-            let mut records = Vec::new();
-            for record in facts.iter() {
-                if record.source().module() != layer.spec.name {
-                    continue;
-                }
-                let Some((priority, _)) = packaged_thoth_entry_priority(
-                    &catalog,
-                    record.source().module(),
-                    record.source().entry(),
-                ) else {
-                    continue;
-                };
-                if record.source().priority() != priority
-                    || !catalog
-                        .sources_for(record.source().module(), record.source().entry())
-                        .iter()
-                        .any(|candidate| candidate == record.source())
-                {
-                    continue;
-                }
-                if record
-                    .facts()
-                    .declarations
-                    .iter()
-                    .any(|declaration| declaration.name == name)
-                {
-                    records.push(record);
+            match api.resolve(&layer.spec.name, PackagedThothApiSymbolKind::Function, name) {
+                PackagedThothApiResolution::Missing => continue,
+                PackagedThothApiResolution::Ambiguous(_) => return None,
+                PackagedThothApiResolution::Unique(candidate) => {
+                    let PackagedThothApiSymbol::Function {
+                        annotation: Some(annotation),
+                        ..
+                    } = candidate.symbol()
+                    else {
+                        return None;
+                    };
+                    let signature = annotation.contracts.first().map(annotated_signature)?;
+                    return Some((
+                        signature,
+                        layer.spec.name.clone(),
+                        vec![candidate.source().entry().to_owned()],
+                    ));
                 }
             }
-            if records.is_empty() {
-                continue;
-            }
-            let signatures = records
-                .iter()
-                .flat_map(|record| {
-                    record
-                        .facts()
-                        .declarations
-                        .iter()
-                        .filter(|declaration| declaration.name == name)
-                        .map(|declaration| {
-                            function_annotation_at(
-                                &record.facts().annotations,
-                                name,
-                                declaration.name_range,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            let Some(Some(signature)) = signatures.first() else {
-                return None;
-            };
-            if !signatures
-                .iter()
-                .all(|candidate| candidate.as_ref() == Some(signature))
-            {
-                return None;
-            }
-            let mut entries = records
-                .iter()
-                .map(|record| record.source().entry().to_owned())
-                .collect::<Vec<_>>();
-            entries.sort();
-            entries.dedup();
-            return Some((signature.clone(), layer.spec.name.clone(), entries));
         }
         None
     }
