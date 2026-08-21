@@ -88,6 +88,14 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.12.0 adds conservative packaged Thoth API inventory, coverage
+classification, source-backed API indexing, and typed hover/signature support
+for unique helpers with explicit annotations. It also diagnoses source-proven
+`ConditionResult` values used with Lua `and` or `or`; use `&` or `|` for those
+values. Unknown, unannotated, rejected, and ambiguous packaged symbols remain
+untyped, and no migration is required. This release uses `tree-sitter-bg3`
+0.4.3.
+
 Version 0.11.0 adds conservative Thoth type flow for annotations, direct
 assignments, unique helper return contracts, literals, supported operators,
 schema enum values, and the built-in `ConditionResult` contract. It improves
