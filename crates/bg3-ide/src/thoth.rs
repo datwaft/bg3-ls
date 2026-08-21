@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use bg3_index::{
-    ModuleIndex, ModuleRole, PackagedThothFact, PackagedThothResolution, TextRange,
-    ThothAliasAnnotation, ThothClassAnnotation, ThothExpressionKind, ThothFile,
-    ThothFunctionAnnotation, ThothFunctionContract, ThothStatementId, TypeExpression,
+    ModuleIndex, ModuleRole, PackagedThothApiResolution, PackagedThothApiSymbol,
+    PackagedThothApiSymbolKind, PackagedThothSource, TextRange, ThothAliasAnnotation,
+    ThothClassAnnotation, ThothExpressionKind, ThothFile, ThothFunctionAnnotation,
+    ThothFunctionContract, ThothStatementId, TypeExpression,
 };
 
 use crate::{OverlaySet, WorkspaceSnapshot};
@@ -167,28 +168,28 @@ impl WorkspaceSnapshot {
             if layer.spec.role != ModuleRole::Base {
                 continue;
             }
-            let records = self.effective_packaged_records(&layer.spec.name)?;
-            let packaged = records
-                .into_iter()
-                .flat_map(|record| {
-                    record
-                        .facts()
-                        .declarations
-                        .iter()
-                        .filter(move |declaration| declaration.name == name)
-                        .map(move |declaration| {
-                            let annotation =
-                                function_annotation(record.facts(), name, declaration.name_range);
-                            let source = annotation
-                                .as_ref()
-                                .map(|annotation| packaged_source(record, annotation.range));
-                            annotation.zip(source)
-                        })
-                })
-                .collect::<Vec<_>>();
-            if !packaged.is_empty() {
-                let (annotation, source) = exactly_one(packaged)??;
-                return self.resolved_function(name, annotation, source, overlays);
+            match self.packaged_thoth_api.resolve(
+                &layer.spec.name,
+                PackagedThothApiSymbolKind::Function,
+                name,
+            ) {
+                PackagedThothApiResolution::Missing => continue,
+                PackagedThothApiResolution::Ambiguous(_) => return None,
+                PackagedThothApiResolution::Unique(candidate) => {
+                    let PackagedThothApiSymbol::Function {
+                        annotation: Some(annotation),
+                        ..
+                    } = candidate.symbol()
+                    else {
+                        return None;
+                    };
+                    return self.resolved_function(
+                        name,
+                        annotation.clone(),
+                        packaged_source(candidate.source(), annotation.range),
+                        overlays,
+                    );
+                }
             }
         }
         None
@@ -314,41 +315,45 @@ impl WorkspaceSnapshot {
             if layer.spec.role != ModuleRole::Base {
                 continue;
             }
-            let Some(records) = self.effective_packaged_records(&layer.spec.name) else {
-                return NominalResolution::Ambiguous;
-            };
-            let mut packaged = Vec::new();
-            for record in records {
-                for alias in record
-                    .facts()
-                    .annotations
-                    .aliases
-                    .iter()
-                    .filter(|alias| alias.name == name)
-                {
-                    packaged.push(NominalCandidate::Alias(
+            let alias = self.packaged_thoth_api.resolve(
+                &layer.spec.name,
+                PackagedThothApiSymbolKind::Alias,
+                name,
+            );
+            let class = self.packaged_thoth_api.resolve(
+                &layer.spec.name,
+                PackagedThothApiSymbolKind::Class,
+                name,
+            );
+            match (alias, class) {
+                (PackagedThothApiResolution::Missing, PackagedThothApiResolution::Missing) => {
+                    continue;
+                }
+                (
+                    PackagedThothApiResolution::Unique(candidate),
+                    PackagedThothApiResolution::Missing,
+                ) => {
+                    let PackagedThothApiSymbol::Alias(alias) = candidate.symbol() else {
+                        unreachable!("alias API queries only return aliases");
+                    };
+                    return NominalResolution::Unique(Box::new(NominalCandidate::Alias(
                         alias.clone(),
-                        packaged_source(record, alias.range),
-                    ));
+                        packaged_source(candidate.source(), alias.range),
+                    )));
                 }
-                for class in record
-                    .facts()
-                    .annotations
-                    .classes
-                    .iter()
-                    .filter(|class| class.name == name)
-                {
-                    packaged.push(NominalCandidate::Class(
+                (
+                    PackagedThothApiResolution::Missing,
+                    PackagedThothApiResolution::Unique(candidate),
+                ) => {
+                    let PackagedThothApiSymbol::Class(class) = candidate.symbol() else {
+                        unreachable!("class API queries only return classes");
+                    };
+                    return NominalResolution::Unique(Box::new(NominalCandidate::Class(
                         class.clone(),
-                        packaged_source(record, class.range),
-                    ));
+                        packaged_source(candidate.source(), class.range),
+                    )));
                 }
-            }
-            if !packaged.is_empty() {
-                return match exactly_one(packaged) {
-                    Some(candidate) => NominalResolution::Unique(Box::new(candidate)),
-                    None => NominalResolution::Ambiguous,
-                };
+                _ => return NominalResolution::Ambiguous,
             }
         }
         NominalResolution::Missing
@@ -410,34 +415,6 @@ impl WorkspaceSnapshot {
             }
         }
         candidates
-    }
-
-    fn effective_packaged_records<'a>(
-        &'a self,
-        module: &str,
-    ) -> Option<Vec<&'a PackagedThothFact<ThothFile>>> {
-        // Type resolution requires a complete effective view of the module.
-        // One ambiguous or rejected top-priority entry can contain a competing
-        // declaration, so it suppresses packaged typed metadata for this rank.
-        let catalog = self.packaged_thoth.as_ref();
-        let facts = self.packaged_thoth_facts.as_ref();
-        let entries = catalog
-            .sources()
-            .filter(|source| source.module() == module)
-            .map(|source| source.entry().to_owned())
-            .collect::<BTreeSet<_>>();
-        let mut records = Vec::new();
-        for entry in entries {
-            let source = match catalog.resolve(module, &entry) {
-                PackagedThothResolution::Unique(source) => source,
-                PackagedThothResolution::Missing | PackagedThothResolution::Ambiguous(_) => {
-                    return None;
-                }
-            };
-            let record = facts.iter().find(|record| record.source() == source)?;
-            records.push(record);
-        }
-        Some(records)
     }
 
     fn resolved_function(
@@ -514,11 +491,11 @@ fn loose_source(layer: &ModuleIndex, path: &Path, range: TextRange) -> ThothType
     }
 }
 
-fn packaged_source(record: &PackagedThothFact<ThothFile>, range: TextRange) -> ThothTypeSource {
+fn packaged_source(source: &PackagedThothSource, range: TextRange) -> ThothTypeSource {
     ThothTypeSource::Packaged {
-        module: record.source().module().to_owned(),
-        package: record.source().package().to_owned(),
-        entry: record.source().entry().to_owned(),
+        module: source.module().to_owned(),
+        package: source.package().to_owned(),
+        entry: source.entry().to_owned(),
         range,
     }
 }

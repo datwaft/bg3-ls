@@ -464,6 +464,55 @@ fn unannotated_packaged_function_masks_lower_typed_contract() {
 }
 
 #[test]
+fn unrelated_packaged_entry_ambiguity_does_not_hide_a_unique_contract() {
+    let configured = module("Configured", "/synthetic/configured", ModuleRole::Base, &[]);
+    let catalog = PackagedThothCatalog::from_sources([
+        packaged(
+            "Configured",
+            "configured.pak",
+            "Mods/Configured/Scripts/thoth/Healthy.khn",
+            0,
+            "---@return boolean\nfunction Healthy() end\n",
+        ),
+        packaged(
+            "Configured",
+            "first.pak",
+            "Mods/Configured/Scripts/thoth/Ambiguous.khn",
+            0,
+            "function Unrelated() end\n",
+        ),
+        packaged(
+            "Configured",
+            "second.pak",
+            "Mods/Configured/Scripts/thoth/Ambiguous.khn",
+            0,
+            "function Unrelated() end\n",
+        ),
+    ])
+    .expect("catalog");
+    let facts = parse_packaged_thoth_facts(&catalog, "test", |source| {
+        bg3_index::parse_thoth_file(source.text())
+    })
+    .expect("facts");
+    let workspace = workspace(vec![configured])
+        .with_packaged_thoth(Arc::new(catalog))
+        .with_packaged_thoth_facts(Arc::new(facts));
+
+    let function = workspace
+        .resolve_thoth_function("Healthy", &OverlaySet::default())
+        .expect("unique packaged function");
+    assert_eq!(
+        function.contracts[0].returns[0].ty,
+        TypeExpression::Primitive(bg3_index::PrimitiveType::Boolean)
+    );
+    assert!(
+        workspace
+            .resolve_thoth_function("Unrelated", &OverlaySet::default())
+            .is_none()
+    );
+}
+
+#[test]
 fn same_rank_loose_nominals_and_functions_are_suppressed() {
     let a = module(
         "Project",

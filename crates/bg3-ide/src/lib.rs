@@ -13,9 +13,9 @@ use std::sync::Arc;
 use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, OSIRIS_DATABASE_KIND,
     OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
-    PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position, Reference, SchemaCatalog,
-    SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothFile,
-    TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
+    PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position,
+    Reference, SchemaCatalog, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND,
+    TextRange, ThothFile, TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -117,6 +117,7 @@ pub struct WorkspaceSnapshot {
     base_localization: Arc<LocalizationCatalog>,
     packaged_thoth: Arc<PackagedThothCatalog>,
     packaged_thoth_facts: Arc<PackagedThothFacts<ThothFile>>,
+    packaged_thoth_api: Arc<PackagedThothApiIndex>,
     tooltips: Arc<TooltipCatalog>,
     incomplete_kinds: BTreeSet<String>,
 }
@@ -148,6 +149,7 @@ impl WorkspaceSnapshot {
             base_localization: Arc::new(LocalizationCatalog::default()),
             packaged_thoth: Arc::new(PackagedThothCatalog::default()),
             packaged_thoth_facts: Arc::new(empty_packaged_thoth_facts()),
+            packaged_thoth_api: Arc::new(PackagedThothApiIndex::default()),
             tooltips: Arc::new(TooltipCatalog::default()),
             incomplete_kinds: BTreeSet::new(),
         }
@@ -172,6 +174,10 @@ impl WorkspaceSnapshot {
     /// Adds installed Thoth sources read from configured base-game packages.
     pub fn with_packaged_thoth(mut self, catalog: Arc<PackagedThothCatalog>) -> Self {
         self.packaged_thoth = catalog;
+        self.packaged_thoth_api = Arc::new(PackagedThothApiIndex::from_catalog_and_facts(
+            &self.packaged_thoth,
+            &self.packaged_thoth_facts,
+        ));
         self
     }
 
@@ -188,6 +194,10 @@ impl WorkspaceSnapshot {
     /// Adds parsed facts extracted from installed Thoth package entries.
     pub fn with_packaged_thoth_facts(mut self, facts: Arc<PackagedThothFacts<ThothFile>>) -> Self {
         self.packaged_thoth_facts = facts;
+        self.packaged_thoth_api = Arc::new(PackagedThothApiIndex::from_catalog_and_facts(
+            &self.packaged_thoth,
+            &self.packaged_thoth_facts,
+        ));
         self
     }
 
@@ -199,6 +209,11 @@ impl WorkspaceSnapshot {
     /// Returns the number of installed package entries with parsed Thoth facts.
     pub fn packaged_thoth_facts_count(&self) -> usize {
         self.packaged_thoth_facts.len()
+    }
+
+    /// Shares immutable source-backed API contracts for configured packages.
+    pub fn packaged_thoth_api(&self) -> Arc<PackagedThothApiIndex> {
+        Arc::clone(&self.packaged_thoth_api)
     }
 
     /// Adds the static game tooltip glossary that has no navigable source location.

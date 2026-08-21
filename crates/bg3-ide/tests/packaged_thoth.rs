@@ -311,6 +311,61 @@ fn suppresses_conflicting_equal_priority_packaged_annotations() {
 }
 
 #[test]
+fn suppresses_matching_equal_priority_packaged_contracts() {
+    let (workspace, path) = workspace();
+    let catalog = Arc::new(
+        PackagedThothCatalog::from_sources([
+            source(
+                "Shared",
+                "Mods/Shared/Scripts/thoth/helpers/First.khn",
+                "First.pak",
+                0,
+                "---@return boolean\nfunction AmbiguousSame() end\n",
+            ),
+            source(
+                "Shared",
+                "Mods/Shared/Scripts/thoth/helpers/Second.khn",
+                "Second.pak",
+                0,
+                "---@return boolean\nfunction AmbiguousSame() end\n",
+            ),
+        ])
+        .expect("catalog"),
+    );
+    let facts = Arc::new(
+        parse_packaged_thoth_facts(catalog.as_ref(), "test-v3", |source| {
+            bg3_index::parse_thoth_file(source.text())
+        })
+        .expect("facts"),
+    );
+    let workspace = workspace
+        .with_packaged_thoth(catalog)
+        .with_packaged_thoth_facts(facts);
+    let text = "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"AmbiguousSame";
+    let overlays = overlay(&workspace, &path, text);
+
+    let hover = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 2,
+                character: u32::try_from(
+                    text.lines()
+                        .nth(2)
+                        .expect("Boosts row")
+                        .find("AmbiguousSame")
+                        .expect("function name"),
+                )
+                .expect("position"),
+            },
+            &overlays,
+        )
+        .expect("untyped ambiguity evidence");
+    assert!(hover.contains("AmbiguousSame"));
+    assert!(!hover.contains("Returns: `boolean`"));
+}
+
+#[test]
 fn unknown_observed_package_calls_keep_each_exact_arity() {
     let (workspace, path) = workspace();
     let entry = "Mods/OtherBase/Scripts/thoth/helpers/Observed.khn";
