@@ -3,7 +3,7 @@ members = ["crates/bg3-ide", "crates/bg3-index", "crates/bg3-ls"]
 resolver = "2"
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/datwaft/bg3-ls"
