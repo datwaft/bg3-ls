@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: datwaft/tree-sitter-bg3
-          ref: v0.4.3
+          ref: v0.5.0
           path: tree-sitter-bg3
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -52,7 +52,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: datwaft/tree-sitter-bg3
-          ref: v0.4.3
+          ref: v0.5.0
           path: tree-sitter-bg3
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Neovim nightly

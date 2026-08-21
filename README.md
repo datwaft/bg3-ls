@@ -34,7 +34,7 @@ parser.
 
 - Neovim nightly or Neovim 0.12+
 - the `bg3_stats`, `bg3_lsx`, `bg3_localization`, `bg3_thoth`, and
-  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.4.3
+  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.5.0
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
@@ -54,7 +54,7 @@ CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
 git clone https://github.com/datwaft/bg3-ls
-git clone --branch v0.4.3 https://github.com/datwaft/tree-sitter-bg3
+git clone --branch v0.5.0 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```
@@ -87,6 +87,14 @@ written. A failed conversion does not change an existing destination.
 
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
+
+Version 0.13.0 renders legacy Stats declarations in hover as highlighted
+`bg3_stats` source blocks with resolved display-name and description comments,
+hides presentation-only fields behind a count comment, elides values longer
+than 160 characters with an ellipsis placeholder, and lists every stored field
+for other formats. This release uses `tree-sitter-bg3` 0.5.0, whose Stats-value
+grammar accepts the ellipsis placeholder. Existing configuration remains
+compatible, and no migration is required.
 
 Version 0.12.0 adds conservative packaged Thoth API inventory, coverage
 classification, source-backed API indexing, and typed hover/signature support
@@ -245,13 +253,23 @@ The server reads:
   package; and
 - static tooltip-key localization handles from the canonical game UI glossary.
 
-Declaration hover keeps the technical symbol information first. When an
+Declaration hover keeps the technical symbol information first. Legacy Stats
+declarations render as a reconstructed `bg3_stats` code block in original
+field order, so editors with the `tree-sitter-bg3` queries highlight it like a
+Stats file. Resolved `DisplayName` and `Description` game text appears as
+`//` comment lines above their fields, with one comment per localized line.
+Presentation-only fields (`SpellAnimation`, `CastEffect`, and related sound,
+sheathing, and cursor fields) are hidden behind a count comment. A value
+longer than 160 characters is cut after its last complete top-level `;`
+statement and ends with an ellipsis placeholder that `tree-sitter-bg3` 0.5.0
+accepts; definition navigation always opens the complete source declaration.
+Other source formats list every stored field as Markdown bullets. When an
 effective Stats declaration has `DisplayName`, `Description`, or
-`DescriptionParams`, hover adds a static game-text preview after a divider. The
-preview resolves `using` inheritance and module overrides. Loose localization
-uses normal module precedence and replaces packed base text. The preview shows
-unresolved description parameters as source text because the server does not
-run game logic.
+`DescriptionParams`, hover adds a static game-text preview after a divider.
+The preview resolves `using` inheritance and module overrides. Loose
+localization uses normal module precedence and replaces packed base text. The
+preview shows unresolved description parameters as source text because the
+server does not run game logic.
 
 Hover on a localization `LSTag` `Tooltip` value supports encoded
 `&lt;...&gt;`, mixed `&lt;...>`, and literal `<...>` opening tags. Untyped
