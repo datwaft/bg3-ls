@@ -12,10 +12,10 @@ const MAX_FILE_LIST_SIZE: usize = 64 * 1024 * 1024;
 const MAX_FILE_COUNT: usize = MAX_FILE_LIST_SIZE / PACKAGE_ENTRY_SIZE;
 const SOLID_PACKAGE_FLAG: u8 = 0x04;
 
-/// The bounded metadata read from an LSPK v18 package header.
+/// The bounded metadata read from an LSPK package header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackageHeader {
-    /// The package format version. This is always 18 for this reader.
+    /// The package format version.
     pub version: u32,
     /// Package flags from the v18 header.
     pub flags: u8,
@@ -29,6 +29,32 @@ pub struct PackageHeader {
     pub file_list_offset: u64,
     /// Size of the compressed file list, including its eight-byte prefix.
     pub file_list_size: usize,
+}
+
+/// The archive layout observed before the reader validates its file list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PackageLayout {
+    Supported,
+    UnsupportedVersion,
+    Solid,
+    Multipart,
+}
+
+/// Bounded package metadata and its supported-reader classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PackageInspection {
+    header: PackageHeader,
+    layout: PackageLayout,
+}
+
+impl PackageInspection {
+    pub(crate) fn header(self) -> PackageHeader {
+        self.header
+    }
+
+    pub(crate) fn layout(self) -> PackageLayout {
+        self.layout
+    }
 }
 
 /// Reads the package checksum used for inexpensive cache invalidation.
@@ -195,6 +221,15 @@ impl PackageReader {
     }
 }
 
+/// Reads bounded header metadata and classifies the archive layout.
+pub(crate) fn inspect_package(path: &Path) -> Result<PackageInspection, Error> {
+    let mut package = File::open(path)?;
+    let package_size = package.metadata()?.len();
+    let header = read_package_header(&mut package, package_size)?;
+    let layout = package_layout(header);
+    Ok(PackageInspection { header, layout })
+}
+
 /// Reads one exact entry without loading or decompressing unrelated package data.
 pub(crate) fn read_package_entry(
     path: &Path,
@@ -281,6 +316,34 @@ fn read_entry_from_file(
 }
 
 fn read_header(package: &mut File, package_size: u64) -> Result<PackageHeader, Error> {
+    let header = read_package_header(package, package_size)?;
+    match package_layout(header) {
+        PackageLayout::Supported => Ok(header),
+        PackageLayout::UnsupportedVersion => Err(Error::Package(format!(
+            "package version {} is unsupported; expected version {PACKAGE_VERSION}",
+            header.version
+        ))),
+        PackageLayout::Solid => Err(Error::Package("solid packages are unsupported".into())),
+        PackageLayout::Multipart => Err(Error::Package(format!(
+            "multipart packages are unsupported: found {} parts",
+            header.parts
+        ))),
+    }
+}
+
+fn package_layout(header: PackageHeader) -> PackageLayout {
+    if header.version != PACKAGE_VERSION {
+        PackageLayout::UnsupportedVersion
+    } else if header.flags & SOLID_PACKAGE_FLAG != 0 {
+        PackageLayout::Solid
+    } else if header.parts != 1 {
+        PackageLayout::Multipart
+    } else {
+        PackageLayout::Supported
+    }
+}
+
+fn read_package_header(package: &mut File, package_size: u64) -> Result<PackageHeader, Error> {
     if package_size < PACKAGE_HEADER_SIZE as u64 {
         return Err(Error::Package("package header is truncated".into()));
     }
@@ -290,21 +353,8 @@ fn read_header(package: &mut File, package_size: u64) -> Result<PackageHeader, E
         return Err(Error::Package("package signature is not `LSPK`".into()));
     }
     let version = read_u32(&header, 4, "package version")?;
-    if version != PACKAGE_VERSION {
-        return Err(Error::Package(format!(
-            "package version {version} is unsupported; expected version {PACKAGE_VERSION}"
-        )));
-    }
     let flags = header[20];
-    if flags & SOLID_PACKAGE_FLAG != 0 {
-        return Err(Error::Package("solid packages are unsupported".into()));
-    }
     let parts = read_u16(&header, 38, "package part count")?;
-    if parts != 1 {
-        return Err(Error::Package(format!(
-            "multipart packages are unsupported: found {parts} parts"
-        )));
-    }
     let file_list_offset = read_u64(&header, 8, "file-list offset")?;
     let file_list_size = usize::try_from(read_u32(&header, 16, "file-list size")?)
         .map_err(|_| Error::Package("file-list size does not fit in memory".into()))?;
@@ -711,6 +761,48 @@ mod tests {
                 "Mods/Configured/Scripts/thoth/helpers/First.khn",
             ]
         );
+    }
+
+    #[test]
+    fn inspects_package_layouts_before_opening_file_lists() {
+        let directory = tempfile::tempdir().unwrap();
+        let package = synthetic_package(&[], 0);
+        let cases = [
+            ("supported.pak", package.clone(), PackageLayout::Supported),
+            (
+                "older.pak",
+                {
+                    let mut package = package.clone();
+                    package[4..8].copy_from_slice(&17_u32.to_le_bytes());
+                    package
+                },
+                PackageLayout::UnsupportedVersion,
+            ),
+            (
+                "solid.pak",
+                {
+                    let mut package = package.clone();
+                    package[20] = SOLID_PACKAGE_FLAG;
+                    package
+                },
+                PackageLayout::Solid,
+            ),
+            (
+                "multipart.pak",
+                {
+                    let mut package = package;
+                    package[38..40].copy_from_slice(&2_u16.to_le_bytes());
+                    package
+                },
+                PackageLayout::Multipart,
+            ),
+        ];
+
+        for (name, package, expected_layout) in cases {
+            let path = directory.path().join(name);
+            fs::write(&path, package).unwrap();
+            assert_eq!(inspect_package(&path).unwrap().layout(), expected_layout);
+        }
     }
 
     #[test]

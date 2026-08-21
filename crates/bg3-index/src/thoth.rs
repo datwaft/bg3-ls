@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
-use crate::package::PackageReader;
+use crate::package::{PackageLayout, PackageReader, inspect_package};
 
 const MAX_THOTH_ENTRY_SIZE: usize = 4 * 1024 * 1024;
 const MAX_THOTH_CATALOG_SIZE: usize = 64 * 1024 * 1024;
@@ -19,10 +19,14 @@ const MAX_THOTH_CATALOG_SIZE: usize = 64 * 1024 * 1024;
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct PackagedThothInventory {
     pub package_files: u64,
+    pub package_roots: u64,
+    pub package_parts: u64,
     pub rejected_packages: u64,
+    pub package_rejections: BTreeMap<PackagedThothPackageRejection, u64>,
     pub thoth_entries: u64,
     pub parsed_sources: u64,
     pub rejected_sources: u64,
+    pub source_rejections: BTreeMap<PackagedThothSourceRejection, u64>,
     pub declared_source_bytes: u64,
     pub functions: u64,
     pub classes: u64,
@@ -32,6 +36,28 @@ pub struct PackagedThothInventory {
     pub duplicate_functions: u64,
     pub equal_priority_function_conflicts: u64,
     pub modules: BTreeMap<String, PackagedThothModuleInventory>,
+}
+
+/// A bounded-reader reason that prevented one package root from contributing
+/// packaged Thoth sources.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PackagedThothPackageRejection {
+    MalformedPackage,
+    UnreadablePackage,
+    UnsupportedVersion,
+    SolidPackage,
+    MultipartPackage,
+}
+
+/// A reason that prevented one discovered Thoth entry from contributing facts.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PackagedThothSourceRejection {
+    EntryTooLarge,
+    UnreadableEntry,
+    InvalidUtf8,
+    InvalidSyntax,
 }
 
 /// Aggregate packaged Thoth coverage for one module.
@@ -277,14 +303,77 @@ pub fn inventory_packaged_thoth(game_data: &Path) -> Result<PackagedThothInvento
     }
     packages.sort();
 
-    let mut inventory = PackagedThothInventory::default();
-    let mut function_candidates: BTreeMap<(String, String), Vec<u8>> = BTreeMap::new();
+    let mut inventory = PackagedThothInventory {
+        package_files: u64::try_from(packages.len())
+            .map_err(|_| Error::Package("package count does not fit u64".into()))?,
+        ..PackagedThothInventory::default()
+    };
+    let mut declared_parts = BTreeSet::new();
+    let mut roots = Vec::new();
+    let mut unreadable = Vec::new();
     for package in packages {
-        inventory.package_files += 1;
+        match inspect_package(&package) {
+            Ok(inspection) => {
+                for part in 1..inspection.header().parts {
+                    let Some(stem) = package.file_stem().and_then(|stem| stem.to_str()) else {
+                        continue;
+                    };
+                    declared_parts.insert(package.with_file_name(format!("{stem}_{part}.pak")));
+                }
+                roots.push((package, inspection));
+            }
+            Err(error) => unreadable.push((package, error)),
+        }
+    }
+
+    for (package, error) in unreadable {
+        if declared_parts.contains(&package) {
+            inventory.package_parts = inventory
+                .package_parts
+                .checked_add(1)
+                .ok_or_else(|| Error::Package("package-part count overflowed".into()))?;
+            continue;
+        }
+        inventory.package_roots = inventory
+            .package_roots
+            .checked_add(1)
+            .ok_or_else(|| Error::Package("package-root count overflowed".into()))?;
+        inventory.record_package_rejection(match error {
+            Error::Package(_) => PackagedThothPackageRejection::MalformedPackage,
+            _ => PackagedThothPackageRejection::UnreadablePackage,
+        })?;
+    }
+
+    let mut function_candidates: BTreeMap<(String, String), Vec<u8>> = BTreeMap::new();
+    for (package, inspection) in roots {
+        inventory.package_roots = inventory
+            .package_roots
+            .checked_add(1)
+            .ok_or_else(|| Error::Package("package-root count overflowed".into()))?;
+        match inspection.layout() {
+            PackageLayout::UnsupportedVersion => {
+                inventory
+                    .record_package_rejection(PackagedThothPackageRejection::UnsupportedVersion)?;
+                continue;
+            }
+            PackageLayout::Solid => {
+                inventory.record_package_rejection(PackagedThothPackageRejection::SolidPackage)?;
+                continue;
+            }
+            PackageLayout::Multipart => {
+                inventory
+                    .record_package_rejection(PackagedThothPackageRejection::MultipartPackage)?;
+                continue;
+            }
+            PackageLayout::Supported => {}
+        }
         let reader = match PackageReader::open(&package) {
             Ok(reader) => reader,
-            Err(_) => {
-                inventory.rejected_packages += 1;
+            Err(error) => {
+                inventory.record_package_rejection(match error {
+                    Error::Package(_) => PackagedThothPackageRejection::MalformedPackage,
+                    _ => PackagedThothPackageRejection::UnreadablePackage,
+                })?;
                 continue;
             }
         };
@@ -307,15 +396,23 @@ pub fn inventory_packaged_thoth(game_data: &Path) -> Result<PackagedThothInvento
                 .checked_add(declared_bytes)
                 .ok_or_else(|| Error::Package("Thoth inventory byte count overflowed".into()))?;
             if entry.uncompressed_size() > MAX_THOTH_ENTRY_SIZE {
-                inventory.rejected_sources += 1;
-                module_inventory.rejected_sources += 1;
+                record_source_rejection(
+                    &mut inventory.rejected_sources,
+                    &mut inventory.source_rejections,
+                    module_inventory,
+                    PackagedThothSourceRejection::EntryTooLarge,
+                )?;
                 continue;
             }
             let bytes = match reader.read_entry(entry, MAX_THOTH_ENTRY_SIZE) {
                 Ok(bytes) => bytes,
                 Err(_) => {
-                    inventory.rejected_sources += 1;
-                    module_inventory.rejected_sources += 1;
+                    record_source_rejection(
+                        &mut inventory.rejected_sources,
+                        &mut inventory.source_rejections,
+                        module_inventory,
+                        PackagedThothSourceRejection::UnreadableEntry,
+                    )?;
                     continue;
                 }
             };
@@ -328,16 +425,24 @@ pub fn inventory_packaged_thoth(game_data: &Path) -> Result<PackagedThothInvento
             ) {
                 Ok(source) => source,
                 Err(_) => {
-                    inventory.rejected_sources += 1;
-                    module_inventory.rejected_sources += 1;
+                    record_source_rejection(
+                        &mut inventory.rejected_sources,
+                        &mut inventory.source_rejections,
+                        module_inventory,
+                        PackagedThothSourceRejection::InvalidUtf8,
+                    )?;
                     continue;
                 }
             };
             let facts = match crate::parser::parse_thoth_file(source.text()) {
                 Ok(facts) => facts,
                 Err(_) => {
-                    inventory.rejected_sources += 1;
-                    module_inventory.rejected_sources += 1;
+                    record_source_rejection(
+                        &mut inventory.rejected_sources,
+                        &mut inventory.source_rejections,
+                        module_inventory,
+                        PackagedThothSourceRejection::InvalidSyntax,
+                    )?;
                     continue;
                 }
             };
@@ -419,6 +524,43 @@ pub fn inventory_packaged_thoth(game_data: &Path) -> Result<PackagedThothInvento
         }
     }
     Ok(inventory)
+}
+
+impl PackagedThothInventory {
+    fn record_package_rejection(
+        &mut self,
+        rejection: PackagedThothPackageRejection,
+    ) -> Result<(), Error> {
+        self.rejected_packages = self
+            .rejected_packages
+            .checked_add(1)
+            .ok_or_else(|| Error::Package("rejected-package count overflowed".into()))?;
+        let count = self.package_rejections.entry(rejection).or_default();
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| Error::Package("package rejection count overflowed".into()))?;
+        Ok(())
+    }
+}
+
+fn record_source_rejection(
+    rejected_sources: &mut u64,
+    source_rejections: &mut BTreeMap<PackagedThothSourceRejection, u64>,
+    module: &mut PackagedThothModuleInventory,
+    rejection: PackagedThothSourceRejection,
+) -> Result<(), Error> {
+    *rejected_sources = rejected_sources
+        .checked_add(1)
+        .ok_or_else(|| Error::Package("rejected-source count overflowed".into()))?;
+    module.rejected_sources = module
+        .rejected_sources
+        .checked_add(1)
+        .ok_or_else(|| Error::Package("module rejected-source count overflowed".into()))?;
+    let count = source_rejections.entry(rejection).or_default();
+    *count = count
+        .checked_add(1)
+        .ok_or_else(|| Error::Package("source rejection count overflowed".into()))?;
+    Ok(())
 }
 
 /// Reads configured base-module Thoth sources from the selected packages.
@@ -787,10 +929,20 @@ mod tests {
 
         let inventory = inventory_packaged_thoth(directory.path()).expect("inventory");
         assert_eq!(inventory.package_files, 4);
+        assert_eq!(inventory.package_roots, 4);
+        assert_eq!(inventory.package_parts, 0);
         assert_eq!(inventory.rejected_packages, 1);
+        assert_eq!(
+            inventory.package_rejections,
+            BTreeMap::from([(PackagedThothPackageRejection::MalformedPackage, 1)])
+        );
         assert_eq!(inventory.thoth_entries, 5);
         assert_eq!(inventory.parsed_sources, 4);
         assert_eq!(inventory.rejected_sources, 1);
+        assert_eq!(
+            inventory.source_rejections,
+            BTreeMap::from([(PackagedThothSourceRejection::InvalidUtf8, 1)])
+        );
         assert_eq!(inventory.functions, 4);
         assert_eq!(inventory.classes, 1);
         assert_eq!(inventory.aliases, 1);
@@ -803,5 +955,57 @@ mod tests {
         assert_eq!(inventory.modules["Other"].entries, 2);
         assert_eq!(inventory.modules["Other"].parsed_sources, 1);
         assert_eq!(inventory.modules["Other"].rejected_sources, 1);
+    }
+
+    #[test]
+    fn inventory_separates_package_roots_parts_and_layout_rejections() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        fs::write(
+            directory.path().join("Base.pak"),
+            synthetic_package(
+                &[(
+                    "Mods/Shared/Scripts/thoth/helpers/alpha.khn",
+                    b"function Alpha() end\n",
+                )],
+                0,
+            ),
+        )
+        .expect("base package");
+
+        let mut multipart = synthetic_package(&[], 0);
+        multipart[38..40].copy_from_slice(&2_u16.to_le_bytes());
+        fs::write(directory.path().join("Multipart.pak"), multipart).expect("multipart root");
+        fs::write(directory.path().join("Multipart_1.pak"), b"raw part").expect("multipart part");
+
+        let mut solid = synthetic_package(&[], 0);
+        solid[20] = 0x04;
+        fs::write(directory.path().join("Solid.pak"), solid).expect("solid root");
+
+        let mut older = synthetic_package(&[], 0);
+        older[4..8].copy_from_slice(&17_u32.to_le_bytes());
+        fs::write(directory.path().join("Older.pak"), older).expect("older root");
+
+        fs::write(
+            directory.path().join("Malformed.pak"),
+            b"not an LSPK package",
+        )
+        .expect("malformed root");
+
+        let inventory = inventory_packaged_thoth(directory.path()).expect("inventory");
+        assert_eq!(inventory.package_files, 6);
+        assert_eq!(inventory.package_roots, 5);
+        assert_eq!(inventory.package_parts, 1);
+        assert_eq!(inventory.rejected_packages, 4);
+        assert_eq!(
+            inventory.package_rejections,
+            BTreeMap::from([
+                (PackagedThothPackageRejection::MalformedPackage, 1),
+                (PackagedThothPackageRejection::UnsupportedVersion, 1),
+                (PackagedThothPackageRejection::SolidPackage, 1),
+                (PackagedThothPackageRejection::MultipartPackage, 1),
+            ])
+        );
+        assert_eq!(inventory.parsed_sources, 1);
+        assert!(inventory.source_rejections.is_empty());
     }
 }

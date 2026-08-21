@@ -416,12 +416,13 @@ Inspect aggregate packaged-Thoth source coverage without extracting game data:
 bg3-ls inventory --game-data "/path/to/Baldurs Gate 3/Data"
 ```
 
-The command emits JSON counts for supported direct `.pak` files, matching
-Thoth entries, parseable and rejected sources, declarations, annotations,
-duplicate functions, and module ownership. It does not print source text,
-change configured module resolution, or add discovered modules to the LSP
-workspace. Unsupported or malformed packages remain visible as aggregate
-rejections.
+The command emits JSON counts for direct package files, package roots and
+declared payload parts, matching Thoth entries, parseable and rejected
+sources, declarations, annotations, duplicate functions, and module ownership.
+It also separates unsupported package layouts and malformed packages from
+entry-size, read, UTF-8, and syntax source rejections. It does not print
+source text, change configured module resolution, or add discovered modules
+to the LSP workspace.
 
 ## Benchmark
 
