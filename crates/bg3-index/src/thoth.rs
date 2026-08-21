@@ -12,6 +12,42 @@ use crate::package::PackageReader;
 const MAX_THOTH_ENTRY_SIZE: usize = 4 * 1024 * 1024;
 const MAX_THOTH_CATALOG_SIZE: usize = 64 * 1024 * 1024;
 
+/// Aggregate coverage of packaged Thoth sources in one installed Data folder.
+///
+/// This inventory is research evidence only. It does not select modules or
+/// contribute symbols to workspace resolution.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct PackagedThothInventory {
+    pub package_files: u64,
+    pub rejected_packages: u64,
+    pub thoth_entries: u64,
+    pub parsed_sources: u64,
+    pub rejected_sources: u64,
+    pub declared_source_bytes: u64,
+    pub functions: u64,
+    pub classes: u64,
+    pub aliases: u64,
+    pub fields: u64,
+    pub function_annotations: u64,
+    pub duplicate_functions: u64,
+    pub equal_priority_function_conflicts: u64,
+    pub modules: BTreeMap<String, PackagedThothModuleInventory>,
+}
+
+/// Aggregate packaged Thoth coverage for one module.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct PackagedThothModuleInventory {
+    pub entries: u64,
+    pub parsed_sources: u64,
+    pub rejected_sources: u64,
+    pub declared_source_bytes: u64,
+    pub functions: u64,
+    pub classes: u64,
+    pub aliases: u64,
+    pub fields: u64,
+    pub function_annotations: u64,
+}
+
 /// One Thoth source stored in a BG3 package.
 ///
 /// A packaged source is a virtual document. Its package and entry paths are
@@ -221,6 +257,168 @@ pub fn packaged_thoth_package_candidates(
         }
     }
     Ok(candidates.into_iter().collect())
+}
+
+/// Inventories every supported Thoth entry in direct `.pak` files below one
+/// installed Data directory.
+///
+/// Unlike [`read_packaged_thoth_catalog`], this function deliberately ignores
+/// configured module selection. Its result is aggregate-only evidence for
+/// deciding which installed source families can later become semantic inputs.
+/// An unreadable package or source increments a rejection count and does not
+/// hide unrelated valid entries.
+pub fn inventory_packaged_thoth(game_data: &Path) -> Result<PackagedThothInventory, Error> {
+    let mut packages = Vec::new();
+    for entry in fs::read_dir(game_data)? {
+        let path = entry?.path();
+        if path.is_file() && path.extension().is_some_and(|extension| extension == "pak") {
+            packages.push(path);
+        }
+    }
+    packages.sort();
+
+    let mut inventory = PackagedThothInventory::default();
+    let mut function_candidates: BTreeMap<(String, String), Vec<u8>> = BTreeMap::new();
+    for package in packages {
+        inventory.package_files += 1;
+        let reader = match PackageReader::open(&package) {
+            Ok(reader) => reader,
+            Err(_) => {
+                inventory.rejected_packages += 1;
+                continue;
+            }
+        };
+        let priority = reader.header().priority;
+        for entry in reader.all_thoth_entries() {
+            let Some(module) = thoth_module_from_entry(entry.name()) else {
+                continue;
+            };
+            let module_inventory = inventory.modules.entry(module.into()).or_default();
+            inventory.thoth_entries += 1;
+            module_inventory.entries += 1;
+            let declared_bytes = u64::try_from(entry.uncompressed_size())
+                .map_err(|_| Error::Package("Thoth entry size does not fit u64".into()))?;
+            inventory.declared_source_bytes = inventory
+                .declared_source_bytes
+                .checked_add(declared_bytes)
+                .ok_or_else(|| Error::Package("Thoth inventory byte count overflowed".into()))?;
+            module_inventory.declared_source_bytes = module_inventory
+                .declared_source_bytes
+                .checked_add(declared_bytes)
+                .ok_or_else(|| Error::Package("Thoth inventory byte count overflowed".into()))?;
+            if entry.uncompressed_size() > MAX_THOTH_ENTRY_SIZE {
+                inventory.rejected_sources += 1;
+                module_inventory.rejected_sources += 1;
+                continue;
+            }
+            let bytes = match reader.read_entry(entry, MAX_THOTH_ENTRY_SIZE) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    inventory.rejected_sources += 1;
+                    module_inventory.rejected_sources += 1;
+                    continue;
+                }
+            };
+            let source = match PackagedThothSource::from_bytes(
+                module,
+                &package,
+                entry.name(),
+                priority,
+                &bytes,
+            ) {
+                Ok(source) => source,
+                Err(_) => {
+                    inventory.rejected_sources += 1;
+                    module_inventory.rejected_sources += 1;
+                    continue;
+                }
+            };
+            let facts = match crate::parser::parse_thoth_file(source.text()) {
+                Ok(facts) => facts,
+                Err(_) => {
+                    inventory.rejected_sources += 1;
+                    module_inventory.rejected_sources += 1;
+                    continue;
+                }
+            };
+            inventory.parsed_sources += 1;
+            module_inventory.parsed_sources += 1;
+            let functions = u64::try_from(facts.declarations.len())
+                .map_err(|_| Error::Package("Thoth declaration count does not fit u64".into()))?;
+            let classes = u64::try_from(facts.annotations.classes.len())
+                .map_err(|_| Error::Package("Thoth class count does not fit u64".into()))?;
+            let aliases = u64::try_from(facts.annotations.aliases.len())
+                .map_err(|_| Error::Package("Thoth alias count does not fit u64".into()))?;
+            let fields = facts
+                .annotations
+                .classes
+                .iter()
+                .try_fold(0_u64, |total, class| {
+                    total
+                        .checked_add(u64::try_from(class.fields.len()).map_err(|_| {
+                            Error::Package("Thoth field count does not fit u64".into())
+                        })?)
+                        .ok_or_else(|| Error::Package("Thoth field count overflowed".into()))
+                })?;
+            let function_annotations =
+                u64::try_from(facts.annotations.functions.len()).map_err(|_| {
+                    Error::Package("Thoth function annotation count does not fit u64".into())
+                })?;
+            for count in [
+                (
+                    &mut inventory.functions,
+                    &mut module_inventory.functions,
+                    functions,
+                ),
+                (
+                    &mut inventory.classes,
+                    &mut module_inventory.classes,
+                    classes,
+                ),
+                (
+                    &mut inventory.aliases,
+                    &mut module_inventory.aliases,
+                    aliases,
+                ),
+                (&mut inventory.fields, &mut module_inventory.fields, fields),
+                (
+                    &mut inventory.function_annotations,
+                    &mut module_inventory.function_annotations,
+                    function_annotations,
+                ),
+            ] {
+                *count.0 = count
+                    .0
+                    .checked_add(count.2)
+                    .ok_or_else(|| Error::Package("Thoth inventory count overflowed".into()))?;
+                *count.1 = count
+                    .1
+                    .checked_add(count.2)
+                    .ok_or_else(|| Error::Package("Thoth inventory count overflowed".into()))?;
+            }
+            for declaration in facts.declarations {
+                function_candidates
+                    .entry((module.into(), declaration.name))
+                    .or_default()
+                    .push(priority);
+            }
+        }
+    }
+    for priorities in function_candidates.into_values() {
+        if priorities.len() > 1 {
+            inventory.duplicate_functions += 1;
+        }
+        if let Some(highest) = priorities.iter().max()
+            && priorities
+                .iter()
+                .filter(|priority| *priority == highest)
+                .nth(1)
+                .is_some()
+        {
+            inventory.equal_priority_function_conflicts += 1;
+        }
+    }
+    Ok(inventory)
 }
 
 /// Reads configured base-module Thoth sources from the selected packages.
@@ -537,5 +735,73 @@ mod tests {
                 if source.text() == "patch"
                     && source.package() == directory.path().join("Patch1.pak")
         ));
+    }
+
+    #[test]
+    fn inventory_scans_all_modules_and_preserves_aggregate_completeness() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        fs::write(
+            directory.path().join("Base.pak"),
+            synthetic_package(
+                &[
+                    (
+                        "Mods/Shared/Scripts/thoth/helpers/alpha.khn",
+                        b"function Alpha() end\n",
+                    ),
+                    (
+                        "Mods/Other/Scripts/thoth/helpers/beta.khn",
+                        b"function Beta() end\n",
+                    ),
+                    ("Mods/Other/Scripts/thoth/helpers/invalid.khn", b"\xff"),
+                    ("Mods/Other/Scripts/other/ignored.khn", b"ignored"),
+                ],
+                0,
+            ),
+        )
+        .expect("base package");
+        fs::write(
+            directory.path().join("Patch1.pak"),
+            synthetic_package(
+                &[(
+                    "Mods/Shared/Scripts/thoth/helpers/alpha.khn",
+                    b"---@class Result\n---@field Value string\n---@alias ResultAlias Result\n---@return Result\nfunction Alpha() end\n",
+                )],
+                1,
+            ),
+        )
+        .expect("first patch");
+        fs::write(
+            directory.path().join("Patch2.pak"),
+            synthetic_package(
+                &[(
+                    "Mods/Shared/Scripts/thoth/helpers/alpha.khn",
+                    b"function Alpha() end\n",
+                )],
+                1,
+            ),
+        )
+        .expect("second patch");
+        fs::write(directory.path().join("Broken.pak"), b"not an LSPK package")
+            .expect("broken package");
+        fs::write(directory.path().join("readme.txt"), b"ignored").expect("non-package file");
+
+        let inventory = inventory_packaged_thoth(directory.path()).expect("inventory");
+        assert_eq!(inventory.package_files, 4);
+        assert_eq!(inventory.rejected_packages, 1);
+        assert_eq!(inventory.thoth_entries, 5);
+        assert_eq!(inventory.parsed_sources, 4);
+        assert_eq!(inventory.rejected_sources, 1);
+        assert_eq!(inventory.functions, 4);
+        assert_eq!(inventory.classes, 1);
+        assert_eq!(inventory.aliases, 1);
+        assert_eq!(inventory.fields, 1);
+        assert_eq!(inventory.function_annotations, 1);
+        assert_eq!(inventory.duplicate_functions, 1);
+        assert_eq!(inventory.equal_priority_function_conflicts, 1);
+        assert_eq!(inventory.modules["Shared"].entries, 3);
+        assert_eq!(inventory.modules["Shared"].parsed_sources, 3);
+        assert_eq!(inventory.modules["Other"].entries, 2);
+        assert_eq!(inventory.modules["Other"].parsed_sources, 1);
+        assert_eq!(inventory.modules["Other"].rejected_sources, 1);
     }
 }
