@@ -344,7 +344,10 @@ fn collect_thoth_statement(
             }
         }
         "if_statement" => {
-            collect_thoth_field_expression(node, "condition", statement, text, facts)?;
+            if let Some(condition) = field(node, "condition") {
+                facts.condition_ranges.push(node_range(condition));
+                collect_thoth_expression(condition, statement, text, facts)?;
+            }
             let branches = collect_thoth_if_branches(node, statement, text, facts)?;
             facts.control_flow.push(ThothControlFlowFact {
                 statement,
@@ -352,7 +355,10 @@ fn collect_thoth_statement(
             });
         }
         "while_statement" => {
-            collect_thoth_field_expression(node, "condition", statement, text, facts)?;
+            if let Some(condition) = field(node, "condition") {
+                facts.condition_ranges.push(node_range(condition));
+                collect_thoth_expression(condition, statement, text, facts)?;
+            }
             collect_thoth_field_block(node, "body", statement.scope, text, facts)?;
         }
         "repeat_statement" => {
@@ -453,7 +459,10 @@ fn collect_thoth_if_branches(
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "elseif_statement" => {
-                collect_thoth_field_expression(child, "condition", statement, text, facts)?;
+                if let Some(condition) = field(child, "condition") {
+                    facts.condition_ranges.push(node_range(condition));
+                    collect_thoth_expression(condition, statement, text, facts)?;
+                }
                 if let Some(body) = field(child, "consequence") {
                     collect_thoth_block(body, statement.scope, text, facts)?;
                     branches.push(ThothIfBranch {

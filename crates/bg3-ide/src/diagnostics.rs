@@ -2,6 +2,7 @@ use std::path::Path;
 
 use bg3_index::{
     Definition, SchemaDefinition, SchemaField, SourceKind, SymbolTarget, TextRange,
+    ThothBinaryOperator, ThothExpressionKind, ThothUnaryOperator, TypeExpression,
     is_schema_discriminator,
 };
 use uuid::Uuid;
@@ -52,9 +53,12 @@ impl WorkspaceSnapshot {
                 message: issue.message.clone(),
             })
             .collect();
-        // Thoth currently has syntax extraction only. Publish parser issues,
-        // but do not infer semantic or schema diagnostics from its functions.
+        // Thoth diagnostics use only exact, curated type evidence. Unknown,
+        // ambiguous, and union-valued expressions remain silent.
         if matches!(file.source.kind, SourceKind::Osiris | SourceKind::Thoth) {
+            if file.source.kind == SourceKind::Thoth {
+                add_thoth_condition_diagnostics(self, path, file, overlays, &mut diagnostics);
+            }
             diagnostics.sort_by_key(|diagnostic| {
                 (
                     diagnostic.range.start.line,
@@ -151,6 +155,111 @@ impl WorkspaceSnapshot {
         });
         diagnostics
     }
+}
+
+/// Reports only source-proven `ConditionResult` uses that rely on Lua boolean
+/// semantics instead of the type's explicit result and overloaded operators.
+fn add_thoth_condition_diagnostics(
+    workspace: &WorkspaceSnapshot,
+    path: &Path,
+    file: &bg3_index::ParsedFile,
+    overlays: &OverlaySet,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(thoth) = file.thoth.as_ref() else {
+        return;
+    };
+    for range in &thoth.condition_ranges {
+        let Some(fact) = thoth
+            .expression_facts
+            .iter()
+            .find(|fact| fact.range == *range)
+        else {
+            continue;
+        };
+        if !is_condition_result_logical_combination(thoth, fact.range)
+            && is_exact_condition_result(workspace.thoth_expression_type(path, *range, overlays))
+        {
+            diagnostics.push(Diagnostic {
+                range: *range,
+                severity: DiagnosticSeverity::Warning,
+                code: "thoth-condition-result-condition".into(),
+                message: "Use `.Result` when a `ConditionResult` is used as a boolean condition."
+                    .into(),
+            });
+        }
+    }
+
+    for fact in &thoth.expression_facts {
+        match &fact.kind {
+            ThothExpressionKind::Unary {
+                operator: ThothUnaryOperator::Not,
+                operand,
+            } if is_exact_condition_result(
+                workspace.thoth_expression_type(path, *operand, overlays),
+            ) =>
+            {
+                diagnostics.push(Diagnostic {
+                    range: fact.range,
+                    severity: DiagnosticSeverity::Warning,
+                    code: "thoth-condition-result-boolean-operator".into(),
+                    message: "Use `.Result` when `not` tests a `ConditionResult`.".into(),
+                });
+            }
+            ThothExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } if matches!(operator, ThothBinaryOperator::And | ThothBinaryOperator::Or)
+                && is_exact_condition_result(
+                    workspace.thoth_expression_type(path, *left, overlays),
+                )
+                && is_exact_condition_result(
+                    workspace.thoth_expression_type(path, *right, overlays),
+                ) =>
+            {
+                diagnostics.push(Diagnostic {
+                    range: fact.range,
+                    severity: DiagnosticSeverity::Warning,
+                    code: "thoth-condition-result-overloaded-operator".into(),
+                    message: if *operator == ThothBinaryOperator::And {
+                        "Use `&` to combine two `ConditionResult` values."
+                    } else {
+                        "Use `|` to combine two `ConditionResult` values."
+                    }
+                    .into(),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_condition_result_logical_combination(thoth: &bg3_index::ThothFile, range: TextRange) -> bool {
+    let Some(fact) = thoth
+        .expression_facts
+        .iter()
+        .find(|fact| fact.range == range)
+    else {
+        return false;
+    };
+    match &fact.kind {
+        ThothExpressionKind::Binary {
+            operator: ThothBinaryOperator::And | ThothBinaryOperator::Or,
+            ..
+        } => true,
+        ThothExpressionKind::Parenthesized { expression } => {
+            is_condition_result_logical_combination(thoth, *expression)
+        }
+        _ => false,
+    }
+}
+
+fn is_exact_condition_result(ty: Option<TypeExpression>) -> bool {
+    matches!(
+        ty,
+        Some(TypeExpression::Name(name)) if name == "ConditionResult"
+    )
 }
 
 /// Validates fields against the union of all viable legacy schemas.

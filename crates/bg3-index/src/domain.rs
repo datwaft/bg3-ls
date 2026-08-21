@@ -145,6 +145,13 @@ pub struct ThothFile {
     pub scopes: Vec<ThothLexicalScope>,
     #[serde(default)]
     pub control_flow: Vec<ThothControlFlowFact>,
+    /// Exact expressions used as `if`, `elseif`, or `while` conditions.
+    ///
+    /// The parser records ranges separately from branch facts so consumers
+    /// can validate loop conditions without treating loop bodies as `if`
+    /// branches for flow narrowing.
+    #[serde(default)]
+    pub condition_ranges: Vec<TextRange>,
     pub annotations: crate::annotation::ThothAnnotations,
 }
 
@@ -548,6 +555,7 @@ mod tests {
                     }),
                 }],
             }],
+            condition_ranges: Vec::new(),
             ..ThothFile::default()
         };
 

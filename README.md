@@ -92,9 +92,9 @@ Version 0.11.0 adds conservative Thoth type flow for annotations, direct
 assignments, unique helper return contracts, literals, supported operators,
 schema enum values, and the built-in `ConditionResult` contract. It improves
 Thoth completion, hover, and field definition navigation without adding
-semantic diagnostics. Unknown, ambiguous, and complex control flow remains
-silent. Existing configuration remains compatible, and no migration is
-required. This release uses `tree-sitter-bg3` 0.4.3.
+speculative semantic diagnostics. Unknown, ambiguous, and complex control
+flow remains silent. Existing configuration remains compatible, and no
+migration is required. This release uses `tree-sitter-bg3` 0.4.3.
 
 Version 0.10.1 aligns source builds with `tree-sitter-bg3` 0.4.3. Existing
 configuration remains compatible, and no migration is required.
@@ -269,7 +269,10 @@ candidates remain ambiguous. Loose dependency and project sources retain
 their configured higher module precedence. Thoth parameter and return types
 remain unknown unless an annotation or conservative type flow proves them.
 Invalid Thoth syntax produces the stable `thoth-syntax-error` diagnostic code;
-valid Thoth produces no syntax diagnostics. Semantic Thoth diagnostics remain
+valid Thoth produces no syntax diagnostics. The server also warns for a
+proven bare `ConditionResult` in an `if`, `elseif`, or `while` condition, for
+`not` applied to one, and when two are combined with Lua `and` or `or` instead
+of the supported `&` or `|` operators. Other semantic Thoth diagnostics remain
 out of scope.
 
 ### Thoth annotations
@@ -316,8 +319,9 @@ unary and binary operators retain their known types. The built-in
 Nil narrowing is limited to exact nil comparisons in a dominated branch or in
 the remainder after a proven early exit. Unknown or ambiguous calls and
 declarations, unsupported operators, and complex or uncertain control flow
-remain unknown and produce no semantic diagnostics. Semantic Thoth diagnostics
-remain out of scope.
+remain unknown and produce no semantic diagnostics. The supported
+`ConditionResult` warnings require exact type evidence; mixed Lua pass-through
+expressions such as `flag and condition` remain silent.
 
 Osiris navigation includes goals, parent edges, `PROC` and `QRY` declarations,
 and user database occurrences. Procedure and query identity uses name and
