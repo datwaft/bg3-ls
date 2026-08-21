@@ -410,6 +410,19 @@ Use `--cache-dir PATH` before the subcommand to override the cache in tests.
 Protocol traffic always uses stdout. Set `BG3_LS_LOG` to a tracing filter, such
 as `bg3_ls=debug`, to write structured logs to stderr.
 
+Inspect aggregate packaged-Thoth source coverage without extracting game data:
+
+```sh
+bg3-ls inventory --game-data "/path/to/Baldurs Gate 3/Data"
+```
+
+The command emits JSON counts for supported direct `.pak` files, matching
+Thoth entries, parseable and rejected sources, declarations, annotations,
+duplicate functions, and module ownership. It does not print source text,
+change configured module resolution, or add discovered modules to the LSP
+workspace. Unsupported or malformed packages remain visible as aggregate
+rejections.
+
 ## Benchmark
 
 The benchmark requires a dedicated cache path because each cold trial clears

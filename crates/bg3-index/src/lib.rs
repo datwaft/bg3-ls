@@ -55,7 +55,8 @@ pub use parser::{
 };
 pub use schema::{SchemaCatalog, SchemaDefinition, SchemaField, is_schema_discriminator};
 pub use thoth::{
-    PackagedThothCatalog, PackagedThothResolution, PackagedThothSource,
+    PackagedThothCatalog, PackagedThothInventory, PackagedThothModuleInventory,
+    PackagedThothResolution, PackagedThothSource, inventory_packaged_thoth,
     packaged_thoth_package_candidates, read_packaged_thoth_catalog, thoth_module_from_entry,
 };
 pub use thoth_facts::{

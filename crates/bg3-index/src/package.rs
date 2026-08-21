@@ -146,6 +146,38 @@ impl PackageReader {
             .collect())
     }
 
+    /// Returns exact Thoth source entries from every module in the package.
+    ///
+    /// The returned entries retain package-relative names and remain in file
+    /// list order. This does not change the module-specific filtering or
+    /// precedence rules used by [`Self::thoth_entries`].
+    pub fn all_thoth_entries(&self) -> Vec<&PackageEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                let Some(module_entries) = entry.name.strip_prefix("Mods/") else {
+                    return false;
+                };
+                let Some((module, source_path)) = module_entries.split_once("/Scripts/thoth/")
+                else {
+                    return false;
+                };
+                !module.is_empty()
+                    && module != "."
+                    && module != ".."
+                    && !module.contains('/')
+                    && !module.contains('\\')
+                    && !module.chars().any(char::is_control)
+                    && source_path.ends_with(".khn")
+                    && !source_path.contains('\\')
+                    && !source_path.chars().any(char::is_control)
+                    && source_path
+                        .split('/')
+                        .all(|part| !part.is_empty() && part != "." && part != "..")
+            })
+            .collect()
+    }
+
     /// Reads and optionally decompresses one entry with a strict allocation
     /// limit. No unrelated entry data is read.
     pub fn read_entry(
@@ -664,6 +696,52 @@ mod tests {
         assert_eq!(reader.read_entry(entries[2], 32).unwrap(), b"duplicate");
         assert_eq!(reader.thoth_entries("Other").unwrap().len(), 1);
         assert!(reader.thoth_entries("Configured/Other").is_err());
+
+        let all_entries = reader.all_thoth_entries();
+        assert_eq!(all_entries.len(), 4);
+        assert_eq!(
+            all_entries
+                .iter()
+                .map(|entry| entry.name())
+                .collect::<Vec<_>>(),
+            vec![
+                "Mods/Configured/Scripts/thoth/helpers/First.khn",
+                "Mods/Other/Scripts/thoth/Other.khn",
+                "Mods/Configured/Scripts/thoth/helpers/Second.khn",
+                "Mods/Configured/Scripts/thoth/helpers/First.khn",
+            ]
+        );
+    }
+
+    #[test]
+    fn all_thoth_entries_rejects_near_matches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("near-matches.pak");
+        fs::write(
+            &path,
+            synthetic_package(
+                &[
+                    ("Mods/One/Scripts/thoth/Valid.khn", b"valid", 0),
+                    ("Mods/Two/Scripts/thoth", b"directory", 0),
+                    ("Mods/Three/Scripts/thoth/NoExtension", b"plain", 0),
+                    ("Mods/Four/Scripts/other/NotThoth.khn", b"other", 0),
+                    ("Mods/Five/Other/Scripts/thoth/NotAModule.khn", b"nested", 0),
+                    ("Public/Scripts/thoth/Outside.khn", b"outside", 0),
+                ],
+                0,
+            ),
+        )
+        .unwrap();
+
+        let reader = PackageReader::open(&path).unwrap();
+        assert_eq!(
+            reader
+                .all_thoth_entries()
+                .iter()
+                .map(|entry| entry.name())
+                .collect::<Vec<_>>(),
+            vec!["Mods/One/Scripts/thoth/Valid.khn"]
+        );
     }
 
     #[test]

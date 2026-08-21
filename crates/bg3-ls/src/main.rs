@@ -15,8 +15,8 @@ use std::time::Instant;
 use bg3_ide::{DiagnosticSeverity, OverlaySet, WorkspaceSnapshot, definition_target};
 use bg3_index::{
     CacheStats, CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SourceKind,
-    THOTH_FACTS_EXTRACTOR_VERSION, discover_module, packaged_thoth_package_candidates,
-    parse_thoth_file, read_packaged_thoth_catalog,
+    THOTH_FACTS_EXTRACTOR_VERSION, discover_module, inventory_packaged_thoth,
+    packaged_thoth_package_candidates, parse_thoth_file, read_packaged_thoth_catalog,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -50,6 +50,8 @@ enum Command {
     Benchmark(BenchmarkOptions),
     /// Checks project Stats, Osiris, and Thoth files without an LSP client.
     Check(CheckOptions),
+    /// Reports aggregate installed packaged-Thoth source coverage as JSON.
+    Inventory(InventoryOptions),
     /// Converts one loose BG3 resource between binary LSF and textual LSX.
     Convert(conversion::Options),
 }
@@ -66,6 +68,14 @@ struct CheckOptions {
     /// Selects the minimum severity that produces exit code 1.
     #[arg(long, value_enum, default_value = "error")]
     fail_on: FailOn,
+}
+
+/// Inputs for an aggregate-only installed packaged-Thoth inventory.
+#[derive(Clone, Debug, clap::Args)]
+struct InventoryOptions {
+    /// Absolute BG3 Data directory to inspect without extracting package entries.
+    #[arg(long)]
+    game_data: PathBuf,
 }
 
 /// Output encodings supported by the diagnostic command.
@@ -225,6 +235,21 @@ fn run_command(command: Command, cache_dir: Option<PathBuf>) -> Result<ExitCode,
             Ok(ExitCode::SUCCESS)
         }
         Command::Check(options) => run_check(options, open_cache(cache_dir)?),
+        Command::Inventory(options) => {
+            let game_data = fs::canonicalize(&options.game_data)?;
+            if !game_data.is_dir() {
+                return Err(Error::Config(
+                    "inventory game_data must be a directory".into(),
+                ));
+            }
+            let inventory = inventory_packaged_thoth(&game_data)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&inventory)
+                    .map_err(|error| Error::Protocol(error.to_string()))?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Convert(options) => {
             conversion::convert(&options)?;
             Ok(ExitCode::SUCCESS)

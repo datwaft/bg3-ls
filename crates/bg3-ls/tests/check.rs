@@ -200,3 +200,35 @@ fn reports_configuration_failure_with_exit_code_two() {
             .contains("cannot find bg3-ls.json")
     );
 }
+
+#[test]
+fn inventories_an_empty_data_directory_without_workspace_configuration() {
+    let data = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_bg3-ls"))
+        .arg("inventory")
+        .arg("--game-data")
+        .arg(data.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!({
+            "package_files": 0,
+            "rejected_packages": 0,
+            "thoth_entries": 0,
+            "parsed_sources": 0,
+            "rejected_sources": 0,
+            "declared_source_bytes": 0,
+            "functions": 0,
+            "classes": 0,
+            "aliases": 0,
+            "fields": 0,
+            "function_annotations": 0,
+            "duplicate_functions": 0,
+            "equal_priority_function_conflicts": 0,
+            "modules": {},
+        })
+    );
+}
