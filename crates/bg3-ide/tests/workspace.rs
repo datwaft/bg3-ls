@@ -1775,7 +1775,8 @@ data "Boosts" "ObjectSize(+2)"
         )
         .unwrap();
 
-    assert!(hover.contains("**Boosts:** `ObjectSize(+2)`"));
+    assert!(hover.contains("```bg3_stats"));
+    assert!(hover.contains("data \"Boosts\" \"ObjectSize(+2)\""));
     assert!(hover.contains("\n\n---\n\n### Game text preview"));
     assert!(hover.contains("**Test action & label**"), "{hover}");
     assert!(hover.contains("Synthetic description"));
@@ -1783,6 +1784,100 @@ data "Boosts" "ObjectSize(+2)"
     assert!(hover.contains("Description parameters: `Distance(3)`"));
     assert!(hover.contains("Game logic and UI formatting are not evaluated"));
     assert!(hover.contains("**Override chain**"));
+}
+
+#[test]
+fn hover_reconstructs_stats_entries_with_order_clamps_and_comments() {
+    let (workspace, path) = fixture_workspace(200);
+    let catalog = LocalizationCatalog::from_entries(
+        "English",
+        [
+            (
+                "h11111111111111111111111111111111".into(),
+                1,
+                "Main Hand Attack".into(),
+            ),
+            (
+                "h22222222222222222222222222222222".into(),
+                2,
+                "Make a melee attack.<br>Second line".into(),
+            ),
+        ],
+    )
+    .unwrap();
+    let workspace = workspace.with_base_localization(Arc::new(catalog));
+    let spell_path = path.with_file_name("Spell_MAIN.txt");
+    let long_properties =
+        "GROUND:DealDamage(MainMeleeWeapon, MainMeleeWeaponDamageType);GROUND:ExecuteWeaponFunctors(MainHand);"
+            .repeat(3);
+    let text = format!(
+        "new entry \"Target_Test\"\ntype \"SpellData\"\ndata \"UseCosts\" \"ActionPoint:1\"\ndata \"SpellProperties\" \"{long_properties}\"\ndata \"DisplayName\" \"h11111111111111111111111111111111;1\"\ndata \"Description\" \"h22222222222222222222222222222222;2\"\n"
+    );
+    let overlays = overlay(&workspace, &spell_path, &text);
+    let hover = workspace
+        .hover(
+            &spell_path,
+            Position {
+                line: 0,
+                character: 13,
+            },
+            &overlays,
+        )
+        .unwrap();
+
+    assert!(hover.contains("```bg3_stats\n"), "{hover}");
+    assert!(
+        hover.contains("new entry \"Target_Test\"\ntype \"SpellData\""),
+        "{hover}"
+    );
+    let use_costs = hover.find("data \"UseCosts\"").unwrap();
+    let properties = hover.find("data \"SpellProperties\"").unwrap();
+    let display_name = hover.find("data \"DisplayName\"").unwrap();
+    assert!(
+        use_costs < properties && properties < display_name,
+        "{hover}"
+    );
+    assert!(
+        hover.contains(
+            "data \"SpellProperties\" \"GROUND:DealDamage(MainMeleeWeapon, MainMeleeWeaponDamageType);GROUND:ExecuteWeaponFunctors(MainHand);…\""
+        ),
+        "{hover}"
+    );
+    assert!(!hover.contains(&long_properties), "{hover}");
+    assert!(
+        hover.contains("// Main Hand Attack\ndata \"DisplayName\""),
+        "{hover}"
+    );
+    assert!(
+        hover.contains("// Make a melee attack.\n// Second line\ndata \"Description\""),
+        "{hover}"
+    );
+
+    let animation_path = path.with_file_name("Spell_ANIMATED.txt");
+    let animation_text = "new entry \"Animated\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"DealDamage(MainMeleeWeapon, MainMeleeWeaponDamageType)\"\ndata \"SpellAnimation\" \"8b8bb757-21ce-4e02-a2f3-97d55cf2f90b,,;6606c30b-be1c-4f17-ae6b-1a591c80b18c,366693ee-d97f-4294-a4dd-a2145ddc4e6a,9f2d32b9-529a-4b75-b3df-6e1ae1395280;\"\ndata \"CastEffect\" \"8682067a-e523-40fb-b705-3112083b6b05\"\n";
+    let animation_overlays = overlay(&workspace, &animation_path, animation_text);
+    let animation_hover = workspace
+        .hover(
+            &animation_path,
+            Position {
+                line: 0,
+                character: 13,
+            },
+            &animation_overlays,
+        )
+        .unwrap();
+    assert!(
+        !animation_hover.contains("data \"SpellAnimation\""),
+        "{animation_hover}"
+    );
+    assert!(
+        !animation_hover.contains("data \"CastEffect\""),
+        "{animation_hover}"
+    );
+    assert!(
+        animation_hover.contains("// … 2 hidden presentation fields"),
+        "{animation_hover}"
+    );
 }
 
 #[test]

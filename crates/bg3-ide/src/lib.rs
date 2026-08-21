@@ -14,8 +14,9 @@ use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, OSIRIS_DATABASE_KIND,
     OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
     PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position,
-    Reference, SchemaCatalog, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND,
-    TextRange, ThothFile, TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
+    Reference, SchemaCatalog, SourceKind, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION,
+    THOTH_FUNCTION_KIND, TextRange, ThothFile, TooltipCatalog, canonical_kind,
+    parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -382,29 +383,38 @@ impl WorkspaceSnapshot {
             "**{heading}** `{}`\n\nModule: `{}`",
             effective.definition.name, effective.module
         );
-        if let Some(uuid) = effective.definition.uuid {
-            markdown.push_str(&format!("\n\nUUID: `{uuid}`"));
-        }
-        if let Some(parent) = &effective.definition.parent {
-            markdown.push_str(&format!("\n\nParent: `{parent}`"));
-        }
-        if matches!(
-            effective.definition.kind.as_str(),
-            THOTH_FUNCTION_KIND | OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND
-        ) {
-            let parameters = effective
-                .definition
-                .fields
-                .get("Parameters")
-                .map_or("", String::as_str);
-            markdown.push_str(&format!(
-                "\n\nSignature: `{}({parameters})`",
-                effective.definition.name
-            ));
-        }
-        for key in ["DisplayName", "Description", "Text", "Boosts"] {
-            if let Some(value) = effective.definition.fields.get(key) {
-                markdown.push_str(&format!("\n\n- **{key}:** `{value}`"));
+        if let Some(block) = self.stats_source_block(effective, overlays) {
+            markdown.push_str(&block);
+        } else {
+            if let Some(uuid) = effective.definition.uuid {
+                markdown.push_str(&format!("\n\nUUID: `{uuid}`"));
+            }
+            if let Some(parent) = &effective.definition.parent {
+                markdown.push_str(&format!("\n\nParent: `{parent}`"));
+            }
+            if matches!(
+                effective.definition.kind.as_str(),
+                THOTH_FUNCTION_KIND | OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND
+            ) {
+                let parameters = effective
+                    .definition
+                    .fields
+                    .get("Parameters")
+                    .map_or("", String::as_str);
+                markdown.push_str(&format!(
+                    "\n\nSignature: `{}({parameters})`",
+                    effective.definition.name
+                ));
+            }
+            let signature_kind = matches!(
+                effective.definition.kind.as_str(),
+                THOTH_FUNCTION_KIND | OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND
+            );
+            for (key, value) in &effective.definition.fields {
+                if signature_kind && key == "Parameters" {
+                    continue;
+                }
+                markdown.push_str(&format!("\n\n- **{key}:** {}", field_value_markdown(value)));
             }
         }
         markdown.push_str(&format!("\n\nSource: `{}`", effective.path.display()));
@@ -665,6 +675,95 @@ impl WorkspaceSnapshot {
                     .get(handle)
                     .map(|value| value.text.to_owned())
             })
+    }
+
+    /// Renders one legacy Stats declaration as its reconstructed source block.
+    ///
+    /// The block keeps the original field order and resolves localized handles
+    /// into comment lines, so editors with the `tree-sitter-bg3` queries
+    /// highlight it exactly like a Stats file. Only `new entry` declarations
+    /// use this shape; named blocks and other source formats keep the field
+    /// list.
+    fn stats_source_block(
+        &self,
+        effective: &ResolvedDefinition,
+        overlays: &OverlaySet,
+    ) -> Option<String> {
+        let (_, file) = self.file(&effective.path, overlays)?;
+        if file.source.kind != SourceKind::PlainStats
+            || NAMED_BLOCK_KINDS.contains(&effective.definition.kind.as_str())
+        {
+            return None;
+        }
+        let mut ordered: Vec<_> = effective.definition.fields.iter().collect();
+        ordered.sort_by(|(left, _), (right, _)| {
+            let position = |key: &String| {
+                effective
+                    .definition
+                    .field_ranges
+                    .get(key)
+                    .map(|range| (range.start.line, range.start.character))
+            };
+            match (position(left), position(right)) {
+                (Some(left_position), Some(right_position)) => left_position.cmp(&right_position),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => left.cmp(right),
+            }
+        });
+        let mut lines = vec![format!("new entry \"{}\"", effective.definition.name)];
+        if effective.definition.kind != "StatEntry" {
+            lines.push(format!("type \"{}\"", effective.definition.kind));
+        }
+        if let Some(parent) = &effective.definition.parent {
+            lines.push(format!("using \"{parent}\""));
+        }
+        let mut hidden = 0usize;
+        for (key, value) in ordered {
+            if matches!(key.as_str(), "DisplayName" | "Description") {
+                for comment in self.localization_comment_lines(value, overlays) {
+                    lines.push(format!("// {comment}"));
+                }
+            }
+            if PRESENTATION_ONLY_FIELDS.contains(&key.as_str()) {
+                hidden += 1;
+                continue;
+            }
+            lines.push(format!("data \"{key}\" \"{}\"", clamp_stats_value(value)));
+        }
+        if hidden > 0 {
+            lines.push(format!("// … {hidden} hidden presentation fields"));
+        }
+        let fence_length = lines
+            .iter()
+            .map(|line| longest_backtick_run(line))
+            .chain([2])
+            .max()
+            .unwrap_or(2)
+            + 1;
+        let fence = "`".repeat(fence_length);
+        let mut block = String::from("\n\n");
+        block.push_str(&fence);
+        block.push_str("bg3_stats\n");
+        for line in &lines {
+            block.push_str(line);
+            block.push('\n');
+        }
+        block.push_str(&fence);
+        Some(block)
+    }
+
+    /// Resolves one translated-string field value into single-line comments.
+    fn localization_comment_lines(&self, value: &str, overlays: &OverlaySet) -> Vec<String> {
+        let Some(text) = self.localized_value(value, overlays) else {
+            return Vec::new();
+        };
+        render_localized_text(&text)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Finds references to the symbol under one position across visible modules.
@@ -1006,20 +1105,94 @@ fn render_localized_text(source: &str) -> String {
     markdown
 }
 
-/// Wraps raw source in a Markdown fence that cannot collide with its backticks.
-fn markdown_inline_code(source: &str) -> String {
-    let longest_run = source
+/// Returns the length of the longest backtick run in one source string.
+fn longest_backtick_run(source: &str) -> usize {
+    source
         .split(|character| character != '`')
         .map(str::len)
         .max()
-        .unwrap_or(0);
-    let fence = "`".repeat(longest_run + 1);
+        .unwrap_or(0)
+}
+
+/// Wraps raw source in a Markdown fence that cannot collide with its backticks.
+fn markdown_inline_code(source: &str) -> String {
+    let fence = "`".repeat(longest_backtick_run(source) + 1);
     let padding = if source.starts_with(['`', ' ']) || source.ends_with(['`', ' ']) {
         " "
     } else {
         ""
     };
     format!("{fence}{padding}{source}{padding}{fence}")
+}
+
+/// Maximum rendered characters before one stored field value is elided.
+const MAX_RENDERED_FIELD_CHARACTERS: usize = 160;
+
+/// Legacy Stats declarations whose header shape is not `new entry`.
+const NAMED_BLOCK_KINDS: [&str; 5] = [
+    "TreasureTable",
+    "Equipment",
+    "SpellSet",
+    "ItemGroup",
+    "NameGroup",
+];
+
+/// Stats fields that describe presentation, not inspectable behavior.
+const PRESENTATION_ONLY_FIELDS: [&str; 8] = [
+    "CastEffect",
+    "DualWieldingSpellAnimation",
+    "HitAnimationType",
+    "PreviewCursor",
+    "Sheathing",
+    "SpellAnimation",
+    "SpellAnimationIntentType",
+    "SpellSoundMagnitude",
+];
+
+/// Renders one stored field value and elides values that would dominate hover.
+///
+/// The complete value stays available through definition navigation, so the
+/// elision note only marks how much of the stored value is hidden.
+fn field_value_markdown(value: &str) -> String {
+    let total = value.chars().count();
+    if total <= MAX_RENDERED_FIELD_CHARACTERS {
+        return markdown_inline_code(value);
+    }
+    let rendered: String = value.chars().take(MAX_RENDERED_FIELD_CHARACTERS).collect();
+    format!(
+        "{}… *({} more characters)*",
+        markdown_inline_code(&rendered),
+        total - MAX_RENDERED_FIELD_CHARACTERS
+    )
+}
+
+/// Cuts one stored Stats value after its last complete top-level statement.
+///
+/// Elision appends the Unicode ellipsis character, which `tree-sitter-bg3`
+/// 0.5.0 accepts as a placeholder, so the fragment stays valid Stats-value
+/// syntax for editor highlighting. A value without a depth-zero `;` cut point
+/// renders only the ellipsis instead of broken syntax.
+fn clamp_stats_value(value: &str) -> String {
+    if value.chars().count() <= MAX_RENDERED_FIELD_CHARACTERS {
+        return value.to_owned();
+    }
+    let mut depth = 0usize;
+    let mut cut = None;
+    for (rendered, (end, character)) in value.char_indices().enumerate() {
+        if rendered >= MAX_RENDERED_FIELD_CHARACTERS {
+            break;
+        }
+        match character {
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
+            ';' if depth == 0 => cut = Some(end + character.len_utf8()),
+            _ => {}
+        }
+    }
+    match cut {
+        Some(cut) => format!("{}…", &value[..cut]),
+        None => "…".to_owned(),
+    }
 }
 
 #[cfg(test)]
