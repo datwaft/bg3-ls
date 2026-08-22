@@ -89,6 +89,12 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.16.0 adds curated hover and statement-start completion for functor
+execution-position prefixes such as `GROUND:`, `TARGET:`, and the documented
+`IF(condition):` conditional form. Curated vocabulary now sorts ahead of
+observed evidence in capped completion lists. Existing configuration remains
+compatible, and no migration is required.
+
 Version 0.15.0 adds curated hover and completion for built-in Stats context
 properties such as `MainMeleeWeapon`, `StrengthModifier`, and skill checks.
 The catalog combines documented Stats expression keywords with weapon context
