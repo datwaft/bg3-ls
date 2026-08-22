@@ -16,7 +16,8 @@ use bg3_ide::{DiagnosticSeverity, OverlaySet, WorkspaceSnapshot, definition_targ
 use bg3_index::{
     CacheStats, CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SourceKind,
     THOTH_FACTS_EXTRACTOR_VERSION, discover_module, inventory_packaged_thoth,
-    packaged_thoth_package_candidates, parse_thoth_file, read_packaged_thoth_catalog,
+    packaged_thoth_package_candidates, parse_thoth_file, read_packaged_stats_catalog_from_packages,
+    read_packaged_thoth_catalog,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -503,6 +504,7 @@ struct BenchmarkReport {
     packaged_thoth_sources: usize,
     packaged_thoth_bytes: usize,
     packaged_thoth_packages: usize,
+    packaged_stats_declarations: usize,
     cold: MillisecondDistribution,
     warm: MillisecondDistribution,
     warm_cache_hit_rate: f64,
@@ -579,6 +581,7 @@ fn run_benchmark(options: BenchmarkOptions, cache: CacheStore) -> Result<Benchma
         .map(|source| source.package())
         .collect::<HashSet<_>>()
         .len();
+    let packaged_stats_declarations = workspace.packaged_stats_count();
     let total = warm_hits + warm_misses;
     Ok(BenchmarkReport {
         trials: options.trials,
@@ -590,6 +593,7 @@ fn run_benchmark(options: BenchmarkOptions, cache: CacheStore) -> Result<Benchma
         packaged_thoth_sources,
         packaged_thoth_bytes,
         packaged_thoth_packages,
+        packaged_stats_declarations,
         cold: MillisecondDistribution {
             p50: percentile(&mut cold, 50),
             p95: percentile(&mut cold, 95),
@@ -745,6 +749,20 @@ fn build_workspace(
     } else {
         totals.misses += 1;
     }
+    let (packaged_stats_catalog, stats_hit) =
+        cache.load_packaged_stats(&base_modules, &package_candidates, || {
+            read_packaged_stats_catalog_from_packages(
+                &package_candidates,
+                &base_modules,
+                &schema,
+                language,
+            )
+        })?;
+    if stats_hit {
+        totals.hits += 1;
+    } else {
+        totals.misses += 1;
+    }
     Ok((
         WorkspaceSnapshot::new(
             schema,
@@ -755,6 +773,7 @@ fn build_workspace(
         )
         .with_packaged_thoth(Arc::new(packaged_thoth))
         .with_packaged_thoth_facts(Arc::new(packaged_thoth_facts))
+        .with_packaged_stats(Arc::new(packaged_stats_catalog))
         .with_incomplete_kinds(incomplete_kinds.iter().copied()),
         totals,
     ))
