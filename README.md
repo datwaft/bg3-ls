@@ -88,6 +88,13 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.14.0 indexes Stats declarations from configured base-module
+packages, so references to base-game spells, statuses, passives, and items
+resolve for hover, completion, and load-order-aware precedence without
+manually unpacking packages. Packaged origins have no navigable source
+location. Existing configuration remains compatible, and no migration is
+required. This release uses `tree-sitter-bg3` 0.5.0.
+
 Version 0.13.0 renders legacy Stats declarations in hover as highlighted
 `bg3_stats` source blocks with resolved display-name and description comments,
 hides presentation-only fields behind a count comment, elides values longer
@@ -243,6 +250,8 @@ The server reads:
 - Stats and UUID-object enumeration catalogs;
 - Toolkit `.stats` and `.tbl` files;
 - legacy `Public/*/Stats/Generated/Data/*.txt` files;
+- Stats entries of configured base modules read from their module package and
+  top-level patch packages;
 - relevant loose `.lsx` resources below `Public` and `Mods`;
 - loose `Mods/<module>/Scripts/thoth/**/*.khn` helpers;
 - `Mods/<configured-module>/Scripts/thoth/**/*.khn` helpers selected from each
@@ -263,7 +272,10 @@ sheathing, and cursor fields) are hidden behind a count comment. A value
 longer than 160 characters is cut after its last complete top-level `;`
 statement and ends with an ellipsis placeholder that `tree-sitter-bg3` 0.5.0
 accepts; definition navigation always opens the complete source declaration.
-Other source formats list every stored field as Markdown bullets. When an
+Packaged base-module declarations render the same block and add a package
+entry line, but they have no navigable location because their source lives
+inside an archive. Other source formats list every stored field as Markdown
+bullets. When an
 effective Stats declaration has `DisplayName`, `Description`, or
 `DescriptionParams`, hover adds a static game-text preview after a divider.
 The preview resolves `using` inheritance and module overrides. Loose

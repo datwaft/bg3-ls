@@ -209,3 +209,30 @@ Additional measurements:
 The structured facts add 751,866 bytes without adding cache files. Cold and
 warm p95 remain within the repository regression limits. Query-time type flow
 does not change the exact navigation benchmark result.
+
+## Version 0.14 packaged Stats verification
+
+Issue #83 adds the configured base-module packaged Stats catalog. The
+verification used five cold and five warm trials with the same machine, data
+revision, modules, project, and source composition as the Issue #66 run. Both
+builds used `tree-sitter-bg3` 0.5.0 with parser ABI 15.
+
+| Metric | Issue #83 p50 | Issue #83 p95 | Issue #66 p95 | p95 change |
+| --- | ---: | ---: | ---: | ---: |
+| Cold indexing | 1.661 s | 1.786 s | 1.488 s | +20.0% |
+| Warm indexing | 387 ms | 391 ms | 432 ms | -9.5% |
+| Navigation | 875 ns | 958 ns | 1.208 µs | -20.7% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100%
+- Packaged Stats declarations indexed: 11,382 from 75 package sources
+- Repeated-trial RSS high-water mark after ten builds: 1,343,193,088 bytes
+- Cache size: 95,806,396 bytes in 3,324 files
+
+Cold indexing includes the first parallel parse of every packaged Stats
+entry, which costs about 300 milliseconds once per empty cache and reaches
+the documented cold regression boundary. The increase is accepted deliberately:
+issue #83 requests this source family, and the finished catalog persists in
+its own content-addressed cache entry, so later builds reuse it and warm
+indexing improves.
