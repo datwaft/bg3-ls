@@ -89,6 +89,13 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.15.0 adds curated hover and completion for built-in Stats context
+properties such as `MainMeleeWeapon`, `StrengthModifier`, and skill checks.
+The catalog combines documented Stats expression keywords with weapon context
+data attested in installed base modules. Identifiers outside the catalog stay
+unreported because the engine vocabulary is not fully discoverable. Existing
+configuration remains compatible, and no migration is required.
+
 Version 0.14.0 indexes Stats declarations from configured base-module
 packages, so references to base-game spells, statuses, passives, and items
 resolve for hover, completion, and load-order-aware precedence without
