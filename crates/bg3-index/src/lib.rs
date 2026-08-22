@@ -8,6 +8,7 @@ mod domain;
 mod localization;
 mod module;
 mod package;
+mod packaged_stats;
 mod parser;
 mod schema;
 mod thoth;
@@ -51,6 +52,11 @@ pub use localization::{
 };
 pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
 pub use package::{PackageEntry, PackageHeader, PackageReader};
+pub use packaged_stats::{
+    PackagedStatsCatalog, PackagedStatsDefinition, PackagedStatsResolution, PackagedStatsSource,
+    read_packaged_stats_catalog, read_packaged_stats_catalog_from_packages,
+    stats_module_from_entry,
+};
 pub use parser::{
     canonical_kind, is_uuid, parse_source, parse_thoth_file, schema_for_toolkit, schemas_for_plain,
 };
