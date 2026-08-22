@@ -622,6 +622,7 @@ fn completion_item(item: Bg3CompletionItem) -> CompletionItem {
         }),
         detail: item.detail,
         documentation: item.documentation.map(Documentation::String),
+        sort_text: item.sort_text,
         text_edit: Some(CompletionTextEdit::Edit(TextEdit {
             range: to_lsp_range(item.range),
             new_text: item.new_text,

@@ -14,8 +14,8 @@ The server provides:
 
 - ordered Go to Definition results for complete override chains;
 - hover information for declarations, schema fields, enum values, functions,
-  built-in Stats context properties, resources, localization, and static
-  game-text previews;
+  built-in Stats context properties, functor execution prefixes, resources,
+  localization, and static game-text previews;
 - references, document symbols, and workspace symbols;
 - schema-aware completion with snippet support;
 - verified signature help for curated Stats functions and declared Thoth helpers;
@@ -88,6 +88,12 @@ written. A failed conversion does not change an existing destination.
 
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
+
+Version 0.16.0 adds curated hover and statement-start completion for functor
+execution-position prefixes such as `GROUND:`, `TARGET:`, and the documented
+`IF(condition):` conditional form. Curated vocabulary now sorts ahead of
+observed evidence in capped completion lists. Existing configuration remains
+compatible, and no migration is required.
 
 Version 0.15.0 adds curated hover and completion for built-in Stats context
 properties such as `MainMeleeWeapon`, `StrengthModifier`, and skill checks.
@@ -307,6 +313,15 @@ keywords, including ability and skill suffix forms such as
 attested inside installed base-module functor arguments. Identifiers outside
 the catalog stay unreported because the engine vocabulary is not fully
 discoverable.
+
+Functor execution-position prefixes such as `GROUND:` or `TARGET:` resolve to
+curated hover on the prefix word, and value completion offers them at functor
+statement starts, after a top-level `;` or at the beginning of the value. The
+catalog covers position selectors, the AI flags, the difficulty tiers, and
+the documented `IF(condition):` conditional form, all attested inside
+installed base-module statements. Prefixes compose, so hover describes each
+word separately. Uncataloged prefixes stay unreported for the same reason as
+context properties.
 
 Open Stats, LSX, Thoth, and Osiris files replace their disk records with
 unsaved overlays. Closing a buffer restores its disk record. Thoth helper

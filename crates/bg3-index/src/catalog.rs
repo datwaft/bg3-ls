@@ -190,7 +190,115 @@ const fn targeted_function(
     }
 }
 
-/// One built-in Stats context property that the engine resolves at evaluation.
+/// One curated functor statement prefix.
+#[derive(Clone, Copy, Debug)]
+pub struct FunctorPrefixSpec {
+    pub name: &'static str,
+    pub kind: &'static str,
+    pub documentation: &'static str,
+}
+
+/// Functor execution-position prefixes attested as vanilla statement heads.
+///
+/// Every entry appears before a `:` at the head of one or more installed
+/// base-module functor statements. Prefixes compose, for example
+/// `AOE:IF(not SavingThrow(...)):DealDamage(...)`.
+const FUNCTOR_PREFIXES: &[FunctorPrefixSpec] = &[
+    prefix(
+        "GROUND",
+        "position selector",
+        "Runs the following functors at the ground position where the effect lands.",
+    ),
+    prefix(
+        "TARGET",
+        "position selector",
+        "Runs the following functors against the spell target.",
+    ),
+    prefix(
+        "SELF",
+        "position selector",
+        "Runs the following functors on the caster.",
+    ),
+    prefix(
+        "CAST",
+        "position selector",
+        "Runs the following functors on the caster.",
+    ),
+    prefix(
+        "AOE",
+        "position selector",
+        "Runs the following functors from the center of the spell area.",
+    ),
+    prefix(
+        "PROJECTILE",
+        "position selector",
+        "Runs the following functors at the projectile position.",
+    ),
+    prefix(
+        "AI_ONLY",
+        "AI flag",
+        "Runs the following functors only when AI controls the caster.",
+    ),
+    prefix(
+        "AI_IGNORE",
+        "AI flag",
+        "Skips the following functors when AI controls the caster.",
+    ),
+    prefix(
+        "STATUS_EASY",
+        "difficulty tier",
+        "Selects the functor variant used for the easy difficulty tier.",
+    ),
+    prefix(
+        "STATUS_NORMAL",
+        "difficulty tier",
+        "Selects the functor variant used for the normal difficulty tier.",
+    ),
+    prefix(
+        "STATUS_MEDIUM",
+        "difficulty tier",
+        "Selects the functor variant used for the medium difficulty tier.",
+    ),
+    prefix(
+        "STATUS_HARD",
+        "difficulty tier",
+        "Selects the functor variant used for the hard difficulty tier.",
+    ),
+    prefix(
+        "IF",
+        "conditional",
+        "Runs the following functor only when the Stats condition evaluates to true.",
+    ),
+];
+
+const fn prefix(
+    name: &'static str,
+    kind: &'static str,
+    documentation: &'static str,
+) -> FunctorPrefixSpec {
+    FunctorPrefixSpec {
+        name,
+        kind,
+        documentation,
+    }
+}
+
+/// Finds a curated functor statement prefix by its exact name.
+///
+/// Names outside the catalog stay unreported because new engine prefixes can
+/// appear between game patches.
+pub fn functor_prefix(name: &str) -> Option<&'static FunctorPrefixSpec> {
+    FUNCTOR_PREFIXES
+        .iter()
+        .find(|candidate| candidate.name == name)
+}
+
+/// Returns every curated functor statement prefix.
+pub fn functor_prefixes() -> impl Iterator<Item = &'static FunctorPrefixSpec> {
+    FUNCTOR_PREFIXES.iter()
+}
+
+/// Weapon context data attested inside vanilla functor arguments.
 #[derive(Clone, Debug)]
 pub struct ContextPropertySpec {
     pub name: String,

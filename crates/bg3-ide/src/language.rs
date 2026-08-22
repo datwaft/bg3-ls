@@ -8,7 +8,7 @@ use bg3_index::{
     PackagedThothApiSymbolKind, PackagedThothCatalog, Position, SchemaDefinition, SchemaField,
     SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
     ThothFunctionContract, context_properties, context_property, field_kind, function_spec,
-    is_lsx_value_field,
+    functor_prefix, functor_prefixes, is_lsx_value_field,
 };
 
 /// The semantic category of one completion result.
@@ -28,6 +28,9 @@ pub struct CompletionItem {
     pub detail: Option<String>,
     pub documentation: Option<String>,
     pub new_text: String,
+    /// Optional ranking key. Curated vocabulary sorts ahead of observed
+    /// evidence so the completion cap cannot drop it on large projects.
+    pub sort_text: Option<String>,
     pub range: TextRange,
     pub kind: CompletionKind,
     pub snippet: bool,
@@ -247,9 +250,11 @@ impl WorkspaceSnapshot {
         };
 
         items.sort_by(|left, right| {
-            left.label
+            let left_key = left.sort_text.as_ref().unwrap_or(&left.label);
+            let right_key = right.sort_text.as_ref().unwrap_or(&right.label);
+            left_key
                 .to_ascii_lowercase()
-                .cmp(&right.label.to_ascii_lowercase())
+                .cmp(&right_key.to_ascii_lowercase())
                 .then(left.detail.cmp(&right.detail))
         });
         let incomplete = items.len() > self.max_completion_items;
@@ -397,6 +402,12 @@ impl WorkspaceSnapshot {
             return Some(format!(
                 "**Context property** `{}`\n\nKind: {}\n\n{}",
                 property.name, property.kind, property.documentation
+            ));
+        }
+        if let Some(prefix) = functor_prefix(word) {
+            return Some(format!(
+                "**Functor prefix** `{}:`\n\nKind: {}\n\n{}",
+                prefix.name, prefix.kind, prefix.documentation
             ));
         }
         if let Some(data) = data_context(line)
@@ -603,11 +614,26 @@ impl WorkspaceSnapshot {
         }
 
         let mut items = Vec::new();
+        if is_functor_statement_head(
+            &value_before_cursor[..value_before_cursor.len() - prefix.len()],
+        ) {
+            for prefix_spec in functor_prefixes() {
+                if starts_with_case_insensitive(prefix_spec.name, prefix) {
+                    let mut item =
+                        basic_item(prefix_spec.name, prefix, position, CompletionKind::Value);
+                    item.detail = Some(prefix_spec.kind.to_owned());
+                    item.documentation = Some(prefix_spec.documentation.to_owned());
+                    item.sort_text = Some(curated_sort_text(prefix_spec.name));
+                    items.push(item);
+                }
+            }
+        }
         for function in FUNCTIONS {
             if starts_with_case_insensitive(function.name, prefix) {
                 let mut item =
                     basic_item(function.name, prefix, position, CompletionKind::Function);
                 item.documentation = Some(function.documentation.into());
+                item.sort_text = Some(curated_sort_text(function.name));
                 let form = function.default_form;
                 if snippets && !form.parameters.is_empty() {
                     let parameters = form
@@ -646,6 +672,7 @@ impl WorkspaceSnapshot {
                 let mut item = basic_item(&property.name, prefix, position, CompletionKind::Value);
                 item.detail = Some(property.kind.clone());
                 item.documentation = Some(property.documentation.clone());
+                item.sort_text = Some(curated_sort_text(&property.name));
                 items.push(item);
             }
         }
@@ -1915,6 +1942,7 @@ fn basic_item(
         detail: None,
         documentation: None,
         new_text: label.into(),
+        sort_text: None,
         range: TextRange {
             start: Position {
                 line: position.line,
@@ -1983,4 +2011,43 @@ fn word_at(line: &str, column: usize) -> Option<&str> {
         end += 1;
     }
     (start < end).then_some(&line[start..end])
+}
+
+/// Returns the ranking key that keeps curated vocabulary ahead of observed
+/// evidence in capped completion lists.
+fn curated_sort_text(name: &str) -> String {
+    format!("0{name}")
+}
+
+/// Returns whether only whitespace precedes the cursor since the last
+/// top-level functor statement boundary, so an execution-position prefix can
+/// be completed.
+///
+/// The scan tracks quotes because quoted localization handles and status names
+/// may contain semicolons that do not separate functor statements.
+fn is_functor_statement_head(head: &str) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut tail_start = 0;
+    for (index, character) in head.char_indices() {
+        match quote {
+            Some(open) => {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == open {
+                    quote = None;
+                }
+            }
+            None => match character {
+                '\'' | '"' => quote = Some(character),
+                ';' => tail_start = index + 1,
+                _ => {}
+            },
+        }
+    }
+    head[tail_start..]
+        .chars()
+        .all(|character| character.is_ascii_whitespace())
 }
