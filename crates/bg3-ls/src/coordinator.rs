@@ -7,11 +7,11 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use bg3_ide::WorkspaceSnapshot;
 use bg3_index::{
-    CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, PackagedThothCatalog,
-    PackagedThothFacts, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, ThothFile,
-    TooltipCatalog, base_tooltip_package_path, discover_module, module_watch_roots,
+    CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, PackagedStatsCatalog,
+    PackagedThothCatalog, PackagedThothFacts, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND,
+    ThothFile, TooltipCatalog, base_tooltip_package_path, discover_module, module_watch_roots,
     packaged_thoth_package_candidates, parse_packaged_thoth_facts, parse_thoth_file,
-    read_packaged_thoth_catalog,
+    read_packaged_stats_catalog_from_packages, read_packaged_thoth_catalog,
 };
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -53,6 +53,7 @@ pub struct IndexInfo {
     pub localizations: usize,
     pub tooltips: usize,
     pub packaged_thoth_sources: usize,
+    pub packaged_stats_declarations: usize,
     pub functions: usize,
     pub cache_hits: usize,
     pub cache_misses: usize,
@@ -271,15 +272,16 @@ impl Coordinator {
         } else {
             None
         };
+        let base_modules: Vec<_> = config
+            .modules
+            .iter()
+            .filter(|module| module.role == ModuleRole::Base)
+            .map(|module| module.name.clone())
+            .collect();
         let thoth_task = {
             let thoth_cache = cache.clone();
             let game_data = config.game_data.clone();
-            let base_modules: Vec<_> = config
-                .modules
-                .iter()
-                .filter(|module| module.role == ModuleRole::Base)
-                .map(|module| module.name.clone())
-                .collect();
+            let base_modules = base_modules.clone();
             tokio::task::spawn_blocking(move || {
                 let candidates = packaged_thoth_package_candidates(&game_data, &base_modules)?;
                 let (catalog, catalog_hit) =
@@ -314,6 +316,28 @@ impl Coordinator {
                 .report_with_message("Loaded schema metadata", 10)
                 .await;
         }
+        // Packaged Stats parsing needs the schema catalog but is independent
+        // from loose module parsing. Run it alongside the module builds.
+        let stats_task = {
+            let stats_cache = cache.clone();
+            let game_data = config.game_data.clone();
+            let base_modules = base_modules.clone();
+            let schema_for_stats = Arc::clone(&schema);
+            let language = config.language.clone();
+            tokio::task::spawn_blocking(move || {
+                let candidates = packaged_thoth_package_candidates(&game_data, &base_modules)?;
+                let (catalog, hit) =
+                    stats_cache.load_packaged_stats(&base_modules, &candidates, || {
+                        read_packaged_stats_catalog_from_packages(
+                            &candidates,
+                            &base_modules,
+                            &schema_for_stats,
+                            &language,
+                        )
+                    })?;
+                Ok::<_, Error>((catalog, hit))
+            })
+        };
 
         let base_localization = if affected.is_some() {
             previous
@@ -570,6 +594,45 @@ impl Coordinator {
             }
         }
 
+        let packaged_stats_catalog = match stats_task.await {
+            Ok(Ok((catalog, hit))) => {
+                if hit {
+                    cache_stats.hits += 1;
+                } else {
+                    cache_stats.misses += 1;
+                }
+                Arc::new(catalog)
+            }
+            Ok(Err(error)) => {
+                client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!(
+                            "BG3 packaged Stats sources are unavailable; keeping the previous catalog when possible: {error}"
+                        ),
+                    )
+                    .await;
+                previous.as_ref().map_or_else(
+                    || Arc::new(PackagedStatsCatalog::default()),
+                    |workspace| workspace.packaged_stats(),
+                )
+            }
+            Err(error) => {
+                client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!(
+                            "BG3 packaged-Stats task failed; keeping the previous catalog when possible: {error}"
+                        ),
+                    )
+                    .await;
+                previous.as_ref().map_or_else(
+                    || Arc::new(PackagedStatsCatalog::default()),
+                    |workspace| workspace.packaged_stats(),
+                )
+            }
+        };
+
         if let Some(progress) = progress {
             progress
                 .report_with_message("Publishing the complete workspace", 95)
@@ -588,6 +651,7 @@ impl Coordinator {
         .with_base_localization(base_localization)
         .with_packaged_thoth(packaged_thoth)
         .with_packaged_thoth_facts(packaged_thoth_facts)
+        .with_packaged_stats(packaged_stats_catalog)
         .with_tooltips(tooltips)
         .with_incomplete_kinds(incomplete_kinds);
         let info = index_info(&workspace, cache_stats);
@@ -668,7 +732,7 @@ impl Coordinator {
 
                 if paths
                     .iter()
-                    .any(|path| is_packaged_thoth_package(path, &config.game_data, &config.modules))
+                    .any(|path| is_packaged_base_package(path, &config.game_data, &config.modules))
                 {
                     coordinator
                         .rebuild_affected(Arc::clone(&config), &client, HashSet::new())
@@ -707,7 +771,7 @@ impl Coordinator {
 }
 
 /// Tests whether a top-level package can contribute configured base Thoth sources.
-fn is_packaged_thoth_package(
+fn is_packaged_base_package(
     path: &Path,
     game_data: &Path,
     modules: &[bg3_index::ModuleSpec],
@@ -736,6 +800,7 @@ fn index_info(workspace: &WorkspaceSnapshot, cache: CacheStats) -> IndexInfo {
         localizations: workspace.base_localization_count(),
         tooltips: workspace.tooltip_count(),
         packaged_thoth_sources: workspace.packaged_thoth_count(),
+        packaged_stats_declarations: workspace.packaged_stats_count(),
         cache_hits: cache.hits,
         cache_misses: cache.misses,
         ..IndexInfo::default()
@@ -764,7 +829,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packaged_thoth_events_accept_selected_top_level_packages_only() {
+    fn base_package_events_accept_selected_top_level_packages_only() {
         let game_data = Path::new("/game/Data");
         let modules = vec![
             bg3_index::ModuleSpec {
@@ -779,38 +844,38 @@ mod tests {
             },
         ];
 
-        assert!(is_packaged_thoth_package(
+        assert!(is_packaged_base_package(
             &game_data.join("Shared.pak"),
             game_data,
             &modules
         ));
-        assert!(is_packaged_thoth_package(
+        assert!(is_packaged_base_package(
             &game_data.join("Patch3.pak"),
             game_data,
             &modules
         ));
-        assert!(is_packaged_thoth_package(
+        assert!(is_packaged_base_package(
             &game_data.join("Patch.pak"),
             game_data,
             &modules
         ));
 
-        assert!(!is_packaged_thoth_package(
+        assert!(!is_packaged_base_package(
             &game_data.join("Dependency.pak"),
             game_data,
             &modules
         ));
-        assert!(!is_packaged_thoth_package(
+        assert!(!is_packaged_base_package(
             &game_data.join("Other.pak"),
             game_data,
             &modules
         ));
-        assert!(!is_packaged_thoth_package(
+        assert!(!is_packaged_base_package(
             &game_data.join("nested/Patch4.pak"),
             game_data,
             &modules
         ));
-        assert!(!is_packaged_thoth_package(
+        assert!(!is_packaged_base_package(
             &game_data.join("Shared.PAK"),
             game_data,
             &modules
