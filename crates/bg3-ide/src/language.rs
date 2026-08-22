@@ -830,6 +830,30 @@ impl WorkspaceSnapshot {
                 }
             }
         }
+        for candidate in self.packaged_stats.definitions_of_kind(kind) {
+            let definition = candidate.definition();
+            let label = match insertion {
+                SymbolInsertion::Name => definition.name.clone(),
+                SymbolInsertion::Alias | SymbolInsertion::Uuid => definition
+                    .aliases
+                    .iter()
+                    .find(|alias| starts_with_case_insensitive(alias, prefix))
+                    .cloned()
+                    .unwrap_or_else(|| definition.name.clone()),
+            };
+            if !starts_with_case_insensitive(&label, prefix) || !seen.insert(label.clone()) {
+                continue;
+            }
+            let mut item = basic_item(&label, prefix, position, CompletionKind::Reference);
+            item.new_text = match insertion {
+                SymbolInsertion::Name | SymbolInsertion::Alias => label,
+                SymbolInsertion::Uuid => definition
+                    .uuid
+                    .map_or_else(|| definition.name.clone(), |uuid| uuid.to_string()),
+            };
+            item.detail = Some(format!("{} (packaged)", candidate.source().module()));
+            items.push(item);
+        }
         items
     }
 

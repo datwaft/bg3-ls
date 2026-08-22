@@ -13,10 +13,10 @@ use std::sync::Arc;
 use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, OSIRIS_DATABASE_KIND,
     OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
-    PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position,
-    Reference, SchemaCatalog, SourceKind, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION,
-    THOTH_FUNCTION_KIND, TextRange, ThothFile, TooltipCatalog, canonical_kind,
-    parse_packaged_thoth_facts,
+    PackagedStatsCatalog, PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts,
+    ParsedFile, Position, Reference, SchemaCatalog, SourceKind, SymbolTarget,
+    THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothFile, TooltipCatalog,
+    canonical_kind, parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -34,6 +34,9 @@ pub struct ResolvedDefinition {
     pub path: PathBuf,
     pub definition: Definition,
     pub ambiguous: bool,
+    /// The package-relative entry name when this declaration originates from
+    /// a base-module package. Packaged origins have no editable location.
+    pub packaged_entry: Option<String>,
 }
 
 /// A source location returned by editor-neutral analysis operations.
@@ -118,6 +121,7 @@ pub struct WorkspaceSnapshot {
     base_localization: Arc<LocalizationCatalog>,
     packaged_thoth: Arc<PackagedThothCatalog>,
     packaged_thoth_facts: Arc<PackagedThothFacts<ThothFile>>,
+    packaged_stats: Arc<PackagedStatsCatalog>,
     packaged_thoth_api: Arc<PackagedThothApiIndex>,
     tooltips: Arc<TooltipCatalog>,
     incomplete_kinds: BTreeSet<String>,
@@ -150,6 +154,7 @@ impl WorkspaceSnapshot {
             base_localization: Arc::new(LocalizationCatalog::default()),
             packaged_thoth: Arc::new(PackagedThothCatalog::default()),
             packaged_thoth_facts: Arc::new(empty_packaged_thoth_facts()),
+            packaged_stats: Arc::new(PackagedStatsCatalog::default()),
             packaged_thoth_api: Arc::new(PackagedThothApiIndex::default()),
             tooltips: Arc::new(TooltipCatalog::default()),
             incomplete_kinds: BTreeSet::new(),
@@ -205,6 +210,23 @@ impl WorkspaceSnapshot {
     /// Shares immutable parsed facts extracted from installed Thoth packages.
     pub fn packaged_thoth_facts(&self) -> Arc<PackagedThothFacts<ThothFile>> {
         Arc::clone(&self.packaged_thoth_facts)
+    }
+
+    /// Adds immutable Stats declarations read from configured base-module
+    /// packages.
+    pub fn with_packaged_stats(mut self, catalog: Arc<PackagedStatsCatalog>) -> Self {
+        self.packaged_stats = catalog;
+        self
+    }
+
+    /// Returns the number of indexed packaged Stats declarations.
+    pub fn packaged_stats_count(&self) -> usize {
+        self.packaged_stats.len()
+    }
+
+    /// Shares the immutable packaged Stats catalog with a scoped rebuild.
+    pub fn packaged_stats(&self) -> Arc<PackagedStatsCatalog> {
+        Arc::clone(&self.packaged_stats)
     }
 
     /// Returns the number of installed package entries with parsed Thoth facts.
@@ -264,8 +286,13 @@ impl WorkspaceSnapshot {
     }
 
     /// Resolves every visible declaration from highest to lowest precedence.
+    ///
+    /// Packaged base-module declarations join the rank of their module, so a
+    /// loose declaration in the same base module stays a same-rank ambiguity
+    /// and every dependency or project override still wins.
     pub fn resolve(&self, target: &SymbolTarget, overlays: &OverlaySet) -> Vec<ResolvedDefinition> {
         let mut resolved = Vec::new();
+        let packaged = self.packaged_stats.candidates_for(target);
         for (rank, layer) in self.layers.iter().enumerate().rev() {
             let mut at_rank = Vec::new();
             for (path, overlay) in overlays.for_module(&layer.spec.name) {
@@ -277,6 +304,7 @@ impl WorkspaceSnapshot {
                             path: path.clone(),
                             definition: definition.clone(),
                             ambiguous: false,
+                            packaged_entry: None,
                         });
                     }
                 }
@@ -289,8 +317,22 @@ impl WorkspaceSnapshot {
                         path: record.path.as_ref().clone(),
                         definition: record.definition().clone(),
                         ambiguous: false,
+                        packaged_entry: None,
                     });
                 }
+            }
+            for candidate in packaged.iter() {
+                if candidate.source().module() != layer.spec.name {
+                    continue;
+                }
+                at_rank.push(ResolvedDefinition {
+                    module: layer.spec.name.clone(),
+                    rank,
+                    path: candidate.source().package().to_path_buf(),
+                    definition: candidate.definition().clone(),
+                    ambiguous: false,
+                    packaged_entry: Some(candidate.source().entry().to_owned()),
+                });
             }
             at_rank.sort_by(|left, right| {
                 left.path.cmp(&right.path).then_with(|| {
@@ -324,8 +366,9 @@ impl WorkspaceSnapshot {
 
     /// Returns navigable locations for the symbol under one source position.
     ///
-    /// Packaged Thoth members are virtual evidence and therefore return no
-    /// location instead of a fabricated archive-entry URI.
+    /// Packaged Thoth members and packaged Stats declarations are virtual
+    /// evidence and therefore return no location instead of a fabricated
+    /// archive-entry URI.
     pub fn definition_locations_at(
         &self,
         path: &Path,
@@ -337,6 +380,7 @@ impl WorkspaceSnapshot {
         }
         self.definitions_at(path, position, overlays)
             .into_iter()
+            .filter(|definition| definition.packaged_entry.is_none())
             .map(|definition| SourceLocation {
                 path: definition.path,
                 range: definition.definition.selection_range,
@@ -418,6 +462,9 @@ impl WorkspaceSnapshot {
             }
         }
         markdown.push_str(&format!("\n\nSource: `{}`", effective.path.display()));
+        if let Some(entry) = &effective.packaged_entry {
+            markdown.push_str(&format!("\n\nPackage entry: `{entry}`"));
+        }
         if definitions.len() > 1 {
             markdown.push_str("\n\n**Override chain**\n");
             for definition in &definitions {
@@ -689,10 +736,14 @@ impl WorkspaceSnapshot {
         effective: &ResolvedDefinition,
         overlays: &OverlaySet,
     ) -> Option<String> {
-        let (_, file) = self.file(&effective.path, overlays)?;
-        if file.source.kind != SourceKind::PlainStats
-            || NAMED_BLOCK_KINDS.contains(&effective.definition.kind.as_str())
-        {
+        let packaged = effective.packaged_entry.is_some();
+        if !packaged {
+            let (_, file) = self.file(&effective.path, overlays)?;
+            if file.source.kind != SourceKind::PlainStats {
+                return None;
+            }
+        }
+        if NAMED_BLOCK_KINDS.contains(&effective.definition.kind.as_str()) {
             return None;
         }
         let mut ordered: Vec<_> = effective.definition.fields.iter().collect();
@@ -802,6 +853,7 @@ impl WorkspaceSnapshot {
             locations.extend(
                 self.resolve(&target, overlays)
                     .into_iter()
+                    .filter(|definition| definition.packaged_entry.is_none())
                     .map(|definition| SourceLocation {
                         path: definition.path,
                         range: definition.definition.selection_range,

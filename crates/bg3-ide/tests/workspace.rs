@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use bg3_ide::{DiagnosticSeverity, OverlayDocument, OverlaySet, WorkspaceSnapshot};
 use bg3_index::{
-    LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, PackagedThothCatalog,
-    PackagedThothSource, Position, SchemaCatalog, SourceFile, SourceKind, SymbolTarget,
-    discover_module, parse_packaged_thoth_facts, parse_source, parse_thoth_file,
-    parse_tooltip_catalog,
+    LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, PackagedStatsCatalog,
+    PackagedStatsSource, PackagedThothCatalog, PackagedThothSource, Position, SchemaCatalog,
+    SourceFile, SourceKind, SymbolTarget, discover_module, parse_packaged_thoth_facts,
+    parse_source, parse_thoth_file, parse_tooltip_catalog,
 };
 
 fn fixtures() -> PathBuf {
@@ -1734,6 +1734,182 @@ fn hover_describes_enum_values_and_curated_functions() {
         )
         .unwrap();
     assert!(hover.contains("Applies a status"));
+}
+
+fn packaged_spell(
+    package: &str,
+    priority: u8,
+    name: &str,
+    schema: &SchemaCatalog,
+) -> PackagedStatsSource {
+    let entry = format!("Public/Shared/Stats/Generated/Data/Spell_{name}.txt");
+    let text =
+        format!("new entry \"{name}\"\ntype \"SpellData\"\ndata \"UseCosts\" \"ActionPoint:1\"\n");
+    PackagedStatsSource::new(
+        "Shared",
+        package,
+        entry.clone(),
+        priority,
+        parse_source(
+            SourceFile {
+                path: entry.into(),
+                kind: SourceKind::PlainStats,
+            },
+            &text,
+            schema,
+            "English",
+        )
+        .expect("synthetic packaged parse"),
+    )
+    .expect("synthetic packaged source")
+}
+
+#[test]
+fn packaged_base_declarations_resolve_hover_and_stay_unnavigable() {
+    let (workspace, path) = fixture_workspace(200);
+    let catalog = PackagedStatsCatalog::from_sources(vec![
+        packaged_spell("a.pak", 0, "SPELL_PACKED", &workspace.schema),
+        packaged_spell("b.pak", 0, "SPELL_TIED", &workspace.schema),
+        packaged_spell("c.pak", 0, "SPELL_TIED", &workspace.schema),
+    ])
+    .expect("packaged catalog");
+    let workspace = workspace.with_packaged_stats(Arc::new(catalog));
+
+    let consumer_path = path.with_file_name("Passive_PACKED.txt");
+    let text = "new entry \"CONSUMER\"\ntype \"PassiveData\"\ndata \"Boosts\" \"UseSpell(SPELL_PACKED);UseSpell(SPELL_TIED)\"\n";
+    let overlays = overlay(&workspace, &consumer_path, text);
+
+    let packed = workspace
+        .definitions_at(
+            &consumer_path,
+            source_position(text, "SPELL_PACKED"),
+            &overlays,
+        )
+        .pop()
+        .expect("packed resolution");
+    assert_eq!(packed.module, "Shared");
+    assert_eq!(packed.rank, 0);
+    assert_eq!(
+        packed.packaged_entry.as_deref(),
+        Some("Public/Shared/Stats/Generated/Data/Spell_SPELL_PACKED.txt")
+    );
+    assert!(!packed.ambiguous);
+
+    let tied = workspace
+        .definitions_at(
+            &consumer_path,
+            source_position(text, "SPELL_TIED"),
+            &overlays,
+        )
+        .pop()
+        .expect("tied resolution");
+    assert!(tied.ambiguous);
+
+    let hover = workspace
+        .hover(
+            &consumer_path,
+            source_position(text, "SPELL_PACKED"),
+            &overlays,
+        )
+        .expect("packaged hover");
+    assert!(hover.contains("```bg3_stats"), "{hover}");
+    assert!(hover.contains("new entry \"SPELL_PACKED\""), "{hover}");
+    assert!(
+        hover
+            .contains("Package entry: `Public/Shared/Stats/Generated/Data/Spell_SPELL_PACKED.txt`"),
+        "{hover}"
+    );
+    assert!(!hover.contains("- **UseCosts:**"), "{hover}");
+
+    assert!(
+        workspace
+            .definition_locations_at(
+                &consumer_path,
+                source_position(text, "SPELL_PACKED"),
+                &overlays
+            )
+            .is_empty()
+    );
+    let references = workspace.references_at(
+        &consumer_path,
+        source_position(text, "SPELL_PACKED"),
+        true,
+        &overlays,
+    );
+    assert!(
+        references
+            .iter()
+            .all(|location| location.path == consumer_path)
+    );
+}
+
+#[test]
+fn project_overrides_beat_packaged_base_declarations() {
+    let (workspace, path) = fixture_workspace(200);
+    let catalog = PackagedStatsCatalog::from_sources(vec![packaged_spell(
+        "a.pak",
+        0,
+        "SPELL_PACKED",
+        &workspace.schema,
+    )])
+    .expect("packaged catalog");
+    let workspace = workspace.with_packaged_stats(Arc::new(catalog));
+
+    let override_path = path.with_file_name("Spell_OVERRIDE.txt");
+    let override_text = "new entry \"SPELL_PACKED\"\ntype \"SpellData\"\ndata \"UseCosts\" \"BonusActionPoint:2\"\n";
+    let overlays = overlay(&workspace, &override_path, override_text);
+    let definitions = workspace.definitions_at(
+        &override_path,
+        source_position(override_text, "SPELL_PACKED"),
+        &overlays,
+    );
+    assert_eq!(definitions.len(), 2);
+    assert_eq!(definitions[0].rank, 2);
+    assert_eq!(definitions[0].packaged_entry, None);
+    assert_eq!(definitions[1].rank, 0);
+    assert!(definitions[1].packaged_entry.is_some());
+    assert!(!definitions[0].ambiguous && !definitions[1].ambiguous);
+
+    let locations = workspace.definition_locations_at(
+        &override_path,
+        source_position(override_text, "SPELL_PACKED"),
+        &overlays,
+    );
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].path, override_path);
+}
+
+#[test]
+fn completion_includes_packaged_base_symbols() {
+    let (workspace, path) = fixture_workspace(200);
+    let catalog = PackagedStatsCatalog::from_sources(vec![packaged_spell(
+        "a.pak",
+        0,
+        "SPELL_PACKED",
+        &workspace.schema,
+    )])
+    .expect("packaged catalog");
+    let workspace = workspace.with_packaged_stats(Arc::new(catalog));
+
+    let consumer_path = path.with_file_name("Passive_COMPLETE.txt");
+    let text = "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"UnlockSpell(\"\n";
+    let overlays = overlay(&workspace, &consumer_path, text);
+    let completion = workspace.completion(
+        &consumer_path,
+        Position {
+            line: 2,
+            character: u32::try_from(text.lines().nth(2).unwrap().len()).unwrap(),
+        },
+        &overlays,
+        false,
+    );
+    let item = completion
+        .items
+        .iter()
+        .find(|item| item.label == "SPELL_PACKED")
+        .expect("packaged completion");
+    assert_eq!(item.detail.as_deref(), Some("Shared (packaged)"));
+    assert_eq!(item.new_text, "SPELL_PACKED");
 }
 
 #[test]
