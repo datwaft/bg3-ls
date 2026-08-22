@@ -1,4 +1,4 @@
-use bg3_index::{context_properties, context_property};
+use bg3_index::{context_properties, context_property, functor_prefix, functor_prefixes};
 
 #[test]
 fn finds_documented_keywords_and_attested_weapon_data() {
@@ -50,4 +50,39 @@ fn lists_every_catalog_entry_for_completion() {
     let expected = 9 + 6 * 4 + 2 * 4 + 16 * 3;
     assert_eq!(context_properties().count(), expected);
     assert!(context_properties().any(|property| property.name == "SpellCastingAbilityModifier"));
+}
+
+#[test]
+fn finds_curated_functor_prefixes() {
+    let ground = functor_prefix("GROUND").expect("attested position selector");
+    assert_eq!(ground.kind, "position selector");
+    assert_eq!(
+        ground.documentation,
+        "Runs the following functors at the ground position where the effect lands."
+    );
+
+    let conditional = functor_prefix("IF").expect("attested conditional");
+    assert_eq!(conditional.kind, "conditional");
+
+    assert_eq!(
+        functor_prefix("AI_IGNORE").expect("AI flag").kind,
+        "AI flag"
+    );
+    assert_eq!(
+        functor_prefix("STATUS_HARD").expect("difficulty tier").kind,
+        "difficulty tier"
+    );
+}
+
+#[test]
+fn rejects_unknown_functor_prefixes() {
+    // Lowercase spellings stay uncataloged like every exact-name lookup.
+    assert!(functor_prefix("ground").is_none());
+    assert!(functor_prefix("NOT_A_PREFIX").is_none());
+    assert!(functor_prefix("Movement").is_none());
+}
+
+#[test]
+fn lists_every_functor_prefix() {
+    assert_eq!(functor_prefixes().count(), 13);
 }

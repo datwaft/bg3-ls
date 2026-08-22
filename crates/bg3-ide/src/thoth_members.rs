@@ -64,6 +64,7 @@ impl WorkspaceSnapshot {
                         detail: Some(field.ty.to_string()),
                         documentation: Some(field.provenance.join("\n\n")),
                         new_text: field.name,
+                        sort_text: None,
                         range: context.segments[context.target].range,
                         kind,
                         snippet: false,

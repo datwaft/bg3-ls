@@ -30,8 +30,9 @@ pub use annotation::{
 };
 pub use cache::{CacheStats, CacheStore};
 pub use catalog::{
-    ContextPropertySpec, FUNCTIONS, FunctionForm, FunctionSpec, ParameterSpec, context_properties,
-    context_property, field_kind, function_spec, is_lsx_value_field,
+    ContextPropertySpec, FUNCTIONS, FunctionForm, FunctionSpec, FunctorPrefixSpec, ParameterSpec,
+    context_properties, context_property, field_kind, function_spec, functor_prefix,
+    functor_prefixes, is_lsx_value_field,
 };
 pub use discovery::{
     discover_module, module_watch_roots, path_is_within, resolve_path, source_kind_for_document,

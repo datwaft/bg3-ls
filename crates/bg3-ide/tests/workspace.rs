@@ -1782,6 +1782,89 @@ fn completion_offers_context_properties_in_value_positions() {
     );
 }
 
+#[test]
+fn hover_describes_functor_execution_prefixes() {
+    let (workspace, path) = fixture_workspace(200);
+    let text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"GROUND:DealDamage(MainMeleeWeapon,Fire);RemoveStatus(SELF,TEST_STATUS)\"";
+    let overlays = overlay(&workspace, &path, text);
+
+    let ground = workspace
+        .language_hover(&path, source_position(text, "GROUND"), &overlays)
+        .unwrap();
+    assert!(ground.contains("Functor prefix"));
+    assert!(ground.contains("`GROUND:`"));
+    assert!(ground.contains("position selector"));
+
+    let conditional_text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"AOE:IF(not Dead()):DealDamage(1d6,Fire)\"";
+    let conditional_overlays = overlay(&workspace, &path, conditional_text);
+    let conditional = workspace
+        .language_hover(
+            &path,
+            source_position(conditional_text, "IF"),
+            &conditional_overlays,
+        )
+        .unwrap();
+    assert!(conditional.contains("Functor prefix"));
+    assert!(conditional.contains("condition"));
+}
+
+#[test]
+fn completion_offers_functor_prefixes_only_at_statement_starts() {
+    let (workspace, path) = fixture_workspace(200);
+
+    let statement_start = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"RemoveStatus(SELF,TEST_STATUS);GR";
+    let overlays = overlay(&workspace, &path, statement_start);
+    let line = statement_start.lines().nth(2).unwrap();
+    let position = Position {
+        line: 2,
+        character: u32::try_from(line.len()).unwrap(),
+    };
+    let completion = workspace.completion(&path, position, &overlays, false);
+    let ground = completion
+        .items
+        .iter()
+        .find(|item| item.label == "GROUND")
+        .expect("prefix completion after a top-level semicolon");
+    assert_eq!(ground.detail.as_deref(), Some("position selector"));
+    assert_eq!(ground.sort_text.as_deref(), Some("0GROUND"));
+
+    let value_start = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"TARGET";
+    let overlays = overlay(&workspace, &path, value_start);
+    let line = value_start.lines().nth(2).unwrap();
+    let position = Position {
+        line: 2,
+        character: u32::try_from(line.len()).unwrap(),
+    };
+    let completion = workspace.completion(&path, position, &overlays, false);
+    assert!(completion.items.iter().any(|item| item.label == "TARGET"));
+
+    let inside_call =
+        "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"GROUND:ApplyStatus(\"";
+    let overlays = overlay(&workspace, &path, inside_call);
+    let line = inside_call.lines().nth(2).unwrap();
+    let position = Position {
+        line: 2,
+        character: u32::try_from(line.len()).unwrap(),
+    };
+    let completion = workspace.completion(&path, position, &overlays, false);
+    assert!(!completion.items.iter().any(|item| item.label == "GROUND"));
+
+    let value_start_empty = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"";
+    let overlays = overlay(&workspace, &path, value_start_empty);
+    let line = value_start_empty.lines().nth(2).unwrap();
+    let position = Position {
+        line: 2,
+        character: u32::try_from(line.len()).unwrap(),
+    };
+    let completion = workspace.completion(&path, position, &overlays, false);
+    let apply_status = completion
+        .items
+        .iter()
+        .find(|item| item.label == "ApplyStatus")
+        .expect("curated function completion");
+    assert_eq!(apply_status.sort_text.as_deref(), Some("0ApplyStatus"));
+}
+
 fn packaged_spell(
     package: &str,
     priority: u8,
