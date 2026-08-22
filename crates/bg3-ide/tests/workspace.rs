@@ -1736,6 +1736,52 @@ fn hover_describes_enum_values_and_curated_functions() {
     assert!(hover.contains("Applies a status"));
 }
 
+#[test]
+fn hover_describes_curated_context_properties() {
+    let (workspace, path) = fixture_workspace(200);
+    let text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"TooltipDamageList\" \"DealDamage(MainMeleeWeapon-max(0,StrengthModifier),MainMeleeWeaponDamageType)\"";
+    let overlays = overlay(&workspace, &path, text);
+
+    let modifier = workspace
+        .language_hover(&path, source_position(text, "StrengthModifier"), &overlays)
+        .unwrap();
+    assert!(modifier.contains("Context property"));
+    assert!(modifier.contains("ability modifier"));
+
+    let weapon = workspace
+        .language_hover(&path, source_position(text, "MainMeleeWeapon"), &overlays)
+        .unwrap();
+    assert!(weapon.contains("Context property"));
+    assert!(weapon.contains("main-hand melee weapon"));
+}
+
+#[test]
+fn completion_offers_context_properties_in_value_positions() {
+    let (workspace, path) = fixture_workspace(200);
+    let text =
+        "new entry \"TEST\"\ntype \"SpellData\"\ndata \"TooltipDamageList\" \"DealDamage(Main\"";
+    let overlays = overlay(&workspace, &path, text);
+    let line = text.lines().nth(2).unwrap();
+    let position = Position {
+        line: 2,
+        character: u32::try_from(line.len()).unwrap(),
+    };
+
+    let completion = workspace.completion(&path, position, &overlays, false);
+    let weapon = completion
+        .items
+        .iter()
+        .find(|item| item.label == "MainMeleeWeapon")
+        .expect("context property completion");
+    assert_eq!(weapon.detail.as_deref(), Some("weapon"));
+    assert!(
+        completion
+            .items
+            .iter()
+            .any(|item| item.label == "MainMeleeWeaponDamageType")
+    );
+}
+
 fn packaged_spell(
     package: &str,
     priority: u8,

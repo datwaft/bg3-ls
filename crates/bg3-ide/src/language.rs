@@ -7,7 +7,8 @@ use bg3_index::{
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothApiResolution, PackagedThothApiSymbol,
     PackagedThothApiSymbolKind, PackagedThothCatalog, Position, SchemaDefinition, SchemaField,
     SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
-    ThothFunctionContract, field_kind, function_spec, is_lsx_value_field,
+    ThothFunctionContract, context_properties, context_property, field_kind, function_spec,
+    is_lsx_value_field,
 };
 
 /// The semantic category of one completion result.
@@ -392,6 +393,12 @@ impl WorkspaceSnapshot {
                 function.name, function.documentation
             ));
         }
+        if let Some(property) = context_property(word) {
+            return Some(format!(
+                "**Context property** `{}`\n\nKind: {}\n\n{}",
+                property.name, property.kind, property.documentation
+            ));
+        }
         if let Some(data) = data_context(line)
             && let Some((_, file)) = self.file(path, overlays)
             && let Some(entry) = active_definition(&file.definitions, position)
@@ -631,6 +638,14 @@ impl WorkspaceSnapshot {
                 || installed_variant
                 || !items.iter().any(|existing| existing.label == item.label)
             {
+                items.push(item);
+            }
+        }
+        for property in context_properties() {
+            if starts_with_case_insensitive(&property.name, prefix) {
+                let mut item = basic_item(&property.name, prefix, position, CompletionKind::Value);
+                item.detail = Some(property.kind.clone());
+                item.documentation = Some(property.documentation.clone());
                 items.push(item);
             }
         }

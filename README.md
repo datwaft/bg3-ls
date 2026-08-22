@@ -14,7 +14,8 @@ The server provides:
 
 - ordered Go to Definition results for complete override chains;
 - hover information for declarations, schema fields, enum values, functions,
-  resources, localization, and static game-text previews;
+  built-in Stats context properties, resources, localization, and static
+  game-text previews;
 - references, document symbols, and workspace symbols;
 - schema-aware completion with snippet support;
 - verified signature help for curated Stats functions and declared Thoth helpers;
@@ -290,6 +291,16 @@ configured language. Supported `Type` values resolve through the existing
 load-order-aware Stats and resource indexes. Glossary entries that depend on
 live UI or character state do not produce a preview.
 
+Built-in Stats context properties such as `MainMeleeWeapon`,
+`StrengthModifier`, or `Perception` resolve to curated hover with their kind
+and meaning, and they appear in value completion next to declarations and
+curated functions. The catalog combines the documented Stats expression
+keywords, including ability and skill suffix forms such as
+`DexteritySavingThrow` or `AthleticsModifier`, with weapon context data
+attested inside installed base-module functor arguments. Identifiers outside
+the catalog stay unreported because the engine vocabulary is not fully
+discoverable.
+
 Open Stats, LSX, Thoth, and Osiris files replace their disk records with
 unsaved overlays. Closing a buffer restores its disk record. Thoth helper
 declarations provide definition, hover, references, function completion,
@@ -508,9 +519,11 @@ field-name completion, LSX diagnostics, or XML entity transformation for
 injected highlighting.
 Most packed base resources are not visible, so diagnostics intentionally skip
 generic expression identifiers, root-template UUID resolution, required
-fields, and inferred function arity. Static tooltip previews do not evaluate
-`DescriptionParams`, live data bindings, runtime values, gender variants, or
-BG3 UI rendering.
+fields, and inferred function arity. Curated context properties power hover
+and completion only; the server does not diagnose identifiers outside that
+catalog because new engine keywords can appear between game patches. Static
+tooltip previews do not evaluate `DescriptionParams`, live data bindings,
+runtime values, gender variants, or BG3 UI rendering.
 
 Thoth diagnostics cover syntax errors reported as `thoth-syntax-error` and
 malformed supported annotations reported as `thoth-annotation-error`. Indexed

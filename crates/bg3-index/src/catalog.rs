@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
 /// One verified parameter in a curated Stats function signature.
 #[derive(Clone, Copy, Debug)]
 pub struct ParameterSpec {
@@ -185,6 +188,188 @@ const fn targeted_function(
         target_form: Some(target_form),
         target_min_arity,
     }
+}
+
+/// One built-in Stats context property that the engine resolves at evaluation.
+#[derive(Clone, Debug)]
+pub struct ContextPropertySpec {
+    pub name: String,
+    pub kind: String,
+    pub documentation: String,
+}
+
+/// Weapon context data attested inside vanilla functor arguments.
+const CONTEXT_PROPERTIES: &[(&str, &str, &str)] = &[
+    (
+        "MainMeleeWeapon",
+        "weapon",
+        "The main-hand melee weapon of the context owner.",
+    ),
+    (
+        "MainMeleeWeaponDamageType",
+        "damage type",
+        "The damage type of the context owner's main-hand melee weapon.",
+    ),
+    (
+        "ProficiencyBonus",
+        "proficiency bonus",
+        "The proficiency bonus in the current context.",
+    ),
+    (
+        "Level",
+        "character level",
+        "The character level in the current context.",
+    ),
+    (
+        "MaxHP",
+        "maximum hit points",
+        "The maximum hit points of the context owner.",
+    ),
+    (
+        "SpellDC",
+        "difficulty class",
+        "The spell save difficulty class in the current context.",
+    ),
+    (
+        "WeaponActionDC",
+        "difficulty class",
+        "The weapon action difficulty class in the current context.",
+    ),
+    (
+        "LockDC",
+        "difficulty class",
+        "The lockpicking difficulty class in the current context.",
+    ),
+    (
+        "ClassLevel",
+        "class level",
+        "The level of one class of the context owner, for example `ClassLevel(Wizard)`.",
+    ),
+];
+
+/// Abilities accept the bare check plus `Flat`, `Modifier`, and `SavingThrow`.
+const ABILITY_BASES: &[&str] = &[
+    "Strength",
+    "Dexterity",
+    "Constitution",
+    "Intelligence",
+    "Wisdom",
+    "Charisma",
+];
+
+/// Skills accept the bare check plus `Flat` and `Modifier`.
+const SKILL_BASES: &[&str] = &[
+    "Athletics",
+    "Acrobatics",
+    "SleightOfHand",
+    "Arcana",
+    "History",
+    "Investigation",
+    "Nature",
+    "Religion",
+    "Perception",
+    "Survival",
+    "Deception",
+    "Intimidation",
+    "Performance",
+    "Persuasion",
+    "Medicine",
+    "AnimalHandling",
+];
+
+/// Selector abilities behave like abilities for their suffix forms.
+const SELECTOR_BASES: &[(&str, &str)] = &[
+    ("SpellCastingAbility", "spellcasting ability"),
+    ("UnarmedMeleeAbility", "unarmed melee ability"),
+];
+
+/// Finds a curated built-in context property by its exact name.
+///
+/// The catalog combines the documented Stats expression keywords with weapon
+/// data attested inside installed base-module functor arguments. Names outside
+/// the catalog stay unreported because the engine vocabulary is not fully
+/// discoverable.
+pub fn context_property(name: &str) -> Option<&'static ContextPropertySpec> {
+    static CONTEXT_PROPERTY_INDEX: OnceLock<BTreeMap<String, ContextPropertySpec>> =
+        OnceLock::new();
+    CONTEXT_PROPERTY_INDEX
+        .get_or_init(build_context_properties)
+        .get(name)
+}
+
+/// Returns every curated built-in context property.
+pub fn context_properties() -> impl Iterator<Item = &'static ContextPropertySpec> {
+    static CONTEXT_PROPERTIES: OnceLock<BTreeMap<String, ContextPropertySpec>> = OnceLock::new();
+    CONTEXT_PROPERTIES
+        .get_or_init(build_context_properties)
+        .values()
+}
+
+fn build_context_properties() -> BTreeMap<String, ContextPropertySpec> {
+    let mut properties = BTreeMap::new();
+    for (name, kind, documentation) in CONTEXT_PROPERTIES {
+        insert_context_property(&mut properties, name, kind, documentation);
+    }
+    for base in ABILITY_BASES.iter().copied() {
+        expand_context_property_family(&mut properties, base, "ability", true);
+    }
+    for (base, family) in SELECTOR_BASES.iter().copied() {
+        expand_context_property_family(&mut properties, base, family, true);
+    }
+    for base in SKILL_BASES.iter().copied() {
+        expand_context_property_family(&mut properties, base, "skill", false);
+    }
+    properties
+}
+
+fn expand_context_property_family(
+    properties: &mut BTreeMap<String, ContextPropertySpec>,
+    base: &str,
+    family: &str,
+    saving_throw: bool,
+) {
+    insert_context_property(
+        properties,
+        base,
+        &format!("{family} check"),
+        &format!("Resolves the {base} {family} check in the current context."),
+    );
+    insert_context_property(
+        properties,
+        &format!("{base}Flat"),
+        &format!("{family} flat value"),
+        &format!("Resolves {base} as a flat value."),
+    );
+    insert_context_property(
+        properties,
+        &format!("{base}Modifier"),
+        &format!("{family} modifier"),
+        &format!("Resolves the {base} modifier in the current context."),
+    );
+    if saving_throw {
+        insert_context_property(
+            properties,
+            &format!("{base}SavingThrow"),
+            &format!("{family} saving throw"),
+            &format!("Resolves the {base} saving throw in the current context."),
+        );
+    }
+}
+
+fn insert_context_property(
+    properties: &mut BTreeMap<String, ContextPropertySpec>,
+    name: &str,
+    kind: &str,
+    documentation: &str,
+) {
+    properties.insert(
+        name.to_string(),
+        ContextPropertySpec {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            documentation: documentation.to_string(),
+        },
+    );
 }
 
 /// Finds a curated function by its exact name.
