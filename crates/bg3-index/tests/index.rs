@@ -209,6 +209,29 @@ fn parses_prefixed_functor_statements_without_prefix_references() {
 }
 
 #[test]
+fn extracts_references_from_bracketed_functor_groups() {
+    let source = SourceFile {
+        path: PathBuf::from("project/Public/MyMod/Stats/Generated/Data/Spell.txt"),
+        kind: SourceKind::PlainStats,
+    };
+    let text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"GROUND:DealDamage(MainMeleeWeapon,X);CastOffhand[IF(not Dead()):ExecuteWeaponFunctors(OffHand)]\"\n";
+    let parsed = parse_source(source, text, &SchemaCatalog::default(), "English").unwrap();
+
+    // The group name selects a context and never names a declaration.
+    assert!(!parsed.references.iter().any(|reference| matches!(
+        &reference.target,
+        SymbolTarget::Named { name, .. } if name == "CastOffhand"
+    )));
+    // Statements inside the brackets extract normally.
+    assert!(parsed.references.iter().any(|reference| reference.target
+        == SymbolTarget::Named {
+            kind: None,
+            name: "MainMeleeWeapon".into(),
+        }));
+    assert!(parsed.issues.is_empty());
+}
+
+#[test]
 fn classifies_structural_stats_values_for_previews() {
     assert!(is_structural_stats_value(
         "GROUND:DealDamage(1d6,Fire);RemoveStatus(SELF,X)"
