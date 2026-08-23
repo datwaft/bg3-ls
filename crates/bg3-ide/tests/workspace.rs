@@ -1865,6 +1865,85 @@ fn completion_offers_functor_prefixes_only_at_statement_starts() {
     assert_eq!(apply_status.sort_text.as_deref(), Some("0ApplyStatus"));
 }
 
+#[test]
+fn hover_describes_legacy_stats_property_names() {
+    let (workspace, path) = fixture_workspace(200);
+    let text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"GROUND:DealDamage(MainMeleeWeapon,X);RemoveStatus(SELF,Y)\"";
+    let overlays = overlay(&workspace, &path, text);
+    let name_column = text
+        .lines()
+        .nth(2)
+        .unwrap()
+        .find("SpellProperties")
+        .unwrap();
+
+    let hover = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 2,
+                character: u32::try_from(name_column + 5).unwrap(),
+            },
+            &overlays,
+        )
+        .unwrap();
+    assert!(
+        hover.contains("**Stats property** `SpellProperties`"),
+        "{}",
+        hover
+    );
+    assert!(hover.contains("Types: `StatsFunctor`"), "{}", hover);
+    assert!(
+        hover.contains("grouped by execution position prefixes"),
+        "{}",
+        hover
+    );
+    assert!(hover.contains("```bg3_stats_value"), "{}", hover);
+    assert!(
+        hover.contains("GROUND:DealDamage(MainMeleeWeapon,X)\nRemoveStatus(SELF,Y)"),
+        "{}",
+        hover
+    );
+
+    // A plain value on a typed field gets types but no expression preview.
+    let plain_text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"Name\" \"OncePerTurn\"";
+    let plain_overlays = overlay(&workspace, &path, plain_text);
+    let plain_name = plain_text.lines().nth(2).unwrap().find("Name").unwrap() + 1;
+    let plain = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 2,
+                character: u32::try_from(plain_name).unwrap(),
+            },
+            &plain_overlays,
+        )
+        .unwrap();
+    assert!(plain.contains("**Stats property** `Name`"), "{}", plain);
+    assert!(!plain.contains("```bg3_stats_value"), "{}", plain);
+
+    // An uncataloged field stays silent about documentation.
+    let unknown_text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"MadeUpField\" \"abc\"";
+    let unknown_overlays = overlay(&workspace, &path, unknown_text);
+    let unknown_name = unknown_text.lines().nth(2).unwrap().find("MadeUp").unwrap() + 2;
+    let unknown = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 2,
+                character: u32::try_from(unknown_name).unwrap(),
+            },
+            &unknown_overlays,
+        )
+        .unwrap();
+    assert!(
+        unknown.contains("**Stats property** `MadeUpField`"),
+        "{}",
+        unknown
+    );
+    assert!(!unknown.contains("Types:"), "{}", unknown);
+}
+
 fn packaged_spell(
     package: &str,
     priority: u8,

@@ -31,8 +31,8 @@ pub use annotation::{
 pub use cache::{CacheStats, CacheStore};
 pub use catalog::{
     ContextPropertySpec, FUNCTIONS, FunctionForm, FunctionSpec, FunctorPrefixSpec, ParameterSpec,
-    context_properties, context_property, field_kind, function_spec, functor_prefix,
-    functor_prefixes, is_lsx_value_field,
+    context_properties, context_property, field_documentation, field_kind, function_spec,
+    functor_prefix, functor_prefixes, is_lsx_value_field,
 };
 pub use discovery::{
     discover_module, module_watch_roots, path_is_within, resolve_path, source_kind_for_document,
@@ -59,7 +59,8 @@ pub use packaged_stats::{
     stats_module_from_entry,
 };
 pub use parser::{
-    canonical_kind, is_uuid, parse_source, parse_thoth_file, schema_for_toolkit, schemas_for_plain,
+    canonical_kind, is_structural_stats_value, is_uuid, parse_source, parse_thoth_file,
+    schema_for_toolkit, schemas_for_plain,
 };
 pub use schema::{SchemaCatalog, SchemaDefinition, SchemaField, is_schema_discriminator};
 pub use thoth::{

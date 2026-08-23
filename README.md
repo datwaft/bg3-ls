@@ -13,9 +13,9 @@ refreshes its index.
 The server provides:
 
 - ordered Go to Definition results for complete override chains;
-- hover information for declarations, schema fields, enum values, functions,
-  built-in Stats context properties, functor execution prefixes, resources,
-  localization, and static game-text previews;
+- hover information for declarations, schema fields, Stats property names,
+  enum values, functions, built-in Stats context properties, functor execution
+  prefixes, resources, localization, and static game-text previews;
 - references, document symbols, and workspace symbols;
 - schema-aware completion with snippet support;
 - verified signature help for curated Stats functions and declared Thoth helpers;
@@ -323,11 +323,20 @@ discoverable.
 Functor execution-position prefixes such as `GROUND:` or `TARGET:` resolve to
 curated hover on the prefix word, and value completion offers them at functor
 statement starts, after a top-level `;` or at the beginning of the value. The
-catalog covers position selectors, the AI flags, the difficulty tiers, and
-the documented `IF(condition):` conditional form, all attested inside
-installed base-module statements. Prefixes compose, so hover describes each
-word separately. Uncataloged prefixes stay unreported for the same reason as
+catalog covers position selectors, the AI flags, the difficulty tiers, and the
+documented `IF(condition):` conditional form, all attested inside installed
+base-module statements. Prefixes compose, so hover describes each word
+separately. Uncataloged prefixes stay unreported for the same reason as
 context properties.
+
+Hovering the quoted name of a legacy Stats `data` clause describes the
+property: its name, the types reported by the effective schema chain, and a
+curated description for well-understood properties such as `SpellProperties`
+or `TargetConditions`. When the clause value parses as structural
+`bg3_stats_value` syntax (functor calls, prefixes, conditions, dice, or
+resource expressions), hover appends a fenced preview with one statement per
+line. Plain values such as icons, handles, and markers get no preview.
+Uncataloged property names show schema types only; nothing is invented.
 
 Open Stats, LSX, Thoth, and Osiris files replace their disk records with
 unsaved overlays. Closing a buffer restores its disk record. Thoth helper

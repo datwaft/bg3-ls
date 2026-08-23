@@ -3162,6 +3162,49 @@ pub fn is_uuid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok() && value.len() == 36
 }
 
+/// Returns whether one legacy Stats value parses completely and carries
+/// expression structure beyond a bare constant.
+///
+/// Values that are only identifiers, numbers, handles, or UUIDs stay false so
+/// editor previews can reserve fenced blocks for genuine functor, condition,
+/// dice, and resource expressions.
+pub fn is_structural_stats_value(value: &str) -> bool {
+    const STRUCTURAL: &[&str] = &[
+        "call_expression",
+        "prefixed_expression",
+        "if_expression",
+        "binary_expression",
+        "unary_expression",
+        "member_expression",
+        "resource_expression",
+        "dice_literal",
+        "list_literal",
+        "parenthesized_expression",
+    ];
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_bg3::BG3_STATS_VALUE_LANGUAGE.into())
+        .is_err()
+    {
+        return false;
+    }
+    let Some(tree) = parser.parse(value, None) else {
+        return false;
+    };
+    if tree.root_node().has_error() {
+        return false;
+    }
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        if STRUCTURAL.contains(&node.kind()) {
+            return true;
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    false
+}
+
 /// Selects the schema for an exact Toolkit schema ID.
 pub fn schema_for_toolkit<'a>(
     catalog: &'a SchemaCatalog,

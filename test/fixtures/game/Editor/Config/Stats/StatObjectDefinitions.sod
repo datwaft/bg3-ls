@@ -21,6 +21,7 @@
       <field_definitions>
         <field_definition name="UUID" type="Id" />
         <field_definition name="Name" type="Name" />
+        <field_definition name="SpellProperties" type="StatsFunctor" />
       </field_definitions>
     </stat_object_definition>
     <stat_object_definition id="33333333-3333-3333-3333-333333333333" name="StatusData" category="StatusData">
