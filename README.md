@@ -35,7 +35,7 @@ parser.
 
 - Neovim nightly or Neovim 0.12+
 - the `bg3_stats`, `bg3_lsx`, `bg3_localization`, `bg3_thoth`, and
-  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.5.1
+  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.5.2
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
@@ -55,7 +55,7 @@ CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
 git clone https://github.com/datwaft/bg3-ls
-git clone --branch v0.5.1 https://github.com/datwaft/tree-sitter-bg3
+git clone --branch v0.5.2 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```
@@ -88,6 +88,12 @@ written. A failed conversion does not change an existing destination.
 
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
+
+Version 0.17.1 aligns with `tree-sitter-bg3` 0.5.2, whose Stats-value grammar
+parses bracketed functor groups such as `CastOffhand[...]` and accepts
+execution prefixes inside condition consequences. Bracketed statements keep
+their references and join the expression preview. Existing configuration
+remains compatible, and no migration is required.
 
 Version 0.17.0 adds hover for legacy Stats property names: the quoted name of
 a `data` clause renders its schema types, a curated description for

@@ -2770,10 +2770,11 @@ fn parse_value(
             }
             "identifier"
                 if !is_function_name(node)
-                    // Prefix identifiers select an execution context; only
-                    // the wrapped call or condition can name a declaration.
+                    // Prefix and bracket-group identifiers select an execution
+                    // context; only the wrapped statements can name declarations.
                     && node.parent().is_none_or(|parent| {
                         parent.kind() != "prefixed_expression"
+                            && parent.kind() != "bracket_group"
                     }) =>
             {
                 let name = node.utf8_text(value.as_bytes())?.to_owned();
@@ -3172,6 +3173,7 @@ pub fn is_structural_stats_value(value: &str) -> bool {
     const STRUCTURAL: &[&str] = &[
         "call_expression",
         "prefixed_expression",
+        "bracket_group",
         "if_expression",
         "binary_expression",
         "unary_expression",
