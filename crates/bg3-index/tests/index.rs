@@ -181,6 +181,34 @@ fn parses_plain_stats_references_and_functions() {
 }
 
 #[test]
+fn parses_prefixed_functor_statements_without_prefix_references() {
+    let source = SourceFile {
+        path: PathBuf::from("project/Public/MyMod/Stats/Generated/Data/Spell.txt"),
+        kind: SourceKind::PlainStats,
+    };
+    let text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"GROUND:DealDamage(MainMeleeWeapon,X);AI_IGNORE:CAST:Kill()\"\n";
+    let parsed = parse_source(source, text, &SchemaCatalog::default(), "English").unwrap();
+
+    // Prefix words select an execution context and never name a declaration.
+    assert!(!parsed.references.iter().any(|reference| matches!(
+        &reference.target,
+        SymbolTarget::Named { name, .. }
+            if name == "GROUND" || name == "AI_IGNORE" || name == "CAST"
+    )));
+    // Unknown callees still become helper references through the prefixes.
+    assert!(parsed.references.iter().any(|reference| reference.target
+        == SymbolTarget::Named {
+            kind: Some(THOTH_FUNCTION_KIND.into()),
+            name: "Kill".into(),
+        }));
+    assert!(parsed.references.iter().any(|reference| reference.target
+        == SymbolTarget::Named {
+            kind: None,
+            name: "MainMeleeWeapon".into(),
+        }));
+}
+
+#[test]
 fn parses_thoth_declarations_parameters_and_calls() {
     let source = SourceFile {
         path: PathBuf::from("Mods/MyMod/Scripts/thoth/helpers/Test.khn"),

@@ -2768,7 +2768,14 @@ fn parse_value(
                     }
                 }
             }
-            "identifier" if !is_function_name(node) => {
+            "identifier"
+                if !is_function_name(node)
+                    // Prefix identifiers select an execution context; only
+                    // the wrapped call or condition can name a declaration.
+                    && node.parent().is_none_or(|parent| {
+                        parent.kind() != "prefixed_expression"
+                    }) =>
+            {
                 let name = node.utf8_text(value.as_bytes())?.to_owned();
                 let call_kind = call_context(node, value);
                 if call_kind == Some(None) {
