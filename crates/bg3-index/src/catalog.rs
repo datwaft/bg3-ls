@@ -283,6 +283,185 @@ const fn prefix(
     }
 }
 
+/// Documentation for well-understood legacy Stats property names.
+///
+/// Every entry is attested inside installed base modules and described from
+/// the public modding documentation. Names outside the table stay silent
+/// about documentation and surface schema types only.
+const FIELD_DOCUMENTATION: &[(&str, &str)] = &[
+    (
+        "DisplayName",
+        "Localized name shown in tooltips and the UI.",
+    ),
+    (
+        "Description",
+        "Localized long description shown in tooltips.",
+    ),
+    (
+        "ExtraDescription",
+        "Additional localized paragraph appended to the description.",
+    ),
+    (
+        "DescriptionParams",
+        "Named values substituted into Description placeholders.",
+    ),
+    (
+        "SpellType",
+        "Which spell behaviour template the entry uses.",
+    ),
+    (
+        "StatusType",
+        "Which engine behaviour template the status uses, such as BOOST.",
+    ),
+    ("SpellSchool", "The school of magic used for rolls and DC."),
+    (
+        "SpellCastingAbility",
+        "The ability that backs this spell's rolls and save DC.",
+    ),
+    (
+        "SpellFlags",
+        "Behaviour flags for the spell, like IsSpell or HasVerbalIntent.",
+    ),
+    (
+        "VerbalIntent",
+        "Spoken-line intent the caster performs while casting.",
+    ),
+    (
+        "AIFlags",
+        "Flags steering AI use of this spell, like CanNotUse.",
+    ),
+    ("PowerLevel", "Power tier used for scaling and upcasting."),
+    ("Level", "Character level requirement or reference level."),
+    (
+        "Cooldown",
+        "When the entry becomes available again after use.",
+    ),
+    (
+        "UseCosts",
+        "Action resources consumed on use, like ActionPoint:1.",
+    ),
+    (
+        "DualWieldingUseCosts",
+        "Action resources consumed when cast while dual wielding.",
+    ),
+    ("Icon", "UI icon shown for this entry."),
+    (
+        "SpellProperties",
+        "Functors that run when the spell resolves, grouped by execution position prefixes.",
+    ),
+    ("StatsFunctors", "Status functors attached to this entry."),
+    (
+        "OnApplyFunctors",
+        "Functors that run when the status is applied.",
+    ),
+    (
+        "OnRemoveFunctors",
+        "Functors that run when the status is removed.",
+    ),
+    (
+        "SpellRoll",
+        "The roll made when casting, such as an attack roll.",
+    ),
+    ("SpellSuccess", "Functors that run when the roll succeeds."),
+    ("SpellFail", "Functors that run when the roll fails."),
+    (
+        "TooltipDamageList",
+        "Damage entries shown in the tooltip, evaluated as Stats expressions.",
+    ),
+    (
+        "TooltipStatusApply",
+        "Tooltip text describing applied statuses.",
+    ),
+    (
+        "TooltipAttackSave",
+        "Tooltip text describing attack or save rolls.",
+    ),
+    (
+        "RequirementConditions",
+        "Conditions that must pass to select or use this entry.",
+    ),
+    (
+        "RequirementEvents",
+        "Events that re-evaluate the requirement conditions, like OnEquip;OnUnequip.",
+    ),
+    (
+        "TargetConditions",
+        "Conditions an object must meet to be a valid target.",
+    ),
+    ("Conditions", "Conditions gating this entry's activation."),
+    (
+        "RemoveConditions",
+        "Conditions that remove the status when they stop passing.",
+    ),
+    (
+        "RemoveEvents",
+        "Events that re-evaluate the remove conditions.",
+    ),
+    ("TargetRadius", "Radius used to collect targets."),
+    ("AreaRadius", "Radius of the spell's area of effect."),
+    ("AuraRadius", "Radius of the aura emitted by this status."),
+    (
+        "AuraStatuses",
+        "Statuses applied by the aura to affected characters.",
+    ),
+    (
+        "Boosts",
+        "Boosts applied while the status is active or item equipped.",
+    ),
+    (
+        "StatusGroups",
+        "Status groups this status belongs to, like SG_Charmed.",
+    ),
+    (
+        "StatusPropertyFlags",
+        "Flags controlling status behaviour, like ConsumingOnRoll.",
+    ),
+    (
+        "StatusEffect",
+        "Visual effect played while the status is active.",
+    ),
+    (
+        "StackId",
+        "Identifier grouping statuses or entries that stack together.",
+    ),
+    (
+        "StackPriority",
+        "Resolution order among entries sharing a StackId.",
+    ),
+    (
+        "Stacking",
+        "How repeated applications of the status combine.",
+    ),
+    (
+        "Properties",
+        "Passive flags granted by this entry, like Boost or ExtraAttack.",
+    ),
+    ("Passives", "Passives granted by this entry."),
+    (
+        "PassivesAdded",
+        "Passives granted while this status is active.",
+    ),
+    (
+        "PassivesOnEquip",
+        "Passives granted while this item is equipped.",
+    ),
+    (
+        "PassivesRemoved",
+        "Passives removed while this entry is active.",
+    ),
+    ("Vitality", "Base vitality hit points of the character."),
+    ("Rarity", "Item rarity tier."),
+    ("Weight", "Item weight."),
+];
+
+/// Finds curated documentation for one legacy Stats property name.
+pub fn field_documentation(name: &str) -> Option<&'static str> {
+    FIELD_DOCUMENTATION
+        .iter()
+        .find(|candidate| candidate.0 == name)
+        .map(|(_, documentation)| *documentation)
+}
+
 /// Finds a curated functor statement prefix by its exact name.
 ///
 /// Names outside the catalog stay unreported because new engine prefixes can

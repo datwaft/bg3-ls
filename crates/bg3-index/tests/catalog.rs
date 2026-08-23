@@ -1,4 +1,6 @@
-use bg3_index::{context_properties, context_property, functor_prefix, functor_prefixes};
+use bg3_index::{
+    context_properties, context_property, field_documentation, functor_prefix, functor_prefixes,
+};
 
 #[test]
 fn finds_documented_keywords_and_attested_weapon_data() {
@@ -85,4 +87,17 @@ fn rejects_unknown_functor_prefixes() {
 #[test]
 fn lists_every_functor_prefix() {
     assert_eq!(functor_prefixes().count(), 13);
+}
+
+#[test]
+fn documents_attested_stats_properties() {
+    let functors = field_documentation("SpellProperties").expect("attested property");
+    assert!(functors.contains("execution position prefixes"));
+
+    let targets = field_documentation("TargetConditions").expect("attested property");
+    assert!(targets.contains("valid target"));
+
+    // Only the curated set documents itself; nothing is invented.
+    assert!(field_documentation("NotAProperty").is_none());
+    assert!(field_documentation("").is_none());
 }

@@ -6,9 +6,9 @@ use bg3_index::{
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, SchemaCatalog, SourceFile,
     SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, ThothBinaryOperator, ThothExpressionKind,
     ThothIfBranchKind, ThothLiteralKind, ThothMemberAccessKind, ThothParameter, ThothScopeId,
-    ThothUnaryOperator, discover_module, parse_source, parse_thoth_file, parse_tooltip_catalog,
-    read_base_localization_package, read_base_tooltip_catalog, read_localization_package,
-    source_kind_for_document,
+    ThothUnaryOperator, discover_module, is_structural_stats_value, parse_source, parse_thoth_file,
+    parse_tooltip_catalog, read_base_localization_package, read_base_tooltip_catalog,
+    read_localization_package, source_kind_for_document,
 };
 
 fn fixtures() -> PathBuf {
@@ -206,6 +206,29 @@ fn parses_prefixed_functor_statements_without_prefix_references() {
             kind: None,
             name: "MainMeleeWeapon".into(),
         }));
+}
+
+#[test]
+fn classifies_structural_stats_values_for_previews() {
+    assert!(is_structural_stats_value(
+        "GROUND:DealDamage(1d6,Fire);RemoveStatus(SELF,X)"
+    ));
+    assert!(is_structural_stats_value(
+        "Attack(AttackType.MeleeWeaponAttack)"
+    ));
+    assert!(is_structural_stats_value("ActionPoint:1"));
+    assert!(is_structural_stats_value(
+        "IF(not Dead()):DealDamage(1d4,Fire)"
+    ));
+
+    // Bare constants, handles, and markers get no expression preview.
+    assert!(!is_structural_stats_value("Action_GargantuanCleave"));
+    assert!(!is_structural_stats_value("OncePerTurn"));
+    assert!(!is_structural_stats_value(
+        "h8b70d7dbg9a77g42eagb9afge63af35661e0;1"
+    ));
+    assert!(!is_structural_stats_value("%%%EMPTY"));
+    assert!(!is_structural_stats_value(""));
 }
 
 #[test]

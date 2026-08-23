@@ -7,8 +7,8 @@ use bg3_index::{
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothApiResolution, PackagedThothApiSymbol,
     PackagedThothApiSymbolKind, PackagedThothCatalog, Position, SchemaDefinition, SchemaField,
     SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
-    ThothFunctionContract, context_properties, context_property, field_kind, function_spec,
-    functor_prefix, functor_prefixes, is_lsx_value_field,
+    ThothFunctionContract, context_properties, context_property, field_documentation, field_kind,
+    function_spec, functor_prefix, functor_prefixes, is_lsx_value_field, is_structural_stats_value,
 };
 
 /// The semantic category of one completion result.
@@ -391,6 +391,9 @@ impl WorkspaceSnapshot {
         }
         let text = overlays.get(path)?.text.as_str();
         let line = source_line(text, position.line)?;
+        if let Some(markdown) = self.stats_property_hover(path, line, &position, overlays) {
+            return Some(markdown);
+        }
         let word = word_at(line, usize::try_from(position.character).ok()?)?;
         if let Some(function) = function_spec(word) {
             return Some(format!(
@@ -478,6 +481,58 @@ impl WorkspaceSnapshot {
             return Some(hover);
         }
         None
+    }
+
+    /// Renders hover for the property name of a legacy Stats `data` clause.
+    ///
+    /// Shows schema types from the effective inheritance chain, curated
+    /// documentation when the name is cataloged, and a fenced expression
+    /// preview when the value parses as structural Stats-value syntax.
+    fn stats_property_hover(
+        &self,
+        path: &Path,
+        line: &str,
+        position: &Position,
+        overlays: &OverlaySet,
+    ) -> Option<String> {
+        let column = usize::try_from(position.character).ok()?;
+        let (name, value) = data_clause_spans(line, column)?;
+        let mut markdown = format!("**Stats property** `{name}`");
+
+        let types: BTreeSet<String> = self
+            .file(path, overlays)
+            .and_then(|(_, file)| active_definition(&file.definitions, *position))
+            .map_or_else(BTreeSet::new, |entry| {
+                schemas_for_definition(self, path, entry)
+                    .into_iter()
+                    .filter_map(|schema| schema.field(name))
+                    .flat_map(|field| {
+                        [
+                            field.field_type.clone(),
+                            field.object_type.clone(),
+                            field.enumeration_type_name.clone(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                    })
+                    .collect()
+            });
+        if !types.is_empty() {
+            let listed = types.into_iter().collect::<Vec<_>>().join("`, `");
+            markdown.push_str(&format!("\n\nTypes: `{listed}`"));
+        }
+        if let Some(documentation) = field_documentation(name) {
+            markdown.push_str(&format!("\n\n{documentation}"));
+        }
+        if let Some(preview) =
+            value.filter(|value| !value.is_empty() && is_structural_stats_value(value))
+        {
+            markdown.push_str(&format!(
+                "\n\n```bg3_stats_value\n{}\n```",
+                format_value_preview(preview)
+            ));
+        }
+        Some(markdown)
     }
 
     /// Completes schema export types and categories.
@@ -1997,6 +2052,76 @@ fn packaged_thoth_entry_priority(
         .count()
         > 1;
     Some((priority, ambiguous))
+}
+
+/// Returns the field name and value spans of a `data` clause when the cursor
+/// sits inside the quoted property name.
+///
+/// Legacy Stats clauses are single lines, so scanning one line is complete.
+/// The closing quote may be absent while the name is still being typed.
+fn data_clause_spans(line: &str, column: usize) -> Option<(&str, Option<&str>)> {
+    let trimmed_start = line.len() - line.trim_start().len();
+    if !line[trimmed_start..].starts_with("data") {
+        return None;
+    }
+    let keyword_end = trimmed_start + "data".len();
+    if !line[keyword_end..]
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_whitespace())
+    {
+        return None;
+    }
+    let open = line.find('"')?;
+    let close = line[open + 1..]
+        .find('"')
+        .map_or(line.len(), |index| open + 1 + index);
+    if column <= open || column > close {
+        return None;
+    }
+    let name = &line[open + 1..close];
+    let value = line[close + 1..].trim_start();
+    let value = value.strip_prefix('"').map(|rest| match rest.find('"') {
+        Some(end) => &rest[..end],
+        None => rest,
+    });
+    Some((name, value))
+}
+
+/// Formats one Stats value as preview lines by splitting on top-level `;`.
+fn format_value_preview(value: &str) -> String {
+    let mut statements = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut statement_start = 0;
+    for (index, character) in value.char_indices() {
+        match quote {
+            Some(open) => {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == open {
+                    quote = None;
+                }
+            }
+            None => match character {
+                '\'' | '"' => quote = Some(character),
+                ';' => {
+                    statements.push(value[statement_start..index].trim());
+                    statement_start = index + 1;
+                }
+                _ => {}
+            },
+        }
+    }
+    statements.push(value[statement_start..].trim());
+    statements
+        .iter()
+        .filter(|statement| !statement.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Returns the identifier under a byte column.
