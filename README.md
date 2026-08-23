@@ -89,6 +89,12 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.17.1 aligns with `tree-sitter-bg3` 0.5.2, whose Stats-value grammar
+parses bracketed functor groups such as `CastOffhand[...]` and accepts
+execution prefixes inside condition consequences. Bracketed statements keep
+their references and join the expression preview. Existing configuration
+remains compatible, and no migration is required.
+
 Version 0.17.0 adds hover for legacy Stats property names: the quoted name of
 a `data` clause renders its schema types, a curated description for
 well-understood properties, and a fenced `bg3_stats_value` preview when the
