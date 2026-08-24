@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{ParsedFile, SourceFile};
 use crate::localization::{
-    LocalizationCatalog, base_localization_package_path, read_localization_package,
+    LocalizationCatalog, base_localization_package_path, read_localization_package, valid_language,
 };
 use crate::package::package_fingerprint;
 use crate::packaged_stats::PackagedStatsCatalog;
@@ -137,6 +137,11 @@ impl CacheStore {
         game_data: &Path,
         language: &str,
     ) -> Result<Option<(LocalizationCatalog, bool)>, Error> {
+        if !valid_language(language) {
+            return Err(Error::Localization(format!(
+                "the localization language {language:?} is not a safe catalog name"
+            )));
+        }
         let package = base_localization_package_path(game_data, language);
         if !package.is_file() {
             return Ok(None);

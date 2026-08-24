@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bg3_index::{ModuleRole, ModuleSpec};
+use bg3_index::{ModuleRole, ModuleSpec, valid_language};
 use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
@@ -208,9 +208,10 @@ impl ResolvedConfig {
         if options.project.name.trim().is_empty() {
             return Err(Error::Config("project.name must not be empty".into()));
         }
-        if options.localization.language.trim().is_empty() {
+        if !valid_language(&options.localization.language) {
             return Err(Error::Config(
-                "localization.language must not be empty".into(),
+                "localization.language must be one safe catalog name without path separators, traversal components, or control characters"
+                    .into(),
             ));
         }
         if options.max_workspace_symbols == 0 || options.max_completion_items == 0 {
@@ -553,6 +554,41 @@ mod tests {
         severity["project"]["diagnostics"]["unresolved_references"] = serde_json::json!("notice");
         let severity: InitOptions = serde_json::from_value(severity).unwrap();
         assert!(ResolvedConfig::resolve(severity, uri.as_str()).is_err());
+    }
+
+    #[test]
+    fn rejects_unsafe_localization_languages() {
+        let root = fixtures().join("project");
+        let uri = Url::from_directory_path(root).unwrap();
+        for language in [
+            "",
+            " ",
+            "../../outside",
+            "sub/English",
+            "C:\\Evil",
+            "/absolute",
+            ":stream",
+            "English\n",
+            "Eng\0lish",
+        ] {
+            let mut options = valid_options();
+            options["localization"]["language"] = serde_json::json!(language);
+            let options: InitOptions = serde_json::from_value(options).unwrap();
+            let error = ResolvedConfig::resolve(options, uri.as_str())
+                .expect_err("unsafe language was accepted");
+            assert!(
+                error.to_string().contains("safe catalog name"),
+                "language {language:?} failed with an unexpected error: {error}"
+            );
+        }
+
+        for language in ["English", "German", "zh-Hans"] {
+            let mut options = valid_options();
+            options["localization"]["language"] = serde_json::json!(language);
+            let options: InitOptions = serde_json::from_value(options).unwrap();
+            let config = ResolvedConfig::resolve(options, uri.as_str()).unwrap();
+            assert_eq!(config.language, language);
+        }
     }
 
     #[test]

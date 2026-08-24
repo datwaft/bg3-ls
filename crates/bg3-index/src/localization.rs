@@ -160,11 +160,32 @@ impl LocalizationCatalog {
     }
 }
 
+/// Reports whether a localization language is one safe catalog name.
+///
+/// The language is interpolated into package paths and package entry names,
+/// so it must not contain path separators, Windows-reserved filename
+/// characters, traversal components, NUL, or control characters. Absolute
+/// paths always carry one of the rejected separators.
+pub fn valid_language(language: &str) -> bool {
+    !language.trim().is_empty()
+        && !language.chars().any(|character| {
+            matches!(
+                character,
+                '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*'
+            ) || character.is_control()
+        })
+}
+
 /// Reads the configured base language package when the package exists.
 pub fn read_base_localization_package(
     game_data: &Path,
     language: &str,
 ) -> Result<Option<LocalizationCatalog>, Error> {
+    if !valid_language(language) {
+        return Err(Error::Localization(format!(
+            "the localization language {language:?} is not a safe catalog name"
+        )));
+    }
     let path = game_data
         .join("Localization")
         .join(format!("{language}.pak"));
