@@ -396,20 +396,27 @@ Thoth helpers support a small, documented subset of
 line comments, so they are inert when the game loads the script:
 
 ```lua
+--- Returns whether the entity can equip the candidate as a weapon.
 ---@class Weapon
 ---@field IsValid boolean
 
+--- Used in condition contexts.
 ---@param weapon Weapon?
 ---@return ConditionResult
 function IsWeaponCandidate(weapon) end
 ```
 
 The supported tags are `---@class`, `---@field`, `---@alias`, `---@param`,
-`---@return`, and `---@type`. Supported type syntax includes `boolean`,
+`---@return` (also spelled `---@returns`), and `---@type`. Supported type syntax includes `boolean`,
 `number`, `string`, `nil`, dotted names such as `Weapon.Properties`, unions
 (`A|B`), nullable types (`Weapon?`), arrays (`Weapon[]`), and function-shaped
 fields such as `fun(value: string): boolean`. A `---@param name? Type` tag
 marks an optional parameter.
+
+Plain `---` doc-comment lines in the same block become the declaration
+description. Hover and signature help show this prose next to the signature. A
+prose-only helper keeps its declared parameter names instead of inventing
+types.
 
 An annotation attaches only to the immediately following declaration or to
 the immediately following contiguous annotation block. A blank line or an

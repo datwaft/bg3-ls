@@ -549,6 +549,8 @@ pub struct ThothReturnAnnotation {
 pub struct ThothFunctionContract {
     pub parameters: Vec<ThothParameterAnnotation>,
     pub returns: Vec<ThothReturnAnnotation>,
+    /// Prose lines from `---` doc comments in the same annotation block.
+    pub description: Vec<String>,
     pub range: TextRange,
 }
 

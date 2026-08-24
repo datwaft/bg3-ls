@@ -847,6 +847,7 @@ enum ThothAnnotationTag {
         ty: TypeExpression,
         type_range: TextRange,
     },
+    Documentation(String),
     Unsupported,
     Invalid,
 }
@@ -935,6 +936,20 @@ fn collect_thoth_annotations(
     Ok(())
 }
 
+/// Recognizes a triple-dash doc-comment line.
+///
+/// The grammar consumes the first two dashes as the comment marker, so a
+/// `--- text` line exposes the content `- text`. A single trailing dash that
+/// is followed by whitespace or nothing marks documentation; deeper dash runs
+/// stay unsupported so that `----` separators keep breaking attachment.
+fn thoth_documentation_text(content: &str) -> Option<String> {
+    let prose = content.strip_prefix('-')?;
+    if !prose.is_empty() && !prose.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(prose.trim().to_owned())
+}
+
 fn parse_thoth_annotation_comment(
     node: Node<'_>,
     text: &str,
@@ -948,6 +963,13 @@ fn parse_thoth_annotation_comment(
         }));
     };
     let content_text = content.utf8_text(text.as_bytes())?;
+    if let Some(prose) = thoth_documentation_text(content_text) {
+        return Ok(Some(ThothAnnotationComment {
+            range: node_range(node),
+            line: u32::try_from(node.start_position().row).unwrap_or(u32::MAX),
+            tag: ThothAnnotationTag::Documentation(prose),
+        }));
+    }
     let Some(tag_text) = content_text.strip_prefix("-@") else {
         return Ok(Some(ThothAnnotationComment {
             range: node_range(node),
@@ -1075,7 +1097,7 @@ fn parse_thoth_annotation_tag(
                 variadic,
             })
         }
-        "return" => {
+        "return" | "returns" => {
             let Some((ty, type_range)) = parse_annotation_type(rest, source, rest_start)? else {
                 return Ok(ThothAnnotationTag::Invalid);
             };
@@ -1219,6 +1241,13 @@ fn function_annotation(
     function: Node<'_>,
     text: &str,
 ) -> Option<ThothFunctionAnnotation> {
+    let description = group
+        .iter()
+        .filter_map(|comment| match &comment.tag {
+            ThothAnnotationTag::Documentation(prose) if !prose.is_empty() => Some(prose.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let parameters = group
         .iter()
         .filter_map(|comment| match &comment.tag {
@@ -1250,7 +1279,7 @@ fn function_annotation(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if parameters.is_empty() && returns.is_empty() {
+    if parameters.is_empty() && returns.is_empty() && description.is_empty() {
         return None;
     }
     let name = field(function, "name");
@@ -1265,6 +1294,7 @@ fn function_annotation(
         contracts: vec![ThothFunctionContract {
             parameters,
             returns,
+            description,
             range: TextRange {
                 start: group.first()?.range.start,
                 end: group.last()?.range.end,
