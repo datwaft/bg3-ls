@@ -89,6 +89,16 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.20.0 surfaces Thoth doc-comment prose: plain `---` comment lines in
+an annotation block become the helper description, hover over legacy Stats
+call sites and over the `.khn` definition shows this prose next to the
+signature, signature help and completion documentation include it, and
+`---@returns` is accepted as a spelling of `---@return`. A prose-only helper
+keeps its declared parameter names instead of inventing types. The index
+cache is rebuilt once after this release because cached annotations gained a
+field. Existing configuration remains compatible, and no migration is
+required.
+
 Version 0.19.0 describes Stats member expressions: hovering an enumeration
 name or one of its values uses the Toolkit schema when it defines the
 vocabulary and a curated catalog for `AttackType` and `DamageType`, which the
