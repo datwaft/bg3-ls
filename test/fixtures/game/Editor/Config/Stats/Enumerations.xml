@@ -6,4 +6,11 @@
       <item value="Yes" />
     </items>
   </enumeration>
+  <enumeration name="AttackType">
+    <items>
+      <item value="MeleeWeaponAttack" />
+      <item value="MeleeOffHandWeaponAttack" />
+      <item value="RangedWeaponAttack" />
+    </items>
+  </enumeration>
 </enumerations>

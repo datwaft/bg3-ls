@@ -2001,6 +2001,162 @@ fn hover_and_completion_describe_curated_enum_values() {
     );
 }
 
+#[test]
+fn hover_and_completion_describe_stats_member_expressions() {
+    let (workspace, path) = fixture_workspace(200);
+    let text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellRoll\" \"Attack(AttackType.MeleeWeaponAttack)\"\ndata \"SpellProperties\" \"RemoveStatus(SELF,X);IF(not HasStatus('S',context.Source)):DealDamage(1d6,Fire)\"";
+    let overlays = overlay(&workspace, &path, text);
+
+    // Schema-enum object and value.
+    let enumeration = workspace
+        .language_hover(&path, source_position(text, "AttackType."), &overlays)
+        .unwrap();
+    assert!(
+        enumeration.contains("**Enumeration** `AttackType`"),
+        "{}",
+        enumeration
+    );
+    assert!(
+        enumeration.contains("3 documented values"),
+        "{}",
+        enumeration
+    );
+
+    let value_column = text
+        .lines()
+        .nth(2)
+        .unwrap()
+        .find("MeleeWeaponAttack")
+        .unwrap()
+        + 2;
+    let value = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 2,
+                character: u32::try_from(value_column).unwrap(),
+            },
+            &overlays,
+        )
+        .unwrap();
+    assert!(
+        value.contains("**Enum value** `MeleeWeaponAttack`"),
+        "{}",
+        value
+    );
+    assert!(value.contains("Enumeration: `AttackType`"), "{}", value);
+
+    // Context object and curated members.
+    let context_column = text.lines().nth(3).unwrap().find("context").unwrap() + 1;
+    let context = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 3,
+                character: u32::try_from(context_column).unwrap(),
+            },
+            &overlays,
+        )
+        .unwrap();
+    assert!(
+        context.contains("**Context object** `context`"),
+        "{}",
+        context
+    );
+
+    let source_column =
+        text.lines().nth(3).unwrap().find("context.Source").unwrap() + "context.".len();
+    let source = workspace
+        .language_hover(
+            &path,
+            Position {
+                line: 3,
+                character: u32::try_from(source_column).unwrap(),
+            },
+            &overlays,
+        )
+        .unwrap();
+    assert!(source.contains("**Context member** `Source`"), "{}", source);
+    assert!(source.contains("caused this evaluation"), "{}", source);
+
+    // Completion after the dots.
+    let enum_text =
+        "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellRoll\" \"Attack(AttackType.M\"";
+    let enum_overlays = overlay(&workspace, &path, enum_text);
+    let line = enum_text.lines().nth(2).unwrap();
+    let completion = workspace.completion(
+        &path,
+        Position {
+            line: 2,
+            character: u32::try_from(line.len()).unwrap(),
+        },
+        &enum_overlays,
+        false,
+    );
+    let labels: Vec<_> = completion
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            "MeleeOffHandWeaponAttack",
+            "MeleeWeaponAttack",
+            "RangedWeaponAttack"
+        ],
+        "closed quote offers the whole domain"
+    );
+    assert!(
+        completion
+            .items
+            .iter()
+            .all(|item| item.detail.as_deref() == Some("enum value"))
+    );
+
+    // Without the closing quote the prefix filters the domain.
+    let enum_text =
+        "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellRoll\" \"Attack(AttackType.R";
+    let enum_overlays = overlay(&workspace, &path, enum_text);
+    let line = enum_text.lines().nth(2).unwrap();
+    let completion = workspace.completion(
+        &path,
+        Position {
+            line: 2,
+            character: u32::try_from(line.len()).unwrap(),
+        },
+        &enum_overlays,
+        false,
+    );
+    let labels: Vec<_> = completion
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["RangedWeaponAttack"]);
+
+    let context_text =
+        "new entry \"TEST\"\ntype \"SpellData\"\ndata \"TargetConditions\" \"not context.S\"";
+    let context_overlays = overlay(&workspace, &path, context_text);
+    let line = context_text.lines().nth(2).unwrap();
+    let completion = workspace.completion(
+        &path,
+        Position {
+            line: 2,
+            character: u32::try_from(line.len()).unwrap(),
+        },
+        &context_overlays,
+        false,
+    );
+    let labels: Vec<_> = completion
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+    assert!(labels.contains(&"Source"), "{}", labels.join(","));
+    assert!(labels.contains(&"StatusId"), "{}", labels.join(","));
+}
+
 fn packaged_spell(
     package: &str,
     priority: u8,

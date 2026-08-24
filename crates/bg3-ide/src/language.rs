@@ -7,9 +7,9 @@ use bg3_index::{
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothApiResolution, PackagedThothApiSymbol,
     PackagedThothApiSymbolKind, PackagedThothCatalog, Position, SchemaDefinition, SchemaField,
     SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
-    ThothFunctionContract, context_properties, context_property, enum_value, field_documentation,
-    field_kind, function_spec, functor_prefix, functor_prefixes, is_lsx_value_field,
-    is_structural_stats_value,
+    ThothFunctionContract, context_member, context_members, context_properties, context_property,
+    context_side, enum_value, field_documentation, field_kind, function_spec, functor_prefix,
+    functor_prefixes, is_lsx_value_field, is_structural_stats_value, member_enumeration,
 };
 /// The semantic category of one completion result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -395,6 +395,11 @@ impl WorkspaceSnapshot {
             return Some(markdown);
         }
         let word = word_at(line, usize::try_from(position.character).ok()?)?;
+        if let Some(markdown) = member_word_context(line, usize::try_from(position.character).ok()?)
+            .and_then(|member| self.stats_member_hover(member, word))
+        {
+            return Some(markdown);
+        }
         if let Some(function) = function_spec(word) {
             return Some(format!(
                 "**Function** `{}`\n\n{}",
@@ -604,6 +609,68 @@ impl WorkspaceSnapshot {
             .collect()
     }
 
+    /// Renders hover for one word in member position inside a Stats value.
+    ///
+    /// Schema enumerations prove their own values; context members and side
+    /// selectors come from the curated catalog.
+    fn stats_member_hover(&self, member: MemberWord<'_>, word: &str) -> Option<String> {
+        if let Some(object) = member.object {
+            if let Some(values) = self.schema.enumerations.get(object) {
+                if values.iter().any(|value| value == word) {
+                    return Some(format!(
+                        "**Enum value** `{word}`\n\nEnumeration: `{object}`"
+                    ));
+                }
+                return None;
+            }
+            if let Some(values) = member_enumeration(object)
+                && values.contains(&word)
+            {
+                return Some(format!(
+                    "**Enum value** `{word}`\n\nEnumeration: `{object}`"
+                ));
+            }
+            if object == "context"
+                && let Some(member) = context_member(word)
+            {
+                let kind = if member.function {
+                    "Context function"
+                } else {
+                    "Context member"
+                };
+                return Some(format!(
+                    "**{kind}** `{}`\n\nMember of `context`\n\n{}",
+                    member.name, member.documentation
+                ));
+            }
+            return None;
+        }
+        if !member.is_object_position {
+            return None;
+        }
+        if let Some(values) = self.schema.enumerations.get(word) {
+            return Some(format!(
+                "**Enumeration** `{word}`\n\n{} documented values.",
+                values.len()
+            ));
+        }
+        if let Some(values) = member_enumeration(word) {
+            return Some(format!(
+                "**Enumeration** `{word}`\n\n{} documented values.",
+                values.len()
+            ));
+        }
+        if word == "context" {
+            return Some(
+                "**Context object** `context`\n\nThe evaluation context. Fetch data from the causing character with `context.Source` or the affected character with `context.Target`.".to_owned(),
+            );
+        }
+        if let Some(documentation) = context_side(word) {
+            return Some(format!("**Context side** `{word}`\n\n{documentation}"));
+        }
+        None
+    }
+
     /// Completes enum, reference, localization, and expression values.
     #[allow(clippy::too_many_arguments)]
     fn complete_value(
@@ -660,6 +727,48 @@ impl WorkspaceSnapshot {
             }
         }
 
+        if let Some(object) = member_object_before_partial(value_before_cursor) {
+            if let Some(values) = self.schema.enumerations.get(object) {
+                return values
+                    .iter()
+                    .filter(|value| starts_with_case_insensitive(value, prefix))
+                    .map(|value| {
+                        let mut item = basic_item(value, prefix, position, CompletionKind::Value);
+                        item.detail = Some("enum value".into());
+                        item.documentation = Some(format!("Value of enumeration `{object}`."));
+                        item
+                    })
+                    .collect();
+            }
+            if object == "context" {
+                return context_members()
+                    .filter(|member| starts_with_case_insensitive(member.name, prefix))
+                    .map(|member| {
+                        let kind = if member.function {
+                            CompletionKind::Function
+                        } else {
+                            CompletionKind::Field
+                        };
+                        let mut item = basic_item(member.name, prefix, position, kind);
+                        item.detail = Some("context member".into());
+                        item.documentation = Some(member.documentation.to_owned());
+                        item
+                    })
+                    .collect();
+            }
+            if object == "Target" {
+                return context_properties()
+                    .filter(|property| starts_with_case_insensitive(&property.name, prefix))
+                    .map(|property| {
+                        let mut item =
+                            basic_item(&property.name, prefix, position, CompletionKind::Value);
+                        item.detail = Some(property.kind.clone());
+                        item.documentation = Some(property.documentation.clone());
+                        item
+                    })
+                    .collect();
+            }
+        }
         if let Some(call) = call_context(value_before_cursor)
             && let Some(function) = function_spec(&call.function)
         {
@@ -2148,6 +2257,72 @@ fn format_value_preview(value: &str) -> String {
         .copied()
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The member object before the cursor and whether the cursor's identifier
+/// itself is in object position.
+struct MemberWord<'a> {
+    object: Option<&'a str>,
+    is_object_position: bool,
+}
+
+/// Splits the identifier under the cursor and reads the `Object.` prefix.
+///
+/// The object is only recognized when the dot sits directly before the word,
+/// and the object position only when the dot sits directly after it, so
+/// ordinary identifiers stay unaffected.
+fn member_word_context(line: &str, column: usize) -> Option<MemberWord<'_>> {
+    let bytes = line.as_bytes();
+    let mut start = column.min(bytes.len());
+    let mut end = start;
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end += 1;
+    }
+    if start >= end {
+        return None;
+    }
+    let object = if start >= 2 && bytes[start - 1] == b'.' {
+        let mut begin = start - 1;
+        while begin > 0 && (bytes[begin - 1].is_ascii_alphanumeric() || bytes[begin - 1] == b'_') {
+            begin -= 1;
+        }
+        (begin < start - 1).then_some(&line[begin..start - 1])
+    } else {
+        None
+    };
+    let is_object_position = end < bytes.len() && bytes[end] == b'.';
+    Some(MemberWord {
+        object,
+        is_object_position,
+    })
+}
+
+/// Returns the member object before the cursor when a Stats value ends with
+/// `Object.Partial`, tolerating a closing quote and any partial identifier.
+fn member_object_before_partial(value: &str) -> Option<&str> {
+    let bytes = value.as_bytes();
+    let mut end = bytes.len();
+    while end > 0
+        && (bytes[end - 1] == b'"'
+            || bytes[end - 1] == b'\''
+            || bytes[end - 1].is_ascii_alphanumeric()
+            || bytes[end - 1] == b'_')
+    {
+        end -= 1;
+    }
+    if end == 0 || !value[..end].ends_with('.') {
+        return None;
+    }
+    let head = &value[..end - 1];
+    let start = head
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_ascii_alphanumeric() && *character != '_')
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    (start < head.len()).then_some(&head[start..])
 }
 
 /// Returns the identifier under a byte column.
