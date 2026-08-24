@@ -89,6 +89,13 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.18.0 curates `DealDamage` and `ExecuteWeaponFunctors` with typed
+parameters, adds hover for curated parameter enum values such as `MainHand`
+and the damage types, and completes exactly the documented domain inside
+those argument positions. Expression parameters keep ordinary declaration
+references. Existing configuration remains compatible, and no migration is
+required.
+
 Version 0.17.1 aligns with `tree-sitter-bg3` 0.5.2, whose Stats-value grammar
 parses bracketed functor groups such as `CastOffhand[...]` and accepts
 execution prefixes inside condition consequences. Bracketed statements keep
