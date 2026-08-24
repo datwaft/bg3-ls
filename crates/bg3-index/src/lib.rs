@@ -51,6 +51,7 @@ pub use domain::{
 };
 pub use localization::{
     LocalizationCatalog, LocalizedText, read_base_localization_package, read_localization_package,
+    valid_language,
 };
 pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
 pub use package::{PackageEntry, PackageHeader, PackageReader};

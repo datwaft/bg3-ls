@@ -1904,6 +1904,55 @@ fn caches_and_invalidates_the_base_localization_catalog() {
 }
 
 #[test]
+fn rejects_unsafe_localization_languages_without_probing_escaped_packages() {
+    let directory = tempfile::tempdir().unwrap();
+    let game = directory.path().join("game");
+    let localization = game.join("Localization");
+    fs::create_dir_all(&localization).unwrap();
+    let handle = "h111111111111111111111111111111111111";
+    fs::write(
+        localization.join("English.pak"),
+        synthetic_package("English", &synthetic_loca(&[(handle, 1, "First")]), 0),
+    )
+    .unwrap();
+    // A fully valid synthetic package also sits at the escaped traversal
+    // target, so a loader that probed outside paths would succeed reading it.
+    let escaped = directory.path().join("outside.pak");
+    fs::write(
+        &escaped,
+        synthetic_package("English", &synthetic_loca(&[(handle, 1, "Escaped")]), 0),
+    )
+    .unwrap();
+    let cache = CacheStore::new(directory.path().join("cache")).unwrap();
+
+    for language in [
+        "../../outside",
+        "../outside",
+        "sub/English",
+        "C:\\Evil",
+        ":stream",
+        "Eng\0lish",
+        "English\n",
+        " ",
+    ] {
+        assert!(
+            cache.load_base_localization(&game, language).is_err(),
+            "the cache loader accepted {language:?}"
+        );
+        assert!(
+            read_base_localization_package(&game, language).is_err(),
+            "the package reader accepted {language:?}"
+        );
+    }
+
+    let catalog = cache
+        .load_base_localization(&game, "English")
+        .unwrap()
+        .unwrap();
+    assert_eq!(catalog.0.get(handle).unwrap().text, "First");
+}
+
+#[test]
 fn caches_and_invalidates_the_base_tooltip_catalog() {
     let directory = tempfile::tempdir().unwrap();
     let game = directory.path().join("game");

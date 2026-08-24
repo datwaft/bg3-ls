@@ -89,6 +89,13 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.20.2 validates `localization.language` as one safe catalog name
+before any package probe. The server rejects configuration values with path
+separators, Windows-reserved filename characters, traversal components, NUL,
+or control characters, so derived package paths always stay below
+`Data/Localization`. Normal language names keep working. Existing valid
+configuration remains compatible, and no migration is required.
+
 Version 0.20.1 abbreviates the home directory prefix as `~` in hover source
 paths, override chains, and Osiris contributing-goal lists so long absolute
 paths stay readable. Existing configuration remains compatible, and no
@@ -237,6 +244,12 @@ defined meaning.
 Relative dependency paths resolve against the workspace root. `game_data` must
 be absolute. The server rejects unknown keys, duplicate modules, missing roots,
 and unsupported diagnostic severities.
+
+`localization.language` must be one safe catalog name such as `English`. It
+must not contain path separators, Windows-reserved filename characters,
+traversal components, NUL, or control characters, so derived package paths
+always stay below `Data/Localization`. The server rejects the configuration
+when the value is unsafe.
 
 ## Neovim configuration
 
