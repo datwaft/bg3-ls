@@ -461,7 +461,7 @@ impl WorkspaceSnapshot {
                 markdown.push_str(&format!("\n\n- **{key}:** {}", field_value_markdown(value)));
             }
         }
-        markdown.push_str(&format!("\n\nSource: `{}`", effective.path.display()));
+        markdown.push_str(&format!("\n\nSource: `{}`", display_path(&effective.path)));
         if let Some(entry) = &effective.packaged_entry {
             markdown.push_str(&format!("\n\nPackage entry: `{entry}`"));
         }
@@ -476,7 +476,7 @@ impl WorkspaceSnapshot {
                 markdown.push_str(&format!(
                     "\n- `{}` — `{}`{}",
                     definition.module,
-                    definition.path.display(),
+                    display_path(&definition.path),
                     ambiguity
                 ));
             }
@@ -574,7 +574,7 @@ impl WorkspaceSnapshot {
             for (_, module, goal, path) in contributors {
                 markdown.push_str(&format!(
                     "\n\n- `{goal}` — module `{module}` — `{}`",
-                    path.display()
+                    display_path(&path)
                 ));
             }
         }
@@ -1247,6 +1247,32 @@ fn clamp_stats_value(value: &str) -> String {
     }
 }
 
+/// Renders one path for human-readable hover markdown.
+///
+/// Hover text replaces the home directory prefix with `~` so long absolute
+/// paths stay readable. Navigation targets keep full paths.
+fn display_path(path: &Path) -> String {
+    abbreviate_home(path, std::env::home_dir().as_deref())
+}
+
+/// Replaces an exact home-directory prefix with `~`.
+///
+/// A path must start a segment boundary inside the home directory to count;
+/// unrelated absolute and relative paths render unchanged.
+fn abbreviate_home(path: &Path, home: Option<&Path>) -> String {
+    let Some(home) = home else {
+        return path.display().to_string();
+    };
+    let Some(rest) = path.strip_prefix(home).ok() else {
+        return path.display().to_string();
+    };
+    if rest.as_os_str().is_empty() {
+        "~".to_owned()
+    } else {
+        format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1278,5 +1304,24 @@ mod tests {
         assert_eq!(old_facts.len(), 1);
         assert_eq!(next.packaged_thoth_facts_count(), 0);
         assert!(!Arc::ptr_eq(&old_facts, &next.packaged_thoth_facts()));
+    }
+
+    #[test]
+    fn abbreviates_only_exact_home_directory_prefixes() {
+        let home = Path::new("/Users/td");
+        let render = |path: &str| abbreviate_home(Path::new(path), Some(home));
+
+        assert_eq!(
+            render("/Users/td/Mods/X/Stats/a.txt"),
+            "~/Mods/X/Stats/a.txt"
+        );
+        assert_eq!(render("/Users/td"), "~");
+        assert_eq!(render("/Users/tdx/Mods"), "/Users/tdx/Mods");
+        assert_eq!(render("/synthetic/MyMod/a.khn"), "/synthetic/MyMod/a.khn");
+        assert_eq!(render("relative/a.txt"), "relative/a.txt");
+        assert_eq!(
+            abbreviate_home(Path::new("/Users/td/a.txt"), None),
+            "/Users/td/a.txt"
+        );
     }
 }

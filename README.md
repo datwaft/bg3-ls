@@ -89,6 +89,11 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.20.1 abbreviates the home directory prefix as `~` in hover source
+paths, override chains, and Osiris contributing-goal lists so long absolute
+paths stay readable. Existing configuration remains compatible, and no
+migration is required.
+
 Version 0.20.0 surfaces Thoth doc-comment prose: plain `---` comment lines in
 an annotation block become the helper description, hover over legacy Stats
 call sites and over the `.khn` definition shows this prose next to the

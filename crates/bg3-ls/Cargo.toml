@@ -12,8 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 arc-swap.workspace = true
-bg3-ide = { version = "=0.20.0", path = "../bg3-ide" }
-bg3-index = { version = "=0.20.0", path = "../bg3-index" }
+bg3-ide = { version = "=0.20.1", path = "../bg3-ide" }
+bg3-index = { version = "=0.20.1", path = "../bg3-index" }
 clap.workspace = true
 larian-formats.workspace = true
 notify.workspace = true
