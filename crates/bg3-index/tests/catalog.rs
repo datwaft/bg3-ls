@@ -1,6 +1,7 @@
 use bg3_index::{
-    context_properties, context_property, enum_value, field_documentation, function_spec,
-    functor_prefix, functor_prefixes,
+    context_member, context_members, context_properties, context_property, context_side,
+    enum_value, field_documentation, function_spec, functor_prefix, functor_prefixes,
+    member_enumeration,
 };
 
 #[test]
@@ -132,4 +133,34 @@ fn resolves_enum_values_back_to_their_parameters() {
 
     assert!(enum_value("NotAnEnumValue").is_none());
     assert!(enum_value("SELF").is_none());
+}
+
+#[test]
+fn curates_member_enumerations_missing_from_the_toolkit_schema() {
+    let attack_types = member_enumeration("AttackType").expect("attested attack types");
+    assert_eq!(attack_types.len(), 8);
+    assert!(attack_types.contains(&"MeleeWeaponAttack"));
+
+    let damage_types = member_enumeration("DamageType").expect("damage types");
+    assert_eq!(damage_types.len(), 13);
+
+    assert!(member_enumeration("Ability").is_none());
+    assert!(member_enumeration("NotAnEnumeration").is_none());
+}
+
+#[test]
+fn documents_curated_context_members() {
+    let source = context_member("Source").expect("attested context member");
+    assert!(!source.function);
+    assert!(source.documentation.contains("caused this evaluation"));
+
+    let has_flag = context_member("HasContextFlag").expect("attested context function");
+    assert!(has_flag.function);
+
+    assert_eq!(context_members().count(), 8);
+    assert!(context_member("NotAMember").is_none());
+
+    let target = context_side("Target").expect("side selector");
+    assert!(target.contains("from the target"));
+    assert!(context_side("Source").is_none());
 }

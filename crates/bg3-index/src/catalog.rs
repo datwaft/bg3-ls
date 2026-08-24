@@ -265,6 +265,113 @@ pub fn enum_value(name: &str) -> Option<&'static EnumValueSpec> {
         .find(|candidate| candidate.name == name)
 }
 
+/// One curated member of the Stats evaluation context.
+#[derive(Clone, Copy, Debug)]
+pub struct ContextMemberSpec {
+    pub name: &'static str,
+    pub function: bool,
+    pub documentation: &'static str,
+}
+
+const fn context_member_entry(
+    name: &'static str,
+    function: bool,
+    documentation: &'static str,
+) -> ContextMemberSpec {
+    ContextMemberSpec {
+        name,
+        function,
+        documentation,
+    }
+}
+
+/// Context members attested inside installed base modules.
+const CONTEXT_MEMBERS: &[ContextMemberSpec] = &[
+    context_member_entry(
+        "Source",
+        false,
+        "The character or item that caused this evaluation.",
+    ),
+    context_member_entry(
+        "Target",
+        false,
+        "The character or item this evaluation points at.",
+    ),
+    context_member_entry(
+        "Observer",
+        false,
+        "The character from whose perspective this evaluation runs.",
+    ),
+    context_member_entry(
+        "HasContextFlag",
+        true,
+        "Tests whether the evaluation context carries one flag.",
+    ),
+    context_member_entry(
+        "HitDescription",
+        false,
+        "Details about the hit in damage and kill evaluations.",
+    ),
+    context_member_entry(
+        "StatusId",
+        false,
+        "The identifier of the status being evaluated.",
+    ),
+    context_member_entry(
+        "CheckedAbility",
+        false,
+        "The ability being checked in ability-check evaluations.",
+    ),
+    context_member_entry(
+        "CheckedSkill",
+        false,
+        "The skill being checked in skill-check evaluations.",
+    ),
+];
+
+/// Finds a curated context member by its exact name.
+pub fn context_member(name: &str) -> Option<&'static ContextMemberSpec> {
+    CONTEXT_MEMBERS
+        .iter()
+        .find(|candidate| candidate.name == name)
+}
+
+/// Returns every curated context member.
+pub fn context_members() -> impl Iterator<Item = &'static ContextMemberSpec> {
+    CONTEXT_MEMBERS.iter()
+}
+
+/// Returns the documentation for a context side selector such as `Target`.
+pub fn context_side(name: &str) -> Option<&'static str> {
+    match name {
+        "Target" => Some("Fetches the expression data from the target instead of the source."),
+        _ => None,
+    }
+}
+
+/// Attack types attested inside installed base modules. The Toolkit
+/// enumerations do not define this vocabulary.
+const ATTACK_TYPES: &[&str] = &[
+    "MeleeWeaponAttack",
+    "MeleeOffHandWeaponAttack",
+    "MeleeUnarmedAttack",
+    "MeleeSpellAttack",
+    "RangedWeaponAttack",
+    "RangedOffHandWeaponAttack",
+    "RangedUnarmedAttack",
+    "RangedSpellAttack",
+];
+
+/// Returns the documented member values for member enumerations that the
+/// Toolkit schema does not define, such as `AttackType` and `DamageType`.
+pub fn member_enumeration(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "AttackType" => Some(ATTACK_TYPES),
+        "DamageType" => Some(DAMAGE_TYPES),
+        _ => None,
+    }
+}
+
 const PASSIVE: FunctionForm = form(&[parameter("passive", Some("PassiveData"))]);
 const STATUS: FunctionForm = form(&[parameter("status", Some("StatusData"))]);
 const SPELL: FunctionForm = form(&[parameter("spell", Some("SpellData"))]);
