@@ -89,6 +89,15 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.19.0 describes Stats member expressions: hovering an enumeration
+name or one of its values uses the Toolkit schema when it defines the
+vocabulary and a curated catalog for `AttackType` and `DamageType`, which the
+schema files omit. Hovering `context` and its members such as `context.Source`
+uses a curated context-member catalog, `Target` documents the target-side
+selector, and completion after `AttackType.`, `context.`, or `Target.`
+offers exactly the matching members. Existing configuration remains
+compatible, and no migration is required.
+
 Version 0.18.0 curates `DealDamage` and `ExecuteWeaponFunctors` with typed
 parameters, adds hover for curated parameter enum values such as `MainHand`
 and the damage types, and completes exactly the documented domain inside
