@@ -1,5 +1,6 @@
 use bg3_index::{
-    context_properties, context_property, field_documentation, functor_prefix, functor_prefixes,
+    context_properties, context_property, enum_value, field_documentation, function_spec,
+    functor_prefix, functor_prefixes,
 };
 
 #[test]
@@ -100,4 +101,35 @@ fn documents_attested_stats_properties() {
     // Only the curated set documents itself; nothing is invented.
     assert!(field_documentation("NotAProperty").is_none());
     assert!(field_documentation("").is_none());
+}
+
+#[test]
+fn curates_weapon_and_damage_functors_with_enum_domains() {
+    let deal_damage = function_spec("DealDamage").expect("attested functor");
+    let damage_types = deal_damage
+        .parameter_enum_values(1, 2, None)
+        .expect("damage type domain");
+    assert_eq!(damage_types.len(), 13);
+    assert!(damage_types.contains(&"Fire"));
+    assert!(deal_damage.parameter_enum_values(0, 2, None).is_none());
+
+    let weapon_functors = function_spec("ExecuteWeaponFunctors").expect("attested functor");
+    let hand_slots = weapon_functors
+        .parameter_enum_values(0, 1, None)
+        .expect("hand slot domain");
+    assert_eq!(hand_slots, &["MainHand", "OffHand", "BothHands"]);
+}
+
+#[test]
+fn resolves_enum_values_back_to_their_parameters() {
+    let hand = enum_value("MainHand").expect("hand slot value");
+    assert_eq!(hand.parameter, "eHandSlot");
+    assert_eq!(hand.function, "ExecuteWeaponFunctors");
+
+    let damage = enum_value("Fire").expect("damage type value");
+    assert_eq!(damage.parameter, "eDamageType");
+    assert_eq!(damage.function, "DealDamage");
+
+    assert!(enum_value("NotAnEnumValue").is_none());
+    assert!(enum_value("SELF").is_none());
 }

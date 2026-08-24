@@ -6,6 +6,10 @@ use std::sync::OnceLock;
 pub struct ParameterSpec {
     pub label: &'static str,
     pub kind: Option<&'static str>,
+    pub enum_values: &'static [&'static str],
+    /// Whether the parameter holds a Stats expression whose identifiers stay
+    /// ordinary declaration references.
+    pub expression: bool,
 }
 
 /// One verified call form for a curated Stats function.
@@ -56,52 +60,251 @@ impl FunctionSpec {
             .get(index)
             .and_then(|parameter| parameter.kind)
     }
+
+    /// Returns the documented enum domain for one parameter in the selected
+    /// call form.
+    pub fn parameter_enum_values(
+        &self,
+        index: usize,
+        argument_count: usize,
+        first_argument: Option<&str>,
+    ) -> Option<&'static [&'static str]> {
+        let values = self
+            .form_for_call(argument_count, first_argument)
+            .parameters
+            .get(index)?
+            .enum_values;
+        (!values.is_empty()).then_some(values)
+    }
 }
 
-const PASSIVE: FunctionForm = form(&[ParameterSpec {
-    label: "passive",
-    kind: Some("PassiveData"),
-}]);
-const STATUS: FunctionForm = form(&[ParameterSpec {
-    label: "status",
-    kind: Some("StatusData"),
-}]);
-const SPELL: FunctionForm = form(&[ParameterSpec {
-    label: "spell",
-    kind: Some("SpellData"),
-}]);
-const INTERRUPT: FunctionForm = form(&[ParameterSpec {
-    label: "interrupt",
-    kind: Some("InterruptData"),
-}]);
-const RESOURCE: FunctionForm = form(&[ParameterSpec {
-    label: "resource",
-    kind: Some("ActionResource"),
-}]);
-const TARGET_STATUS: FunctionForm = form(&[
+/// Constructs one parameter without a typed or enumerated domain.
+const fn parameter(label: &'static str, kind: Option<&'static str>) -> ParameterSpec {
     ParameterSpec {
-        label: "target",
+        label,
+        kind,
+        enum_values: &[],
+        expression: false,
+    }
+}
+
+/// Constructs one parameter that holds a Stats expression.
+const fn expression_parameter(label: &'static str) -> ParameterSpec {
+    ParameterSpec {
+        label,
         kind: None,
-    },
+        enum_values: &[],
+        expression: true,
+    }
+}
+
+/// Constructs one parameter whose domain is a documented identifier set.
+const fn enum_parameter(
+    label: &'static str,
+    enum_values: &'static [&'static str],
+) -> ParameterSpec {
     ParameterSpec {
-        label: "status",
-        kind: Some("StatusData"),
-    },
+        label,
+        kind: None,
+        enum_values,
+        expression: false,
+    }
+}
+
+/// Damage types documented for damage-dealing functors.
+const DAMAGE_TYPES: &[&str] = &[
+    "Slashing",
+    "Piercing",
+    "Bludgeoning",
+    "Acid",
+    "Thunder",
+    "Necrotic",
+    "Fire",
+    "Lightning",
+    "Cold",
+    "Psychic",
+    "Poison",
+    "Radiant",
+    "Force",
+];
+
+/// Weapon slots documented for weapon functors.
+const HAND_SLOTS: &[&str] = &["MainHand", "OffHand", "BothHands"];
+
+/// One curated parameter enum value with its owning function and parameter.
+#[derive(Clone, Copy, Debug)]
+pub struct EnumValueSpec {
+    pub name: &'static str,
+    pub parameter: &'static str,
+    pub function: &'static str,
+    pub documentation: &'static str,
+}
+
+const fn enum_value_entry(
+    name: &'static str,
+    parameter: &'static str,
+    function: &'static str,
+    documentation: &'static str,
+) -> EnumValueSpec {
+    EnumValueSpec {
+        name,
+        parameter,
+        function,
+        documentation,
+    }
+}
+
+/// Curated parameter domains, flattened for reverse identifier lookup.
+const ENUM_VALUES: &[EnumValueSpec] = &[
+    enum_value_entry(
+        "MainHand",
+        "eHandSlot",
+        "ExecuteWeaponFunctors",
+        "Weapon slot selector for weapon functors.",
+    ),
+    enum_value_entry(
+        "OffHand",
+        "eHandSlot",
+        "ExecuteWeaponFunctors",
+        "Weapon slot selector for weapon functors.",
+    ),
+    enum_value_entry(
+        "BothHands",
+        "eHandSlot",
+        "ExecuteWeaponFunctors",
+        "Weapon slot selector for weapon functors.",
+    ),
+];
+
+const DAMAGE_ENUM_VALUES: &[EnumValueSpec] = &[
+    enum_value_entry(
+        "Slashing",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Piercing",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Bludgeoning",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Acid",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Thunder",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Necrotic",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Fire",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Lightning",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Cold",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Psychic",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Poison",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Radiant",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+    enum_value_entry(
+        "Force",
+        "eDamageType",
+        "DealDamage",
+        "Damage type applied by functors and rolls.",
+    ),
+];
+
+/// Finds a curated parameter enum value by its exact identifier.
+pub fn enum_value(name: &str) -> Option<&'static EnumValueSpec> {
+    ENUM_VALUES
+        .iter()
+        .chain(DAMAGE_ENUM_VALUES.iter())
+        .find(|candidate| candidate.name == name)
+}
+
+const PASSIVE: FunctionForm = form(&[parameter("passive", Some("PassiveData"))]);
+const STATUS: FunctionForm = form(&[parameter("status", Some("StatusData"))]);
+const SPELL: FunctionForm = form(&[parameter("spell", Some("SpellData"))]);
+const INTERRUPT: FunctionForm = form(&[parameter("interrupt", Some("InterruptData"))]);
+const RESOURCE: FunctionForm = form(&[parameter("resource", Some("ActionResource"))]);
+const TARGET_STATUS: FunctionForm = form(&[
+    parameter("target", None),
+    parameter("status", Some("StatusData")),
 ]);
 const TARGET_SPELL: FunctionForm = form(&[
-    ParameterSpec {
-        label: "target",
-        kind: None,
-    },
-    ParameterSpec {
-        label: "spell",
-        kind: Some("SpellData"),
-    },
+    parameter("target", None),
+    parameter("spell", Some("SpellData")),
 ]);
+const DEAL_DAMAGE: FunctionForm = form(&[
+    expression_parameter("expression"),
+    enum_parameter("damage type", DAMAGE_TYPES),
+    parameter("magical", None),
+    parameter("nonlethal", None),
+    parameter("per gold amount", None),
+    parameter("extra tooltip text", None),
+    parameter("exclude damage bonus", None),
+    parameter("disable passive on damage event", None),
+    parameter("consume gold", None),
+    parameter("ignore resistance", None),
+]);
+const EXECUTE_WEAPON_FUNCTORS: FunctionForm = form(&[enum_parameter("hand slot", HAND_SLOTS)]);
 
 /// Curated functions shared by parsing and editor language operations.
 pub const FUNCTIONS: &[FunctionSpec] = &[
     function("AddPassive", "Adds a passive to the target.", PASSIVE),
+    function(
+        "DealDamage",
+        "Deals damage of one type to the target.",
+        DEAL_DAMAGE,
+    ),
+    function(
+        "ExecuteWeaponFunctors",
+        "Executes the functors defined on the weapon in one hand slot.",
+        EXECUTE_WEAPON_FUNCTORS,
+    ),
     targeted_function(
         "ApplyStatus",
         "Applies a status to the target.",

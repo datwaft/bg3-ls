@@ -1944,6 +1944,63 @@ fn hover_describes_legacy_stats_property_names() {
     assert!(!unknown.contains("Types:"), "{}", unknown);
 }
 
+#[test]
+fn hover_and_completion_describe_curated_enum_values() {
+    let (workspace, path) = fixture_workspace(200);
+    let text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"GROUND:ExecuteWeaponFunctors(MainHand);DealDamage(1d6,Fire)\"";
+    let overlays = overlay(&workspace, &path, text);
+
+    let hand = workspace
+        .language_hover(&path, source_position(text, "MainHand"), &overlays)
+        .unwrap();
+    assert!(hand.contains("**Enum value** `MainHand`"), "{}", hand);
+    assert!(
+        hand.contains("`eHandSlot` of `ExecuteWeaponFunctors`"),
+        "{}",
+        hand
+    );
+
+    let fire = workspace
+        .language_hover(&path, source_position(text, "Fire"), &overlays)
+        .unwrap();
+    assert!(fire.contains("**Enum value** `Fire`"), "{}", fire);
+    assert!(fire.contains("`eDamageType` of `DealDamage`"), "{}", fire);
+
+    // Completion offers exactly the domain of the argument under the cursor.
+    let hand_text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"ExecuteWeaponFunctors(Main";
+    let hand_overlays = overlay(&workspace, &path, hand_text);
+    let line = hand_text.lines().nth(2).unwrap();
+    let position = Position {
+        line: 2,
+        character: u32::try_from(line.len()).unwrap(),
+    };
+    let completion = workspace.completion(&path, position, &hand_overlays, false);
+    let labels: Vec<_> = completion
+        .items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["MainHand"]);
+
+    // A closed quote leaves an empty prefix, so the whole domain is offered.
+    let damage_text =
+        "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"DealDamage(1d6,Fire\"";
+    let damage_overlays = overlay(&workspace, &path, damage_text);
+    let line = damage_text.lines().nth(2).unwrap();
+    let position = Position {
+        line: 2,
+        character: u32::try_from(line.len()).unwrap(),
+    };
+    let completion = workspace.completion(&path, position, &damage_overlays, false);
+    assert_eq!(completion.items.len(), 13);
+    assert!(
+        completion
+            .items
+            .iter()
+            .any(|item| item.label == "Fire" && item.detail.as_deref() == Some("enum value"))
+    );
+}
+
 fn packaged_spell(
     package: &str,
     priority: u8,
