@@ -56,9 +56,19 @@ pub struct SignatureHelp {
 struct AnnotatedSignature {
     parameters: Vec<String>,
     returns: Vec<String>,
+    description: Vec<String>,
 }
 
 impl AnnotatedSignature {
+    /// Reports whether the annotation supplies any explicit type evidence.
+    ///
+    /// A prose-only annotation documents behavior without typing it, so
+    /// consumers must keep declared parameter names visible instead of
+    /// rendering an empty parameter list.
+    fn typed(&self) -> bool {
+        !self.parameters.is_empty() || !self.returns.is_empty()
+    }
+
     fn label(&self, name: &str) -> String {
         let mut label = format!("{name}({})", self.parameters.join(", "));
         if !self.returns.is_empty() {
@@ -69,11 +79,13 @@ impl AnnotatedSignature {
     }
 
     fn documentation(&self, prefix: &str) -> String {
-        if self.returns.is_empty() {
-            prefix.to_owned()
-        } else {
-            format!("{prefix}\n\nReturns: `{}`", self.returns.join(", "))
+        let mut parts = self.description.clone();
+        parts.push(prefix.to_owned());
+        let mut documentation = parts.join("\n\n");
+        if !self.returns.is_empty() {
+            documentation.push_str(&format!("\n\nReturns: `{}`", self.returns.join(", ")));
         }
+        documentation
     }
 }
 
@@ -92,6 +104,7 @@ fn annotated_signature(contract: &ThothFunctionContract) -> AnnotatedSignature {
             .iter()
             .map(|return_value| return_value.ty.to_string())
             .collect(),
+        description: contract.description.clone(),
     }
 }
 
@@ -322,10 +335,30 @@ impl WorkspaceSnapshot {
         if let Some(signature) =
             self.loose_thoth_annotation_signature(&context.function, &resolved, overlays)
         {
+            let typed = signature.typed();
+            let (label, parameters) = if typed {
+                (
+                    signature.label(&context.function),
+                    signature.parameters.clone(),
+                )
+            } else {
+                let declared = resolved
+                    .first()
+                    .map(|definition| thoth_parameters(&definition.definition))
+                    .unwrap_or_default();
+                (
+                    format!("{}({})", context.function, declared.join(", ")),
+                    declared,
+                )
+            };
             return Some(SignatureHelp {
-                label: signature.label(&context.function),
-                documentation: signature.documentation("Explicit Thoth annotation."),
-                parameters: signature.parameters,
+                label,
+                documentation: signature.documentation(if typed {
+                    "Explicit Thoth annotation."
+                } else {
+                    "Parameter types are not inferred."
+                }),
+                parameters,
                 active_parameter: context.argument,
             });
         }
@@ -345,15 +378,34 @@ impl WorkspaceSnapshot {
         if let Some((signature, module, entries)) =
             self.packaged_thoth_annotation(&context.function)
         {
-            let mut documentation = signature.documentation("Explicit installed Thoth annotation.");
+            let typed = signature.typed();
+            let (label, parameters) = if typed {
+                (
+                    signature.label(&context.function),
+                    signature.parameters.clone(),
+                )
+            } else {
+                (
+                    format!("{}({})", context.function, parameters.join(", ")),
+                    parameters,
+                )
+            };
+            let fallback = format!(
+                "Installed Thoth evidence from module `{module}`. Parameter types are not inferred."
+            );
+            let mut documentation = signature.documentation(if typed {
+                "Explicit installed Thoth annotation."
+            } else {
+                &fallback
+            });
             documentation.push_str(&format!("\n\nModule: `{module}`"));
             if !entries.is_empty() {
                 documentation.push_str(&format!("\n\nPackage entries: `{}`", entries.join("`, `")));
             }
             return Some(SignatureHelp {
-                label: signature.label(&context.function),
+                label,
                 documentation,
-                parameters: signature.parameters,
+                parameters,
                 active_parameter: context.argument,
             });
         }
@@ -915,19 +967,35 @@ impl WorkspaceSnapshot {
                 let ambiguous = parameter_lists.len() > 1;
                 let annotation =
                     self.loose_thoth_completion_annotation(&layer.spec.name, &name, overlays);
+                let typed = annotation.as_ref().is_some_and(AnnotatedSignature::typed);
                 for parameters in parameter_lists {
                     let mut item = basic_item(&name, prefix, position, CompletionKind::Function);
-                    item.detail = Some(if let Some(signature) = &annotation {
-                        signature.label(&name)
-                    } else if ambiguous {
-                        format!("{} (same-rank ambiguity)", layer.spec.name)
-                    } else {
-                        layer.spec.name.clone()
-                    });
-                    item.documentation = Some(if annotation.is_some() {
-                        "Explicit Thoth annotation.".into()
-                    } else {
-                        "Declared Thoth helper. Parameter types are not inferred.".into()
+                    item.detail = Some(
+                        if let Some(signature) = annotation.as_ref().filter(|s| s.typed()) {
+                            signature.label(&name)
+                        } else if ambiguous {
+                            format!("{} (same-rank ambiguity)", layer.spec.name)
+                        } else {
+                            layer.spec.name.clone()
+                        },
+                    );
+                    item.documentation = Some(match annotation.as_ref() {
+                        Some(signature) => {
+                            let mut documentation = if typed {
+                                "Explicit Thoth annotation.".to_owned()
+                            } else {
+                                "Declared Thoth helper. Parameter types are not inferred."
+                                    .to_owned()
+                            };
+                            if !signature.description.is_empty() {
+                                documentation.push_str("\n\n");
+                                documentation.push_str(&signature.description.join("\n\n"));
+                            }
+                            documentation
+                        }
+                        None => {
+                            "Declared Thoth helper. Parameter types are not inferred.".to_owned()
+                        }
                     });
                     if snippets {
                         let parameters = split_parameters(&parameters);
@@ -956,7 +1024,10 @@ impl WorkspaceSnapshot {
                 let mut item = basic_item(&name, prefix, position, CompletionKind::Function);
                 let annotation = self.packaged_thoth_annotation(&name);
                 item.detail = Some(
-                    if let Some((signature, installed_module, _)) = &annotation {
+                    if let Some((signature, installed_module, _)) = annotation
+                        .as_ref()
+                        .filter(|(signature, _, _)| signature.typed())
+                    {
                         format!(
                             "{} (installed {})",
                             signature.label(&name),
@@ -968,22 +1039,29 @@ impl WorkspaceSnapshot {
                         format!("installed {module}")
                     },
                 );
-                item.documentation = Some(
-                    if let Some((_, installed_module, entries)) = &annotation {
-                        let mut documentation = format!(
-                            "Explicit installed Thoth annotation from module {}.",
-                            installed_module
-                        );
+                item.documentation = Some(match annotation.as_ref() {
+                    Some((signature, installed_module, entries)) => {
+                        let mut documentation = if signature.typed() {
+                            format!(
+                                "Explicit installed Thoth annotation from module {installed_module}."
+                            )
+                        } else {
+                            "Installed Thoth declaration from configured package data. Parameter types are not inferred."
+                                .to_owned()
+                        };
+                        if !signature.description.is_empty() {
+                            documentation.push_str("\n\n");
+                            documentation.push_str(&signature.description.join("\n\n"));
+                        }
                         if !entries.is_empty() {
                             documentation
                                 .push_str(&format!(" Package entries: {}.", entries.join(", ")));
                         }
                         documentation
-                    } else {
-                        "Installed Thoth declaration from configured package data. Parameter types are not inferred."
-                        .into()
-                    },
-                );
+                    }
+                    None => "Installed Thoth declaration from configured package data. Parameter types are not inferred."
+                        .to_owned(),
+                });
                 if snippets {
                     if parameters.is_empty() {
                         item.new_text = format!("{name}()");
@@ -1491,9 +1569,17 @@ impl WorkspaceSnapshot {
         overlays: &OverlaySet,
     ) -> Option<String> {
         let signature = self.loose_thoth_annotation_signature(name, definitions, overlays)?;
+        let label = if signature.typed() {
+            signature.label(name)
+        } else {
+            let parameters = definitions
+                .first()
+                .map(|definition| thoth_parameters(&definition.definition).join(", "))
+                .unwrap_or_default();
+            format!("{name}({parameters})")
+        };
         Some(format!(
-            "**Thoth function** `{name}`\n\nSignature: `{}`\n\n{}",
-            signature.label(name),
+            "**Thoth function** `{name}`\n\nSignature: `{label}`\n\n{}",
             signature.documentation("Explicit Thoth annotation.")
         ))
     }

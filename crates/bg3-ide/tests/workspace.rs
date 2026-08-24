@@ -544,6 +544,135 @@ fn uses_explicit_thoth_annotations_for_editor_evidence() {
 }
 
 #[test]
+fn documents_declared_helpers_from_prose_and_returns_alias() {
+    let schema = Arc::new(SchemaCatalog::default());
+    let helper_path = PathBuf::from("/synthetic/MyMod/Scripts/thoth/helpers/Documented.khn");
+    let helper_text = concat!(
+        "--- Returns whether the helper applies.\n",
+        "---@param value number\n",
+        "---@returns boolean\n",
+        "function Helper(value)\n",
+        "  return true\n",
+        "end\n",
+        "\n",
+        "--- Documents the fallback without typing it.\n",
+        "function Fallback(value)\n",
+        "end\n",
+    );
+    let module = Arc::new(ModuleIndex::new(
+        ModuleSpec {
+            name: "MyMod".into(),
+            root: PathBuf::from("/synthetic/MyMod"),
+            role: ModuleRole::Project,
+        },
+        vec![
+            parse_source(
+                SourceFile {
+                    path: helper_path,
+                    kind: SourceKind::Thoth,
+                },
+                helper_text,
+                &schema,
+                "English",
+            )
+            .unwrap(),
+        ],
+    ));
+    let workspace = WorkspaceSnapshot::new(schema, vec![module], 1, 200, 200);
+
+    let caller_path = PathBuf::from("/synthetic/MyMod/Stats/Generated/Data/Caller.txt");
+    let caller_text = concat!(
+        "new entry \"TEST\"\n",
+        "type \"SpellData\"\n",
+        "data \"RequirementConditions\" \"Helper(1) and Fallback(2);\"",
+    );
+    let overlays = overlay(&workspace, &caller_path, caller_text);
+
+    let hover = workspace
+        .hover(
+            &caller_path,
+            source_position(caller_text, "Helper"),
+            &overlays,
+        )
+        .expect("documented hover");
+    assert!(hover.contains("**Thoth function** `Helper`"), "{hover}");
+    assert!(
+        hover.contains("Signature: `Helper(value: number): boolean`"),
+        "{hover}"
+    );
+    assert!(
+        hover.contains("Returns whether the helper applies."),
+        "{hover}"
+    );
+    assert!(hover.contains("Returns: `boolean`"), "{hover}");
+
+    let fallback_hover = workspace
+        .hover(
+            &caller_path,
+            source_position(caller_text, "Fallback"),
+            &overlays,
+        )
+        .expect("prose-only hover");
+    assert!(
+        fallback_hover.contains("Signature: `Fallback(value)`"),
+        "{fallback_hover}"
+    );
+    assert!(
+        fallback_hover.contains("Documents the fallback without typing it."),
+        "{fallback_hover}"
+    );
+
+    let signature_text = concat!(
+        "new entry \"TEST\"\n",
+        "type \"SpellData\"\n",
+        "data \"RequirementConditions\" \"Helper(1\"",
+    );
+    let signature_overlays = overlay(&workspace, &caller_path, signature_text);
+    let signature = workspace
+        .signature_help(
+            &caller_path,
+            Position {
+                line: 2,
+                character: u32::try_from(signature_text.lines().nth(2).unwrap().len()).unwrap(),
+            },
+            &signature_overlays,
+        )
+        .expect("documented signature help");
+    assert_eq!(signature.label, "Helper(value: number): boolean");
+    assert!(
+        signature
+            .documentation
+            .to_string()
+            .contains("Returns whether the helper applies.")
+    );
+
+    let completion_text = concat!(
+        "new entry \"TEST\"\n",
+        "type \"SpellData\"\n",
+        "data \"RequirementConditions\" \"Fall",
+    );
+    let completion_overlays = overlay(&workspace, &caller_path, completion_text);
+    let completion = workspace.completion(
+        &caller_path,
+        Position {
+            line: 2,
+            character: u32::try_from(completion_text.lines().nth(2).unwrap().len()).unwrap(),
+        },
+        &completion_overlays,
+        false,
+    );
+    let item = completion
+        .items
+        .iter()
+        .find(|item| item.label == "Fallback")
+        .expect("prose-only completion");
+    assert_eq!(item.detail.as_deref(), Some("MyMod"));
+    assert!(item.documentation.as_deref().is_some_and(|documentation| {
+        documentation.contains("Documents the fallback without typing it.")
+    }));
+}
+
+#[test]
 fn annotation_precedence_masks_lower_and_conflicting_contracts() {
     let schema = Arc::new(SchemaCatalog::default());
     let lower_path = PathBuf::from("/synthetic/Lower/Annotated.khn");

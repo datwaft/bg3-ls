@@ -1051,6 +1051,56 @@ fn unsupported_annotation_tags_break_function_attachment() {
 }
 
 #[test]
+fn captures_prose_documentation_lines_and_returns_alias() {
+    let text = concat!(
+        "--- Used in condition contexts.\n",
+        "--- Returns whether the helper applies.\n",
+        "---@param value number\n",
+        "---@returns boolean\n",
+        "function Helper(value)\n",
+        "  return true\n",
+        "end\n",
+        "\n",
+        "--- Documents the fallback without typing it.\n",
+        "function Fallback(value)\n",
+        "end\n",
+    );
+    let facts = parse_thoth_file(text).unwrap();
+    assert_eq!(facts.annotations.functions.len(), 2);
+
+    let contract = &facts.annotations.functions[0].contracts[0];
+    assert_eq!(
+        contract.description,
+        vec![
+            "Used in condition contexts.".to_owned(),
+            "Returns whether the helper applies.".to_owned(),
+        ]
+    );
+    assert_eq!(contract.parameters[0].name, "value");
+    assert_eq!(contract.parameters[0].ty.to_string(), "number");
+    assert_eq!(contract.returns[0].ty.to_string(), "boolean");
+
+    let untyped = &facts.annotations.functions[1].contracts[0];
+    assert_eq!(
+        untyped.description,
+        vec!["Documents the fallback without typing it.".to_owned()]
+    );
+    assert!(untyped.parameters.is_empty());
+    assert!(untyped.returns.is_empty());
+}
+
+#[test]
+fn plain_comments_still_break_prose_documentation_attachment() {
+    let broken = "--- Documents the helper.\n-- ordinary comment\nfunction Broken(value)\nend\n";
+    let facts = parse_thoth_file(broken).unwrap();
+    assert!(facts.annotations.functions.is_empty());
+
+    let dashed = "--- Documents the helper.\n---- separator\nfunction Dashed(value)\nend\n";
+    let facts = parse_thoth_file(dashed).unwrap();
+    assert!(facts.annotations.functions.is_empty());
+}
+
+#[test]
 fn rejects_non_whitespace_type_suffixes() {
     for suffix in ["Weapon$", "boolean)", "Weapon[]foo"] {
         let text = format!("---@param item {suffix}\nfunction Broken(item)\nend\n");
