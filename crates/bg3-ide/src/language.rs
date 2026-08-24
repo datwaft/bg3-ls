@@ -7,10 +7,10 @@ use bg3_index::{
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothApiResolution, PackagedThothApiSymbol,
     PackagedThothApiSymbolKind, PackagedThothCatalog, Position, SchemaDefinition, SchemaField,
     SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
-    ThothFunctionContract, context_properties, context_property, field_documentation, field_kind,
-    function_spec, functor_prefix, functor_prefixes, is_lsx_value_field, is_structural_stats_value,
+    ThothFunctionContract, context_properties, context_property, enum_value, field_documentation,
+    field_kind, function_spec, functor_prefix, functor_prefixes, is_lsx_value_field,
+    is_structural_stats_value,
 };
-
 /// The semantic category of one completion result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionKind {
@@ -407,6 +407,12 @@ impl WorkspaceSnapshot {
                 property.name, property.kind, property.documentation
             ));
         }
+        if let Some(value) = enum_value(word) {
+            return Some(format!(
+                "**Enum value** `{}`\n\nParameter: `{}` of `{}`\n\n{}",
+                value.name, value.parameter, value.function, value.documentation
+            ));
+        }
         if let Some(prefix) = functor_prefix(word) {
             return Some(format!(
                 "**Functor prefix** `{}:`\n\nKind: {}\n\n{}",
@@ -656,13 +662,33 @@ impl WorkspaceSnapshot {
 
         if let Some(call) = call_context(value_before_cursor)
             && let Some(function) = function_spec(&call.function)
-            && let Some(kind) = function.parameter_kind(
+        {
+            if let Some(kind) = function.parameter_kind(
                 call.argument,
                 call.argument + 1,
                 call.first_argument.as_deref(),
-            )
-        {
-            return self.complete_symbols(kind, prefix, position, overlays);
+            ) {
+                return self.complete_symbols(kind, prefix, position, overlays);
+            }
+            if let Some(values) = function.parameter_enum_values(
+                call.argument,
+                call.argument + 1,
+                call.first_argument.as_deref(),
+            ) {
+                return values
+                    .iter()
+                    .filter(|value| starts_with_case_insensitive(value, prefix))
+                    .map(|value| {
+                        let mut item = basic_item(value, prefix, position, CompletionKind::Value);
+                        item.detail = Some("enum value".into());
+                        item.documentation = Some(format!(
+                            "Parameter of curated function `{}`.",
+                            function.name
+                        ));
+                        item
+                    })
+                    .collect();
+            }
         }
         if let Some(kind) = field_kind(field_name) {
             return self.complete_symbols(kind, prefix, position, overlays);

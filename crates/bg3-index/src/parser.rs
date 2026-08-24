@@ -2899,10 +2899,13 @@ fn call_context(node: Node<'_>, source: &str) -> Option<Option<String>> {
                 if is_descendant(node, argument) {
                     let name = function.utf8_text(source.as_bytes()).ok()?;
                     let form = function_spec(name)?.form_for_call(argument_count, first_argument);
-                    return form
-                        .parameters
-                        .get(index)
-                        .map(|parameter| parameter.kind.map(str::to_owned));
+                    let parameter = form.parameters.get(index)?;
+                    // Expression parameters hold Stats expressions whose bare
+                    // identifiers stay ordinary references.
+                    if parameter.expression {
+                        return None;
+                    }
+                    return Some(parameter.kind.map(str::to_owned));
                 }
             }
             return None;
