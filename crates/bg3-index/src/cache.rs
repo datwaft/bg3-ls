@@ -23,7 +23,7 @@ use crate::tooltip::{TooltipCatalog, base_tooltip_package_path, read_base_toolti
 use crate::{Error, ModuleSpec};
 
 const CACHE_MAGIC: &[u8; 8] = b"BG3LSIDX";
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 4;
 const EXTRACTOR_VERSION: &str = "bg3-ls-index-v6";
 const LOCALIZATION_EXTRACTOR_VERSION: &str = "bg3-ls-localization-v1";
 const TOOLTIP_EXTRACTOR_VERSION: &str = "bg3-ls-tooltips-v1";

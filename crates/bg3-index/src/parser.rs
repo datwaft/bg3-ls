@@ -13,17 +13,17 @@ use crate::annotation::{
     ThothFunctionContract, ThothParameterAnnotation, ThothReturnAnnotation,
     ThothVariableAnnotation, TypeExpression, parse_type_expression,
 };
-use crate::catalog::{field_kind, function_spec, is_lsx_value_field};
+use crate::catalog::{field_kind, function_spec, is_lsx_value_field, osiris_signature};
 use crate::domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
-    OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference, SourceFile, SourceIssue,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment, ThothBinaryOperator,
-    ThothCall, ThothControlFlowFact, ThothDeclaration, ThothDeclarationOwner, ThothExpression,
-    ThothExpressionFact, ThothExpressionKind, ThothFile, ThothIfBranch, ThothIfBranchKind,
-    ThothLexicalScope, ThothLiteralKind, ThothMemberAccess, ThothMemberAccessKind,
-    ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId, ThothStatementId,
-    ThothUnaryOperator,
+    OsirisEvidenceOrigin, OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference,
+    SourceFile, SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    ThothAssignment, ThothBinaryOperator, ThothCall, ThothControlFlowFact, ThothDeclaration,
+    ThothDeclarationOwner, ThothExpression, ThothExpressionFact, ThothExpressionKind, ThothFile,
+    ThothIfBranch, ThothIfBranchKind, ThothLexicalScope, ThothLiteralKind, ThothMemberAccess,
+    ThothMemberAccessKind, ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId,
+    ThothStatementId, ThothUnaryOperator,
 };
 use crate::localization::valid_handle;
 use crate::schema::{SchemaCatalog, SchemaDefinition};
@@ -1690,7 +1690,7 @@ fn parse_osiris_rule(
     references: &mut Vec<Reference>,
     occurrences: &mut Vec<OsirisDatabaseOccurrence>,
 ) -> Result<(), Error> {
-    let variable_types = osiris_rule_variable_types(rule, text)?;
+    let mut variable_types = osiris_rule_variable_types(rule, text)?;
     let Some(head) = field(rule, "head") else {
         return Ok(());
     };
@@ -1729,14 +1729,21 @@ fn parse_osiris_rule(
                 arity: Some(arity),
             });
         }
-        _ => collect_osiris_call(
-            head,
-            text,
-            OsirisCallRole::Read,
-            &variable_types,
-            references,
-            occurrences,
-        )?,
+        _ => {
+            // Engine signatures enrich only rule conditions and actions. User
+            // PROC and QRY heads are declarations with no curated contract.
+            for (variable, evidence) in osiris_engine_variable_types(&name, arguments, text)? {
+                variable_types.entry(variable).or_insert(evidence);
+            }
+            collect_osiris_call(
+                head,
+                text,
+                OsirisCallRole::Read,
+                &variable_types,
+                references,
+                occurrences,
+            )?
+        }
     }
 
     let mut cursor = rule.walk();
@@ -1956,6 +1963,7 @@ fn osiris_rule_variable_types(
             let evidence = OsirisTypeEvidence {
                 type_name: type_node.utf8_text(text.as_bytes())?.to_owned(),
                 source_range: node_range(type_node),
+                origin: OsirisEvidenceOrigin::Explicit,
             };
             candidates
                 .entry(name)
@@ -1990,6 +1998,7 @@ fn osiris_argument_evidence(
         return Ok(Some(OsirisTypeEvidence {
             type_name: type_node.utf8_text(text.as_bytes())?.to_owned(),
             source_range: node_range(type_node),
+            origin: OsirisEvidenceOrigin::Explicit,
         }));
     }
     let Some(value) = field(argument, "value") else {
@@ -2010,7 +2019,47 @@ fn osiris_argument_evidence(
     Ok(Some(OsirisTypeEvidence {
         type_name: type_name.into(),
         source_range: node_range(value),
+        origin: OsirisEvidenceOrigin::Explicit,
     }))
+}
+
+/// Derives rule-head variable aliases from one curated engine signature.
+///
+/// Only uncast head arguments bind an alias; explicit casts keep their own
+/// stronger evidence, and unknown events contribute nothing so that analysis
+/// stays silent about signatures the catalog does not prove.
+fn osiris_engine_variable_types(
+    name: &str,
+    arguments: Node<'_>,
+    text: &str,
+) -> Result<HashMap<String, OsirisTypeEvidence>, Error> {
+    let arity = osiris_arity(arguments)?;
+    let Some(signature) = osiris_signature(name, arity) else {
+        return Ok(HashMap::new());
+    };
+    let mut derived = HashMap::new();
+    let mut cursor = arguments.walk();
+    for (index, argument) in arguments.named_children(&mut cursor).enumerate() {
+        let Some(alias) = signature.get(index) else {
+            break;
+        };
+        if field(argument, "cast").is_some() {
+            continue;
+        }
+        if let Some(value) = field(argument, "value")
+            && value.kind() == "local_variable"
+        {
+            derived.insert(
+                value.utf8_text(text.as_bytes())?.to_owned(),
+                OsirisTypeEvidence {
+                    type_name: (*alias).to_owned(),
+                    source_range: node_range(value),
+                    origin: OsirisEvidenceOrigin::Engine,
+                },
+            );
+        }
+    }
+    Ok(derived)
 }
 
 /// Parses legacy plain-text Stats with the generated Tree-sitter grammar.

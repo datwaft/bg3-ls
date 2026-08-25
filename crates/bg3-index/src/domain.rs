@@ -94,11 +94,21 @@ pub enum OsirisCallRole {
     Write,
 }
 
+/// The provenance of one Osiris argument type observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum OsirisEvidenceOrigin {
+    /// An explicit source cast, a typed rule variable, or a literal.
+    Explicit,
+    /// Derived from a curated engine event signature at a rule head.
+    Engine,
+}
+
 /// One exact source-backed type observation for an Osiris argument.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct OsirisTypeEvidence {
     pub type_name: String,
     pub source_range: TextRange,
+    pub origin: OsirisEvidenceOrigin,
 }
 
 /// One argument supplied to an Osiris database call.

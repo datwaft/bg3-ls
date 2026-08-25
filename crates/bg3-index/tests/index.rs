@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 
 use bg3_index::{
     CacheStore, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
-    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, SchemaCatalog, SourceFile,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, ThothBinaryOperator, ThothExpressionKind,
-    ThothIfBranchKind, ThothLiteralKind, ThothMemberAccessKind, ThothParameter, ThothScopeId,
-    ThothUnaryOperator, discover_module, is_structural_stats_value, parse_source, parse_thoth_file,
-    parse_tooltip_catalog, read_base_localization_package, read_base_tooltip_catalog,
-    read_localization_package, source_kind_for_document,
+    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, OsirisEvidenceOrigin, SchemaCatalog,
+    SourceFile, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, ThothBinaryOperator,
+    ThothExpressionKind, ThothIfBranchKind, ThothLiteralKind, ThothMemberAccessKind,
+    ThothParameter, ThothScopeId, ThothUnaryOperator, discover_module, is_structural_stats_value,
+    parse_source, parse_thoth_file, parse_tooltip_catalog, read_base_localization_package,
+    read_base_tooltip_catalog, read_localization_package, source_kind_for_document,
 };
 
 fn fixtures() -> PathBuf {
@@ -1363,6 +1363,49 @@ fn parses_osiris_goals_declarations_calls_and_database_evidence() {
                 .as_ref()
                 .is_some_and(|evidence| evidence.type_name == "CHARACTER")
     }));
+}
+
+#[test]
+fn derives_engine_aliases_for_uncast_head_variables() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\nDied(_Char)\nTHEN\nDB_Deceased(_Char);\n",
+        "IF\nUnknownEvent(_Who)\nTHEN\nDB_Missing(_Who);\n",
+        "EXITSECTION\nENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Derived.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty());
+    let osiris = parsed.osiris.as_ref().unwrap();
+
+    let deceased = osiris_occurrence(&osiris.occurrences, "DB_Deceased");
+    let evidence = deceased.arguments[0].evidence.as_ref().unwrap();
+    assert_eq!(evidence.type_name, "CHARACTER");
+    assert_eq!(evidence.origin, OsirisEvidenceOrigin::Engine);
+
+    let missing = osiris_occurrence(&osiris.occurrences, "DB_Missing");
+    assert!(missing.arguments[0].evidence.is_none());
+}
+
+fn osiris_occurrence<'a>(
+    occurrences: &'a [bg3_index::OsirisDatabaseOccurrence],
+    name: &str,
+) -> &'a bg3_index::OsirisDatabaseOccurrence {
+    occurrences
+        .iter()
+        .find(|occurrence| occurrence.name == name)
+        .unwrap()
 }
 
 #[test]

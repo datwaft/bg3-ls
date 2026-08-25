@@ -1,7 +1,8 @@
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use bg3_index::{
-    Definition, SchemaDefinition, SchemaField, SourceKind, SymbolTarget, TextRange,
+    Definition, OsirisFile, SchemaDefinition, SchemaField, SourceKind, SymbolTarget, TextRange,
     ThothBinaryOperator, ThothExpressionKind, ThothUnaryOperator, TypeExpression,
     is_schema_discriminator,
 };
@@ -58,6 +59,9 @@ impl WorkspaceSnapshot {
         if matches!(file.source.kind, SourceKind::Osiris | SourceKind::Thoth) {
             if file.source.kind == SourceKind::Thoth {
                 add_thoth_condition_diagnostics(self, path, file, overlays, &mut diagnostics);
+            }
+            if file.source.kind == SourceKind::Osiris {
+                add_osiris_database_diagnostics(self, path, overlays, &mut diagnostics);
             }
             diagnostics.sort_by_key(|diagnostic| {
                 (
@@ -157,8 +161,126 @@ impl WorkspaceSnapshot {
     }
 }
 
-/// Reports only source-proven `ConditionResult` uses that rely on Lua boolean
-/// semantics instead of the type's explicit result and overloaded operators.
+/// One alias observation for one Osiris database column.
+struct OsirisAliasObservation {
+    path: PathBuf,
+    range: TextRange,
+    type_name: String,
+}
+
+/// Per-column alias state for one user database.
+struct OsirisColumnAliases {
+    established: Option<OsirisAliasObservation>,
+    conflicts: Vec<OsirisAliasObservation>,
+}
+
+/// Diagnoses user database columns whose occurrences disagree on one alias.
+///
+/// Establishment aggregates every visible loose goal across module layers and
+/// overlays, mirroring `osiris_database_hover`. Only the diagnosed document's
+/// arguments are reported, because protocol diagnostics are per document.
+/// Unknown evidence never conflicts, so unavailable engine signatures stay
+/// silent.
+fn add_osiris_database_diagnostics(
+    workspace: &WorkspaceSnapshot,
+    path: &Path,
+    overlays: &OverlaySet,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut databases = BTreeMap::<(String, u16), Vec<OsirisColumnAliases>>::new();
+    for layer in workspace.layers.iter() {
+        for (overlay_path, overlay) in overlays.for_module(&layer.spec.name) {
+            collect_osiris_alias_evidence(
+                overlay.parsed.osiris.as_ref(),
+                overlay_path,
+                &mut databases,
+            );
+        }
+        for (file_path, file) in &layer.files {
+            if overlays.contains(file_path) {
+                continue;
+            }
+            collect_osiris_alias_evidence(file.osiris.as_ref(), file_path, &mut databases);
+        }
+    }
+
+    for ((name, arity), columns) in databases {
+        for (index, column) in columns.into_iter().enumerate() {
+            // A column without an established alias has nothing to violate.
+            let Some(established) = column.established else {
+                continue;
+            };
+            for conflict in column.conflicts {
+                if conflict.path != path {
+                    continue;
+                }
+                diagnostics.push(Diagnostic {
+                    range: conflict.range,
+                    severity: DiagnosticSeverity::Error,
+                    code: "osiris-database-alias-mismatch".into(),
+                    message: format!(
+                        "Column {} of `{name}/{arity}` is established as `{}`. This argument supplies `{}`. Add an explicit `({})` cast.",
+                        index + 1,
+                        established.type_name,
+                        conflict.type_name,
+                        established.type_name,
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// Folds one goal's database occurrences into per-column alias state.
+///
+/// The first observed alias establishes the column; later distinct aliases
+/// become conflicts. Both reads and writes participate because the compiler
+/// checks every use against the established column type.
+fn collect_osiris_alias_evidence(
+    osiris: Option<&OsirisFile>,
+    path: &Path,
+    databases: &mut BTreeMap<(String, u16), Vec<OsirisColumnAliases>>,
+) {
+    let Some(osiris) = osiris else {
+        return;
+    };
+    for occurrence in &osiris.occurrences {
+        let columns = databases
+            .entry((occurrence.name.clone(), occurrence.arity))
+            .or_insert_with(|| {
+                (0..usize::from(occurrence.arity))
+                    .map(|_| OsirisColumnAliases {
+                        established: None,
+                        conflicts: Vec::new(),
+                    })
+                    .collect::<Vec<_>>()
+            });
+        for (column, argument) in columns.iter_mut().zip(&occurrence.arguments) {
+            let Some(evidence) = argument.evidence.as_ref() else {
+                continue;
+            };
+            match &column.established {
+                None => {
+                    column.established = Some(OsirisAliasObservation {
+                        path: path.to_owned(),
+                        range: argument.range,
+                        type_name: evidence.type_name.clone(),
+                    });
+                }
+                Some(established) => {
+                    if established.type_name != evidence.type_name {
+                        column.conflicts.push(OsirisAliasObservation {
+                            path: path.to_owned(),
+                            range: argument.range,
+                            type_name: evidence.type_name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn add_thoth_condition_diagnostics(
     workspace: &WorkspaceSnapshot,
     path: &Path,
