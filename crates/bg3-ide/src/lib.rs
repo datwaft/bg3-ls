@@ -829,6 +829,7 @@ impl WorkspaceSnapshot {
         for layer in self
             .layers
             .iter()
+            .rev()
             .filter(|layer| layer.spec.role == ModuleRole::Base)
         {
             match self.packaged_osiris.resolve(&layer.spec.name, name, arity) {

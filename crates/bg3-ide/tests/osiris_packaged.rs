@@ -42,23 +42,35 @@ fn index(catalog: &PackagedThothCatalog) -> Arc<PackagedOsirisIndex> {
 }
 
 fn base_entry(name: &str) -> String {
-    format!("Mods/Shared/Story/RawFiles/Goals/{name}.txt")
+    module_base_entry("Shared", name)
+}
+
+fn module_base_entry(module: &str, name: &str) -> String {
+    format!("Mods/{module}/Story/RawFiles/Goals/{name}.txt")
 }
 
 fn workspace_with(project_goals: Option<&str>) -> (WorkspaceSnapshot, PathBuf) {
+    workspace_with_base_modules(&["Shared"], project_goals)
+}
+
+fn workspace_with_base_modules(
+    base_modules: &[&str],
+    project_goals: Option<&str>,
+) -> (WorkspaceSnapshot, PathBuf) {
     let schema = Arc::new(SchemaCatalog::default());
-    let specs = [
-        ModuleSpec {
-            name: "Shared".into(),
-            root: PathBuf::from("/synthetic/Shared"),
+    let mut specs: Vec<_> = base_modules
+        .iter()
+        .map(|name| ModuleSpec {
+            name: (*name).into(),
+            root: PathBuf::from(format!("/synthetic/{name}")),
             role: ModuleRole::Base,
-        },
-        ModuleSpec {
-            name: "Project".into(),
-            root: PathBuf::from("/synthetic/Project"),
-            role: ModuleRole::Project,
-        },
-    ];
+        })
+        .collect();
+    specs.push(ModuleSpec {
+        name: "Project".into(),
+        root: PathBuf::from("/synthetic/Project"),
+        role: ModuleRole::Project,
+    });
     let layers = specs
         .into_iter()
         .map(|spec| {
@@ -265,6 +277,67 @@ fn ambiguous_installed_declarations_stay_untyped() {
         )
         .expect("ambiguous signature help");
     assert_eq!(signature.label, "ProcSplit(value1, value2)");
+}
+
+#[test]
+fn higher_precedence_base_module_masks_lower_ambiguity() {
+    let catalog = Arc::new(
+        PackagedThothCatalog::from_sources([
+            osiris_source(
+                "A",
+                &module_base_entry("A", "Alpha"),
+                "A.pak",
+                0,
+                &proc_declaration("ProcRank((CHARACTER)_Low, (INTEGER)_Amount)"),
+            ),
+            osiris_source(
+                "A",
+                &module_base_entry("A", "Beta"),
+                "A-alt.pak",
+                0,
+                &proc_declaration("ProcRank((GUIDSTRING)_Other, (INTEGER)_Amount)"),
+            ),
+            osiris_source(
+                "B",
+                &module_base_entry("B", "Base"),
+                "B.pak",
+                0,
+                &proc_declaration("ProcRank((STRING)_High, (INTEGER)_Count)"),
+            ),
+        ])
+        .expect("catalog"),
+    );
+    let (workspace, caller_path) = workspace_with_base_modules(&["A", "B"], None);
+    let workspace = workspace.with_packaged_osiris(index(catalog.as_ref()));
+    let caller = CALLER.replace("ProcHeal", "ProcRank");
+    let overlays = osiris_overlay(&workspace, &caller_path, &caller);
+
+    let hover = workspace
+        .hover(
+            &caller_path,
+            source_position(&caller, "ProcRank"),
+            &overlays,
+        )
+        .expect("higher-precedence installed procedure hover");
+    assert!(hover.contains("Module: `B`"), "{hover}");
+    assert!(
+        hover.contains("Signature: `ProcRank(STRING _High, INTEGER _Count)`"),
+        "{hover}"
+    );
+    assert!(!hover.contains("disagree"), "{hover}");
+
+    let (line, column) = call_position(&caller, "ProcRank");
+    let signature = workspace
+        .signature_help(
+            &caller_path,
+            Position {
+                line,
+                character: column,
+            },
+            &overlays,
+        )
+        .expect("higher-precedence installed signature help");
+    assert_eq!(signature.label, "ProcRank(STRING _High, INTEGER _Count)");
 }
 
 #[test]
