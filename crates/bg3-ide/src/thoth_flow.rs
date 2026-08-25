@@ -13,7 +13,7 @@ use bg3_index::{
     ThothScopeId, ThothStatementId, ThothUnaryOperator, TypeExpression,
 };
 
-use crate::{OverlaySet, ResolvedThothFunction, ThothTypeSource, WorkspaceSnapshot};
+use crate::{HoverMarkup, OverlaySet, ResolvedThothFunction, ThothTypeSource, WorkspaceSnapshot};
 
 #[derive(Default)]
 pub(crate) struct Guards {
@@ -63,10 +63,11 @@ impl WorkspaceSnapshot {
         let fact = facts.into_iter().next()?;
         let mut guards = Guards::default();
         let ty = known(self.thoth_type_at_fact(path, file, fact, overlays, &mut guards))?;
-        Some(format!(
-            "**Thoth inferred type** `{}`\n\nType: `{ty}`",
-            fact.text
-        ))
+        Some(
+            HoverMarkup::new("Thoth inferred type", &fact.text)
+                .fact("Type", &ty.to_string())
+                .finish(),
+        )
     }
 
     /// Resolves one indexed fact while retaining its statement identity.
@@ -1021,7 +1022,7 @@ fn scope_depth(file: &ThothFile, mut from: ThothScopeId, target: ThothScopeId) -
 
 fn contains(range: TextRange, position: Position) -> bool {
     (position.line, position.character) >= (range.start.line, range.start.character)
-        && (position.line, position.character) <= (range.end.line, range.end.character)
+        && (position.line, position.character) < (range.end.line, range.end.character)
 }
 
 fn range_size(range: TextRange) -> (u32, u32, u32, u32) {

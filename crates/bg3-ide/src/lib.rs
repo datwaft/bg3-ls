@@ -15,8 +15,8 @@ use bg3_index::{
     OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
     PackagedStatsCatalog, PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts,
     ParsedFile, Position, Reference, SchemaCatalog, SourceKind, SymbolTarget,
-    THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothFile, TooltipCatalog,
-    canonical_kind, parse_packaged_thoth_facts,
+    THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile,
+    TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -25,6 +25,72 @@ pub use thoth::{
     ResolvedThothAlias, ResolvedThothClass, ResolvedThothField, ResolvedThothFunction,
     ResolvedThothVariable, ThothTypeSource,
 };
+
+/// Editor-neutral hover content and the exact source span that produced it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HoverResult {
+    pub markdown: String,
+    pub range: Option<TextRange>,
+}
+
+impl std::ops::Deref for HoverResult {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.markdown
+    }
+}
+
+impl std::fmt::Display for HoverResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.markdown)
+    }
+}
+
+/// Shared presentation builder for the stable hover information hierarchy.
+pub(crate) struct HoverMarkup {
+    markdown: String,
+}
+
+impl HoverMarkup {
+    pub(crate) fn new(kind: &str, name: &str) -> Self {
+        Self {
+            markdown: format!(
+                "**{}** {}",
+                escape_markdown_text(kind),
+                markdown_inline_code(name)
+            ),
+        }
+    }
+
+    pub(crate) fn fact(mut self, label: &str, value: &str) -> Self {
+        self.markdown
+            .push_str(&format!("\n\n{label}: {}", bounded_inline_code(value)));
+        self
+    }
+
+    /// Appends trusted Markdown supplied by a curated catalog or renderer.
+    pub(crate) fn markdown(mut self, markdown: &str) -> Self {
+        if !markdown.is_empty() {
+            self.markdown.push_str("\n\n");
+            self.markdown.push_str(markdown);
+        }
+        self
+    }
+
+    /// Appends external prose as escaped, bounded plain text.
+    pub(crate) fn prose(mut self, prose: &str) -> Self {
+        if !prose.is_empty() {
+            self.markdown.push_str("\n\n");
+            self.markdown.push_str(&bounded_markdown_text(prose));
+        }
+        self
+    }
+
+    pub(crate) fn finish(self) -> String {
+        self.markdown
+    }
+}
 
 /// A definition result with the module that contributes its precedence.
 #[derive(Clone, Debug)]
@@ -389,7 +455,39 @@ impl WorkspaceSnapshot {
     }
 
     /// Returns a rich Markdown description for the symbol under one position.
-    pub fn hover(&self, path: &Path, position: Position, overlays: &OverlaySet) -> Option<String> {
+    pub fn hover(
+        &self,
+        path: &Path,
+        position: Position,
+        overlays: &OverlaySet,
+    ) -> Option<HoverResult> {
+        self.hover_markdown(path, position, overlays)
+            .map(|markdown| HoverResult {
+                markdown,
+                range: self.hover_range_at(path, position, overlays),
+            })
+    }
+
+    /// Returns language-specific hover when normal symbol resolution is silent.
+    pub fn language_hover(
+        &self,
+        path: &Path,
+        position: Position,
+        overlays: &OverlaySet,
+    ) -> Option<HoverResult> {
+        self.language_hover_markdown(path, position, overlays)
+            .map(|markdown| HoverResult {
+                markdown,
+                range: self.hover_range_at(path, position, overlays),
+            })
+    }
+
+    fn hover_markdown(
+        &self,
+        path: &Path,
+        position: Position,
+        overlays: &OverlaySet,
+    ) -> Option<String> {
         let target = self.target_at(path, position, overlays)?;
         if let SymbolTarget::Named {
             kind: Some(kind),
@@ -409,6 +507,18 @@ impl WorkspaceSnapshot {
             return self.osiris_database_hover(&target, overlays);
         }
         let definitions = self.resolve(&target, overlays);
+        if definitions.is_empty()
+            && let SymbolTarget::OsirisCallable { name, arity } = &target
+        {
+            return Some(
+                HoverMarkup::new("Osiris callable", &format!("{name}/{arity}"))
+                    .fact("Arity", &arity.to_string())
+                    .markdown(
+                        "No configured loose declaration is visible. Callable kind and parameter types are unknown; the symbol can come from packed or unconfigured Story sources.",
+                    )
+                    .finish(),
+            );
+        }
         let effective = definitions.first()?;
         if effective.definition.kind == THOTH_FUNCTION_KIND
             && let Some(hover) =
@@ -423,18 +533,16 @@ impl WorkspaceSnapshot {
             OSIRIS_QUERY_KIND => "Osiris query",
             _ => &effective.definition.kind,
         };
-        let mut markdown = format!(
-            "**{heading}** `{}`\n\nModule: `{}`",
-            effective.definition.name, effective.module
-        );
+        let mut markdown =
+            HoverMarkup::new(heading, &effective.definition.name).fact("Module", &effective.module);
         if let Some(block) = self.stats_source_block(effective, overlays) {
-            markdown.push_str(&block);
+            markdown = markdown.markdown(block.trim_start());
         } else {
             if let Some(uuid) = effective.definition.uuid {
-                markdown.push_str(&format!("\n\nUUID: `{uuid}`"));
+                markdown = markdown.fact("UUID", &uuid.to_string());
             }
             if let Some(parent) = &effective.definition.parent {
-                markdown.push_str(&format!("\n\nParent: `{parent}`"));
+                markdown = markdown.fact("Parent", parent);
             }
             if matches!(
                 effective.definition.kind.as_str(),
@@ -445,55 +553,163 @@ impl WorkspaceSnapshot {
                     .fields
                     .get("Parameters")
                     .map_or("", String::as_str);
-                markdown.push_str(&format!(
-                    "\n\nSignature: `{}({parameters})`",
-                    effective.definition.name
-                ));
+                let signature = format!("{}({parameters})", effective.definition.name);
+                markdown = markdown.fact("Signature", &signature);
             }
             let signature_kind = matches!(
                 effective.definition.kind.as_str(),
                 THOTH_FUNCTION_KIND | OSIRIS_PROCEDURE_KIND | OSIRIS_QUERY_KIND
             );
-            for (key, value) in &effective.definition.fields {
-                if signature_kind && key == "Parameters" {
-                    continue;
-                }
-                markdown.push_str(&format!("\n\n- **{key}:** {}", field_value_markdown(value)));
+            let fields: Vec<_> = effective
+                .definition
+                .fields
+                .iter()
+                .filter(|(key, _)| !(signature_kind && *key == "Parameters"))
+                .collect();
+            let mut field_markdown = String::new();
+            for (key, value) in fields.iter().take(MAX_HOVER_LIST_ENTRIES) {
+                field_markdown.push_str(&format!(
+                    "\n\n- **{}:** {}",
+                    escape_markdown_text(key),
+                    field_value_markdown(value)
+                ));
             }
+            append_omitted_entries(
+                &mut field_markdown,
+                fields.len().saturating_sub(MAX_HOVER_LIST_ENTRIES),
+            );
+            markdown = markdown.markdown(field_markdown.trim_start());
         }
-        markdown.push_str(&format!("\n\nSource: `{}`", display_path(&effective.path)));
+        markdown = markdown.fact("Source", &display_path(&effective.path));
         if let Some(entry) = &effective.packaged_entry {
-            markdown.push_str(&format!("\n\nPackage entry: `{entry}`"));
+            markdown = markdown.fact("Package entry", entry);
         }
         if definitions.len() > 1 {
-            markdown.push_str("\n\n**Override chain**\n");
-            for definition in &definitions {
+            let mut overrides = String::from("**Override chain**\n");
+            for definition in definitions.iter().take(MAX_HOVER_LIST_ENTRIES) {
                 let ambiguity = if definition.ambiguous {
                     " — same-rank ambiguity"
                 } else {
                     ""
                 };
-                markdown.push_str(&format!(
-                    "\n- `{}` — `{}`{}",
-                    definition.module,
-                    display_path(&definition.path),
+                overrides.push_str(&format!(
+                    "\n- {} — {}{}",
+                    markdown_inline_code(&definition.module),
+                    markdown_inline_code(&display_path(&definition.path)),
                     ambiguity
                 ));
             }
+            append_omitted_entries(
+                &mut overrides,
+                definitions.len().saturating_sub(MAX_HOVER_LIST_ENTRIES),
+            );
+            markdown = markdown.markdown(&overrides);
         }
         if let Some(preview) = self.tooltip_preview(&definitions, overlays) {
-            markdown.push_str(&preview);
+            markdown = markdown.markdown(preview.trim_start());
         }
-        Some(markdown)
+        Some(markdown.finish())
+    }
+
+    /// Finds the smallest syntax-backed span that contains one hover position.
+    fn hover_range_at(
+        &self,
+        path: &Path,
+        position: Position,
+        overlays: &OverlaySet,
+    ) -> Option<TextRange> {
+        let (_, file) = self.file(path, overlays)?;
+        let mut candidates = file
+            .references
+            .iter()
+            .map(|reference| reference.range)
+            .chain(
+                file.definitions
+                    .iter()
+                    .map(|definition| definition.selection_range),
+            )
+            .chain(
+                file.definitions
+                    .iter()
+                    .flat_map(|definition| definition.field_ranges.values().copied()),
+            )
+            .collect::<Vec<_>>();
+        if let Some(thoth) = &file.thoth {
+            candidates.extend(
+                thoth
+                    .declarations
+                    .iter()
+                    .map(|declaration| declaration.name_range),
+            );
+            candidates.extend(thoth.calls.iter().map(|call| call.name_range));
+            candidates.extend(thoth.member_accesses.iter().map(|access| access.range));
+            for fact in &thoth.expression_facts {
+                candidates.push(fact.range);
+                if let ThothExpressionKind::MemberAccess(segments) = &fact.kind {
+                    candidates.extend(segments.iter().skip(1).map(|segment| segment.range));
+                }
+            }
+            candidates.extend(thoth.annotations.classes.iter().flat_map(|class| {
+                std::iter::once(class.name_range)
+                    .chain(class.fields.iter().map(|field| field.name_range))
+            }));
+            candidates.extend(
+                thoth
+                    .annotations
+                    .aliases
+                    .iter()
+                    .map(|alias| alias.name_range),
+            );
+            candidates.extend(
+                thoth
+                    .annotations
+                    .functions
+                    .iter()
+                    .filter_map(|function| function.name_range),
+            );
+            candidates.extend(
+                thoth
+                    .annotations
+                    .variables
+                    .iter()
+                    .map(|variable| variable.target_range),
+            );
+        }
+        let semantic = candidates
+            .into_iter()
+            .filter(|range| range_contains(*range, position))
+            .min_by_key(hover_range_size);
+        semantic.or_else(|| {
+            let text = overlays.get(path)?.text.as_str();
+            lexical_hover_range(text, position)
+        })
     }
 
     /// Renders the configured-language value for one exact localization handle.
     fn localization_hover(&self, handle: &str, overlays: &OverlaySet) -> Option<String> {
+        let target = SymbolTarget::Named {
+            kind: Some("Localization".into()),
+            name: handle.into(),
+        };
         let text = self.localized_value(handle, overlays)?;
-        Some(format!(
-            "**Localization** `{handle}`\n\n{}",
-            render_localized_text(&text)
-        ))
+        let mut markdown = HoverMarkup::new("Localization", handle);
+        if let Some(definition) = self.resolve(&target, overlays).first() {
+            if let Some(language) = definition.definition.fields.get("Language") {
+                markdown = markdown.fact("Language", language);
+            }
+            if let Some(version) = definition.definition.fields.get("Version") {
+                markdown = markdown.fact("Version", version);
+            }
+            markdown = markdown
+                .fact("Module", &definition.module)
+                .fact("Source", &display_path(&definition.path));
+        } else if let Some(packed) = self.base_localization.get(handle) {
+            markdown = markdown
+                .fact("Language", self.base_localization.language())
+                .fact("Version", &packed.version.to_string())
+                .fact("Source", "packed base localization");
+        }
+        Some(markdown.markdown(&render_localized_text(&text)).finish())
     }
 
     /// Describes one database from all visible loose occurrence evidence.
@@ -557,28 +773,34 @@ impl WorkspaceSnapshot {
                 }
             })
             .collect();
-        let mut markdown = format!(
-            "**Osiris database** `{name}/{arity}`\n\nSignature: `{}({})`\n\nWrites: {writes}\n\nReads: {reads}",
-            name,
-            parameters.join(", ")
-        );
+        let database_name = format!("{name}/{arity}");
+        let signature = format!("{}({})", name, parameters.join(", "));
+        let mut markdown = HoverMarkup::new("Osiris database", &database_name)
+            .fact("Signature", &signature)
+            .fact("Writes", &writes.to_string())
+            .fact("Reads", &reads.to_string());
         if writes == 0 {
-            markdown.push_str(
-                "\n\nNo write is visible in configured loose sources. The database can come from packed or unconfigured Story sources.",
+            markdown = markdown.markdown(
+                "No write is visible in configured loose sources. The database can come from packed or unconfigured Story sources.",
             );
         }
         if !contributors.is_empty() {
-            markdown.push_str("\n\n**Contributing goals**");
+            let mut goals = String::from("**Contributing goals**");
             let mut contributors: Vec<_> = contributors.into_iter().collect();
             contributors.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-            for (_, module, goal, path) in contributors {
-                markdown.push_str(&format!(
-                    "\n\n- `{goal}` — module `{module}` — `{}`",
-                    display_path(&path)
+            let omitted = contributors.len().saturating_sub(MAX_HOVER_LIST_ENTRIES);
+            for (_, module, goal, path) in contributors.into_iter().take(MAX_HOVER_LIST_ENTRIES) {
+                goals.push_str(&format!(
+                    "\n\n- {} — module {} — {}",
+                    markdown_inline_code(&goal),
+                    markdown_inline_code(&module),
+                    markdown_inline_code(&display_path(&path))
                 ));
             }
+            append_omitted_entries(&mut goals, omitted);
+            markdown = markdown.markdown(&goals);
         }
-        Some(markdown)
+        Some(markdown.finish())
     }
 
     /// Builds a static localized preview from effective inherited tooltip fields.
@@ -605,21 +827,27 @@ impl WorkspaceSnapshot {
             return None;
         }
 
-        let mut markdown = "\n\n---\n\n### Game text preview".to_owned();
+        let mut preview = "---\n\n### Game text preview".to_owned();
         if let Some(display_name) = display_name {
-            markdown.push_str(&format!("\n\n**{}**", render_localized_text(&display_name)));
-        }
-        if let Some(description) = description {
-            markdown.push_str(&format!("\n\n{}", render_localized_text(&description)));
-        }
-        if let Some(parameters) = parameters {
-            markdown.push_str(&format!(
-                "\n\nDescription parameters: {}",
-                markdown_inline_code(parameters)
+            preview.push_str(&format!(
+                "\n\n**Title**\n\n**{}**",
+                render_localized_text(&display_name)
             ));
         }
-        markdown.push_str("\n\n*Static preview. Game logic and UI formatting are not evaluated.*");
-        Some(markdown)
+        if let Some(description) = description {
+            preview.push_str(&format!(
+                "\n\n**Description**\n\n{}",
+                render_localized_text(&description)
+            ));
+        }
+        if let Some(parameters) = parameters {
+            preview.push_str(&format!(
+                "\n\nDescription parameters: {}",
+                bounded_inline_code(parameters)
+            ));
+        }
+        preview.push_str("\n\n*Static preview. Game logic and UI formatting are not evaluated.*");
+        Some(preview)
     }
 
     /// Renders one static game glossary entry without evaluating UI data bindings.
@@ -637,17 +865,23 @@ impl WorkspaceSnapshot {
             return None;
         }
 
-        let mut markdown = format!("**Game tooltip** `{name}`");
+        let mut markdown = HoverMarkup::new("Game tooltip", name);
         if let Some(title) = title {
-            markdown.push_str(&format!("\n\n**{}**", render_localized_text(&title)));
+            markdown = markdown.markdown(&format!(
+                "\n\n**Title**\n\n**{}**",
+                render_localized_text(&title)
+            ));
         }
         if let Some(description) = description {
-            markdown.push_str(&format!("\n\n{}", render_localized_text(&description)));
+            markdown = markdown.markdown(&format!(
+                "\n\n**Description**\n\n{}",
+                render_localized_text(&description)
+            ));
         }
-        markdown.push_str(
+        markdown = markdown.markdown(
             "\n\n*Static game text. Runtime values and UI formatting are not evaluated.*",
         );
-        Some(markdown)
+        Some(markdown.finish())
     }
 
     /// Resolves `using` recursively and lets each child field replace its parent value.
@@ -770,7 +1004,8 @@ impl WorkspaceSnapshot {
             lines.push(format!("using \"{parent}\""));
         }
         let mut hidden = 0usize;
-        for (key, value) in ordered {
+        let omitted_fields = ordered.len().saturating_sub(MAX_HOVER_SOURCE_FIELDS);
+        for (key, value) in ordered.into_iter().take(MAX_HOVER_SOURCE_FIELDS) {
             if matches!(key.as_str(), "DisplayName" | "Description") {
                 for comment in self.localization_comment_lines(value, overlays) {
                     lines.push(format!("// {comment}"));
@@ -784,6 +1019,9 @@ impl WorkspaceSnapshot {
         }
         if hidden > 0 {
             lines.push(format!("// … {hidden} hidden presentation fields"));
+        }
+        if omitted_fields > 0 {
+            lines.push(format!("// … {omitted_fields} additional fields omitted"));
         }
         let fence_length = lines
             .iter()
@@ -970,14 +1208,14 @@ impl WorkspaceSnapshot {
                     };
                     for schema in candidates {
                         if let Some(field) = schema.field(name) {
-                            let mut markdown = format!("**Field** `{name}`");
+                            let mut markdown = HoverMarkup::new("Field", name);
                             if let Some(field_type) = &field.field_type {
-                                markdown.push_str(&format!("\n\nType: `{field_type}`"));
+                                markdown = markdown.fact("Type", field_type);
                             }
                             if let Some(description) = &field.description {
-                                markdown.push_str(&format!("\n\n{description}"));
+                                markdown = markdown.prose(description);
                             }
-                            return Some(markdown);
+                            return Some(markdown.finish());
                         }
                     }
                 }
@@ -1047,8 +1285,18 @@ fn collect_osiris_database_evidence(
 pub fn range_contains(range: TextRange, position: Position) -> bool {
     let after_start =
         (position.line, position.character) >= (range.start.line, range.start.character);
-    let before_end = (position.line, position.character) <= (range.end.line, range.end.character);
+    let before_end = (position.line, position.character) < (range.end.line, range.end.character);
     after_start && before_end
+}
+
+/// Orders source ranges without overflowing on multiline spans.
+fn hover_range_size(range: &TextRange) -> (u32, u32, u32, u32) {
+    (
+        range.end.line.saturating_sub(range.start.line),
+        range.end.character.saturating_sub(range.start.character),
+        range.start.line,
+        range.start.character,
+    )
 }
 
 /// Tests a declaration against a semantic target.
@@ -1144,15 +1392,51 @@ fn render_localized_text(source: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'");
-    let mut markdown = String::with_capacity(unescaped.len());
-    for character in unescaped.chars() {
+    bounded_markdown_text(&unescaped)
+}
+
+/// Escapes external plain text without interpreting it as hover Markdown.
+fn escape_markdown_text(source: &str) -> String {
+    let mut markdown = String::with_capacity(source.len());
+    let mut line_start = true;
+    let mut line_digits_only = true;
+    let mut line_has_character = false;
+    for character in source.chars() {
+        let ordered_list_marker = character == '.' && line_digits_only && line_has_character;
         if matches!(
             character,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '#' | '<' | '>'
-        ) {
+            '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '#' | '<' | '>'
+        ) || (line_start && matches!(character, '-' | '+'))
+            || ordered_list_marker
+        {
             markdown.push('\\');
         }
         markdown.push(character);
+        if character == '\n' {
+            line_start = true;
+            line_digits_only = true;
+            line_has_character = false;
+        } else {
+            line_start = false;
+            line_has_character = true;
+            if !character.is_ascii_digit() {
+                line_digits_only = false;
+            }
+        }
+    }
+    markdown
+}
+
+/// Escapes external text and bounds its contribution to one hover.
+fn bounded_markdown_text(source: &str) -> String {
+    let total = source.chars().count();
+    let rendered: String = source.chars().take(MAX_RENDERED_FIELD_CHARACTERS).collect();
+    let mut markdown = escape_markdown_text(&rendered);
+    if total > MAX_RENDERED_FIELD_CHARACTERS {
+        markdown.push_str(&format!(
+            "… *({} more characters)*",
+            total - MAX_RENDERED_FIELD_CHARACTERS
+        ));
     }
     markdown
 }
@@ -1167,7 +1451,7 @@ fn longest_backtick_run(source: &str) -> usize {
 }
 
 /// Wraps raw source in a Markdown fence that cannot collide with its backticks.
-fn markdown_inline_code(source: &str) -> String {
+pub(crate) fn markdown_inline_code(source: &str) -> String {
     let fence = "`".repeat(longest_backtick_run(source) + 1);
     let padding = if source.starts_with(['`', ' ']) || source.ends_with(['`', ' ']) {
         " "
@@ -1177,8 +1461,34 @@ fn markdown_inline_code(source: &str) -> String {
     format!("{fence}{padding}{source}{padding}{fence}")
 }
 
+/// Renders one external value as bounded inline code with an omission note.
+fn bounded_inline_code(source: &str) -> String {
+    let total = source.chars().count();
+    if total <= MAX_RENDERED_FIELD_CHARACTERS {
+        return markdown_inline_code(source);
+    }
+    let rendered: String = source.chars().take(MAX_RENDERED_FIELD_CHARACTERS).collect();
+    format!(
+        "{}… *({} more characters)*",
+        markdown_inline_code(&rendered),
+        total - MAX_RENDERED_FIELD_CHARACTERS
+    )
+}
+
 /// Maximum rendered characters before one stored field value is elided.
 const MAX_RENDERED_FIELD_CHARACTERS: usize = 160;
+
+/// Maximum repeated records shown in one hover section.
+pub(crate) const MAX_HOVER_LIST_ENTRIES: usize = 12;
+
+/// Maximum fields reconstructed into one Stats source hover block.
+const MAX_HOVER_SOURCE_FIELDS: usize = 64;
+
+fn append_omitted_entries(markdown: &mut String, omitted: usize) {
+    if omitted > 0 {
+        markdown.push_str(&format!("\n\n- … {omitted} additional entries omitted"));
+    }
+}
 
 /// Legacy Stats declarations whose header shape is not `new entry`.
 const NAMED_BLOCK_KINDS: [&str; 5] = [
@@ -1255,6 +1565,34 @@ fn display_path(path: &Path) -> String {
     abbreviate_home(path, std::env::home_dir().as_deref())
 }
 
+/// Returns the identifier-like token under a UTF-8 source position.
+fn lexical_hover_range(source: &str, position: Position) -> Option<TextRange> {
+    let line = source
+        .split('\n')
+        .nth(usize::try_from(position.line).ok()?)?;
+    let cursor = usize::try_from(position.character).ok()?.min(line.len());
+    let is_token = |character: char| character.is_alphanumeric() || matches!(character, '_' | '-');
+    let start = line[..cursor]
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !is_token(*character))
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let end = line[cursor..]
+        .char_indices()
+        .find(|(_, character)| !is_token(*character))
+        .map_or(line.len(), |(index, _)| cursor + index);
+    (start < end).then_some(TextRange {
+        start: Position {
+            line: position.line,
+            character: u32::try_from(start).ok()?,
+        },
+        end: Position {
+            line: position.line,
+            character: u32::try_from(end).ok()?,
+        },
+    })
+}
+
 /// Replaces an exact home-directory prefix with `~`.
 ///
 /// A path must start a segment boundary inside the home directory to count;
@@ -1323,5 +1661,112 @@ mod tests {
             abbreviate_home(Path::new("/Users/td/a.txt"), None),
             "/Users/td/a.txt"
         );
+    }
+
+    #[test]
+    fn inline_code_fences_are_longer_than_embedded_backticks() {
+        assert_eq!(markdown_inline_code("plain"), "`plain`");
+        assert_eq!(markdown_inline_code("`quoted`"), "`` `quoted` ``");
+        assert_eq!(markdown_inline_code("``"), "``` `` ```");
+    }
+
+    #[test]
+    fn external_hover_text_escapes_markdown_controls() {
+        assert_eq!(
+            escape_markdown_text("*bold* [link](https://example.test) <tag>"),
+            "\\*bold\\* \\[link\\]\\(https://example.test\\) \\<tag\\>"
+        );
+    }
+
+    #[test]
+    fn hover_markup_separates_trusted_markdown_from_external_prose() {
+        let trusted = HoverMarkup::new("Kind", "name")
+            .markdown("**trusted** `syntax`")
+            .finish();
+        let external = HoverMarkup::new("Kind", "name")
+            .prose("**external** `syntax`")
+            .finish();
+
+        assert!(trusted.contains("**trusted** `syntax`"));
+        assert!(external.contains("\\*\\*external\\*\\* \\`syntax\\`"));
+        assert!(!external.contains("**external** `syntax`"));
+    }
+
+    #[test]
+    fn localized_hover_text_is_bounded() {
+        let source = format!("{} tail", "x".repeat(MAX_RENDERED_FIELD_CHARACTERS + 10));
+        let rendered = render_localized_text(&source);
+
+        assert!(rendered.starts_with(&"x".repeat(MAX_RENDERED_FIELD_CHARACTERS)));
+        assert!(rendered.ends_with("… *(15 more characters)*"));
+    }
+
+    #[test]
+    fn field_values_are_bounded_without_breaking_inline_code() {
+        let source = format!("{} `tail`", "x".repeat(MAX_RENDERED_FIELD_CHARACTERS + 10));
+        let rendered = field_value_markdown(&source);
+
+        assert!(rendered.starts_with('`'));
+        assert!(rendered.contains("… *(17 more characters)*"));
+        assert!(rendered.ends_with("*"));
+    }
+
+    #[test]
+    fn range_contains_uses_half_open_source_ranges() {
+        let range = TextRange {
+            start: Position {
+                line: 2,
+                character: 4,
+            },
+            end: Position {
+                line: 2,
+                character: 9,
+            },
+        };
+
+        assert!(range_contains(
+            range,
+            Position {
+                line: 2,
+                character: 4
+            }
+        ));
+        assert!(range_contains(
+            range,
+            Position {
+                line: 2,
+                character: 8
+            }
+        ));
+        assert!(!range_contains(
+            range,
+            Position {
+                line: 2,
+                character: 9
+            }
+        ));
+        assert!(!range_contains(
+            range,
+            Position {
+                line: 2,
+                character: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn hover_range_size_handles_multiline_ranges_without_underflow() {
+        let range = TextRange {
+            start: Position {
+                line: 3,
+                character: 40,
+            },
+            end: Position {
+                line: 4,
+                character: 5,
+            },
+        };
+
+        assert_eq!(hover_range_size(&range), (1, 0, 3, 40));
     }
 }

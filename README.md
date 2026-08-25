@@ -352,6 +352,47 @@ The server reads:
   package; and
 - static tooltip-key localization handles from the canonical game UI glossary.
 
+### Hover behavior
+
+Hover output uses a consistent information order where the evidence supports
+it: kind and name first, then signature or type, documentation, contextual
+facts, previews, and source provenance. Optional facts are omitted when the
+index cannot prove them. Provenance identifies the contributing module and
+source when available; packaged declarations also show their package entry.
+Installed, observed, and same-priority ambiguous evidence keeps those labels
+so that an observation is not presented as a verified declaration. Override
+chains and static game-text previews are shown after the primary symbol
+information. Preview text is static: unresolved description parameters remain
+source text and the server does not run game logic.
+
+The server returns the smallest syntax-backed range that contains the hovered
+symbol, field, or reference. When no semantic span is available, it uses the
+matching lexical word when one can be identified; otherwise the hover has no
+range. Ranges use the position encoding negotiated during initialization
+(UTF-8 or UTF-16, with UTF-16 as the default when the client advertises no
+encoding).
+
+Hover content follows the client's advertised content format. Clients that
+support Markdown receive the structured Markdown form. Clients that request
+plain text receive a readable plain-text rendering with Markdown decoration
+and code fences removed.
+
+Repeated provenance and list sections are bounded to keep editor popups
+usable. They show at most 12 entries and add an explicit omission marker when
+more entries exist. Reconstructed Stats blocks show at most 64 fields.
+Individual stored field values remain capped at 160 characters where the
+declaration renderer applies that limit. These limits do not imply that
+omitted declarations are unavailable: definition navigation can still open
+the complete loose source declaration.
+
+Hover remains deliberately conservative. The server does not invent types,
+required fields, return values, function arity, or unavailable packed-resource
+declarations. It does not expose fabricated archive locations, evaluate
+runtime-bound localization or tooltip values, or classify unknown Thoth member
+chains without explicit type evidence. An absent loose declaration is not by
+itself proof that a reference is invalid because base resources can exist only
+in packages.
+
 Declaration hover keeps the technical symbol information first. Legacy Stats
 declarations render as a reconstructed `bg3_stats` code block in original
 field order, so editors with the `tree-sitter-bg3` queries highlight it like a

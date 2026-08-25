@@ -7,7 +7,7 @@ use bg3_index::{
 };
 
 use crate::{
-    CompletionItem, CompletionKind, OverlaySet, SourceLocation, WorkspaceSnapshot,
+    CompletionItem, CompletionKind, HoverMarkup, OverlaySet, SourceLocation, WorkspaceSnapshot,
     thoth_flow::Guards,
 };
 
@@ -86,11 +86,13 @@ impl WorkspaceSnapshot {
         let name = member_name(&context.segments[context.target])?;
         let field = self.fields_for_type(&owner_ty, overlays)?.remove(&name)?;
         let classes = field.class_names.join("`, `");
-        Some(format!(
-            "**Thoth field** `{name}`\n\nClass: `{classes}`\n\nType: `{}`\n\n{}",
-            field.ty,
-            field.provenance.join("\n\n")
-        ))
+        Some(
+            HoverMarkup::new("Thoth field", &name)
+                .fact("Type", &field.ty.to_string())
+                .fact("Class", &classes)
+                .prose(&field.provenance.join("\n\n"))
+                .finish(),
+        )
     }
 
     /// Returns loose field declaration locations for a member segment.
@@ -131,7 +133,9 @@ impl WorkspaceSnapshot {
                 let ThothExpressionKind::MemberAccess(segments) = &fact.kind else {
                     return None;
                 };
-                if segments.len() < 2 || !contains(fact.range, position) {
+                let fact_contains_position =
+                    contains(fact.range, position) || (!hover && position == fact.range.end);
+                if segments.len() < 2 || !fact_contains_position {
                     return None;
                 }
                 let target = if hover {
@@ -546,7 +550,7 @@ fn scope_depth(
 
 fn contains(range: TextRange, position: Position) -> bool {
     (position.line, position.character) >= (range.start.line, range.start.character)
-        && (position.line, position.character) <= (range.end.line, range.end.character)
+        && (position.line, position.character) < (range.end.line, range.end.character)
 }
 
 fn range_size(range: TextRange) -> (u32, u32, u32, u32) {

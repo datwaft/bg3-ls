@@ -463,6 +463,72 @@ fn completes_and_describes_declared_thoth_helpers() {
 }
 
 #[test]
+fn loose_thoth_hover_preserves_same_rank_ambiguity() {
+    let schema = Arc::new(SchemaCatalog::default());
+    let first_path = PathBuf::from("/synthetic/MyMod/Scripts/thoth/helpers/First.khn");
+    let second_path = PathBuf::from("/synthetic/MyMod/Scripts/thoth/helpers/Second.khn");
+    let parse_thoth = |path: &Path, text: &str| {
+        parse_source(
+            SourceFile {
+                path: path.to_owned(),
+                kind: SourceKind::Thoth,
+            },
+            text,
+            &schema,
+            "English",
+        )
+        .expect("synthetic Thoth source")
+    };
+    let module = Arc::new(ModuleIndex::new(
+        ModuleSpec {
+            name: "MyMod".into(),
+            root: PathBuf::from("/synthetic/MyMod"),
+            role: ModuleRole::Project,
+        },
+        vec![
+            parse_thoth(&first_path, "function Shared(first) end\n"),
+            parse_thoth(&second_path, "function Shared(first, second) end\n"),
+        ],
+    ));
+    let workspace = WorkspaceSnapshot::new(schema, vec![module], 1, 200, 200);
+    let stats_path = PathBuf::from("/synthetic/MyMod/Stats/Passive.txt");
+    let stats_text = "new entry \"TEST\"\ntype \"PassiveData\"\ndata \"Boosts\" \"Shared(value\"";
+    let parsed_stats = parse_source(
+        SourceFile {
+            path: stats_path.clone(),
+            kind: SourceKind::PlainStats,
+        },
+        stats_text,
+        &workspace.schema,
+        "English",
+    )
+    .expect("synthetic Stats source");
+    let mut overlays = OverlaySet::default();
+    overlays.insert(
+        stats_path.clone(),
+        OverlayDocument {
+            module: "MyMod".into(),
+            version: 1,
+            text: stats_text.into(),
+            parsed: Arc::new(parsed_stats),
+        },
+    );
+
+    let hover = workspace
+        .language_hover(
+            &stats_path,
+            source_position(stats_text, "Shared"),
+            &overlays,
+        )
+        .expect("ambiguous loose Thoth hover");
+    assert!(hover.contains("**Thoth function** `Shared`"));
+    assert!(hover.contains("Module: `MyMod`"));
+    assert!(hover.contains("Declarations: `2`"));
+    assert!(hover.contains("Same-rank Thoth declarations are ambiguous"));
+    assert!(!hover.contains("Signature: `Shared("));
+}
+
+#[test]
 fn uses_explicit_thoth_annotations_for_editor_evidence() {
     let (workspace, stats_path) = fixture_workspace(200);
     let path = fixtures().join("project/Mods/MyMod/Scripts/thoth/helpers/Annotated.khn");
@@ -540,6 +606,8 @@ fn uses_explicit_thoth_annotations_for_editor_evidence() {
     let class_hover = workspace
         .language_hover(&path, source_position(text, "Weapon"), &overlays)
         .expect("class hover");
+    assert!(class_hover.contains("**Thoth class** `Weapon`"));
+    assert!(class_hover.contains("Fields:\n"));
     assert!(class_hover.contains("IsValid"));
 }
 
@@ -910,6 +978,16 @@ fn supports_source_backed_osiris_navigation_signatures_and_overlays() {
     let packed_hover = workspace.hover(&path, packed_position, &overlays).unwrap();
     assert!(packed_hover.contains("No write is visible"));
 
+    let observed_callable_position = source_position(&text, "ApplyExample");
+    let observed_callable = workspace
+        .hover(&path, observed_callable_position, &overlays)
+        .expect("call-only Osiris hover");
+    assert!(observed_callable.contains("**Osiris callable** `ApplyExample/1`"));
+    assert!(observed_callable.contains("Arity: `1`"));
+    assert!(observed_callable.contains("Callable kind and parameter types are unknown"));
+    assert!(!observed_callable.contains("Osiris procedure"));
+    assert!(!observed_callable.contains("Osiris query"));
+
     let parent_position = source_position(&text, "SharedGoal");
     let parent = workspace.definitions_at(&path, parent_position, &overlays);
     assert_eq!(parent.len(), 1);
@@ -1135,7 +1213,7 @@ fn supports_language_features_in_lsx_values_without_stats_diagnostics() {
             &overlays,
         )
         .unwrap();
-    assert!(hover.contains("**Function** `ActionResource`"));
+    assert!(hover.contains("**Stats function** `ActionResource`"));
 
     let selector_line = text.lines().nth(4).unwrap();
     let observed_hover = workspace
@@ -1148,7 +1226,7 @@ fn supports_language_features_in_lsx_values_without_stats_diagnostics() {
             &overlays,
         )
         .unwrap();
-    assert!(observed_hover.contains("**Observed function** `SelectSpells`"));
+    assert!(observed_hover.contains("**Observed Thoth function** `SelectSpells`"));
 
     let passive_line = text.lines().nth(3).unwrap();
     let passive_column =
@@ -2084,7 +2162,8 @@ fn hover_and_completion_describe_curated_enum_values() {
         .unwrap();
     assert!(hand.contains("**Enum value** `MainHand`"), "{}", hand);
     assert!(
-        hand.contains("`eHandSlot` of `ExecuteWeaponFunctors`"),
+        hand.contains("Parameter: `eHandSlot`")
+            && hand.contains("Function: `ExecuteWeaponFunctors`"),
         "{}",
         hand
     );
@@ -2093,7 +2172,11 @@ fn hover_and_completion_describe_curated_enum_values() {
         .language_hover(&path, source_position(text, "Fire"), &overlays)
         .unwrap();
     assert!(fire.contains("**Enum value** `Fire`"), "{}", fire);
-    assert!(fire.contains("`eDamageType` of `DealDamage`"), "{}", fire);
+    assert!(
+        fire.contains("Parameter: `eDamageType`") && fire.contains("Function: `DealDamage`"),
+        "{}",
+        fire
+    );
 
     // Completion offers exactly the domain of the argument under the cursor.
     let hand_text = "new entry \"TEST\"\ntype \"SpellData\"\ndata \"SpellProperties\" \"ExecuteWeaponFunctors(Main";
@@ -2146,7 +2229,7 @@ fn hover_and_completion_describe_stats_member_expressions() {
         enumeration
     );
     assert!(
-        enumeration.contains("3 documented values"),
+        enumeration.contains("Documented values: `3`"),
         "{}",
         enumeration
     );

@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::{OverlaySet, WorkspaceSnapshot, range_contains};
+use crate::{
+    HoverMarkup, MAX_HOVER_LIST_ENTRIES, OverlaySet, WorkspaceSnapshot, markdown_inline_code,
+    range_contains,
+};
 use bg3_index::{
     Definition, FUNCTIONS, ModuleRole, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothApiResolution, PackagedThothApiSymbol,
@@ -133,6 +136,25 @@ fn function_annotation_at(
         .map(annotated_signature)
 }
 
+/// Adds annotation prose as escaped text and keeps generated metadata as Markdown.
+fn annotated_hover_documentation(
+    mut markdown: HoverMarkup,
+    signature: &AnnotatedSignature,
+    prefix: &str,
+) -> HoverMarkup {
+    if !signature.description.is_empty() {
+        markdown = markdown.prose(&signature.description.join("\n\n"));
+    }
+    markdown = markdown.markdown(prefix);
+    if !signature.returns.is_empty() {
+        markdown = markdown.markdown(&format!(
+            "Returns: {}",
+            markdown_inline_code(&signature.returns.join(", "))
+        ));
+    }
+    markdown
+}
+
 fn type_annotation_hover(
     annotations: &ThothAnnotations,
     word: &str,
@@ -146,14 +168,26 @@ fn type_annotation_hover(
         let fields = class
             .fields
             .iter()
-            .map(|field| format!("- `{}`: `{}`", field.name, field.ty))
+            .take(MAX_HOVER_LIST_ENTRIES)
+            .map(|field| {
+                format!(
+                    "- {}: {}",
+                    markdown_inline_code(&field.name),
+                    markdown_inline_code(&field.ty.to_string())
+                )
+            })
             .collect::<Vec<_>>();
-        let mut markdown = format!("**Thoth class** `{word}`");
+        let mut markdown = HoverMarkup::new("Thoth class", word);
         if !fields.is_empty() {
-            markdown.push_str("\n\n");
-            markdown.push_str(&fields.join("\n"));
+            let mut field_list = String::from("Fields:\n");
+            field_list.push_str(&fields.join("\n"));
+            let omitted = class.fields.len().saturating_sub(MAX_HOVER_LIST_ENTRIES);
+            if omitted > 0 {
+                field_list.push_str(&format!("\n- … {omitted} additional fields omitted"));
+            }
+            markdown = markdown.markdown(&field_list);
         }
-        return Some(markdown);
+        return Some(markdown.finish());
     }
     if let Some((class, field)) = annotations.classes.iter().find_map(|class| {
         class
@@ -162,23 +196,33 @@ fn type_annotation_hover(
             .find(|field| field.name == word && range_contains(field.name_range, position))
             .map(|field| (class, field))
     }) {
-        return Some(format!(
-            "**Thoth field** `{word}`\n\nClass: `{}`\n\nType: `{}`",
-            class.name, field.ty
-        ));
+        return Some(
+            HoverMarkup::new("Thoth field", word)
+                .fact("Type", &field.ty.to_string())
+                .fact("Class", &class.name)
+                .finish(),
+        );
     }
     if let Some(alias) = annotations
         .aliases
         .iter()
         .find(|alias| alias.name == word && range_contains(alias.name_range, position))
     {
-        return Some(format!("**Thoth alias** `{word}`\n\nType: `{}`", alias.ty));
+        return Some(
+            HoverMarkup::new("Thoth alias", word)
+                .fact("Type", &alias.ty.to_string())
+                .finish(),
+        );
     }
     annotations
         .variables
         .iter()
         .find(|variable| variable.target == word && range_contains(variable.target_range, position))
-        .map(|variable| format!("**Thoth type** `{word}`\n\nType: `{}`", variable.ty))
+        .map(|variable| {
+            HoverMarkup::new("Thoth type", word)
+                .fact("Type", &variable.ty.to_string())
+                .finish()
+        })
 }
 
 impl WorkspaceSnapshot {
@@ -426,7 +470,7 @@ impl WorkspaceSnapshot {
     }
 
     /// Adds function documentation when normal symbol hover has no result.
-    pub fn language_hover(
+    pub(crate) fn language_hover_markdown(
         &self,
         path: &Path,
         position: Position,
@@ -453,28 +497,36 @@ impl WorkspaceSnapshot {
             return Some(markdown);
         }
         if let Some(function) = function_spec(word) {
-            return Some(format!(
-                "**Function** `{}`\n\n{}",
-                function.name, function.documentation
-            ));
+            return Some(
+                HoverMarkup::new("Stats function", function.name)
+                    .markdown(function.documentation)
+                    .finish(),
+            );
         }
         if let Some(property) = context_property(word) {
-            return Some(format!(
-                "**Context property** `{}`\n\nKind: {}\n\n{}",
-                property.name, property.kind, property.documentation
-            ));
+            return Some(
+                HoverMarkup::new("Context property", &property.name)
+                    .fact("Kind", &property.kind)
+                    .markdown(&property.documentation)
+                    .finish(),
+            );
         }
         if let Some(value) = enum_value(word) {
-            return Some(format!(
-                "**Enum value** `{}`\n\nParameter: `{}` of `{}`\n\n{}",
-                value.name, value.parameter, value.function, value.documentation
-            ));
+            return Some(
+                HoverMarkup::new("Enum value", value.name)
+                    .fact("Parameter", value.parameter)
+                    .fact("Function", value.function)
+                    .markdown(value.documentation)
+                    .finish(),
+            );
         }
         if let Some(prefix) = functor_prefix(word) {
-            return Some(format!(
-                "**Functor prefix** `{}:`\n\nKind: {}\n\n{}",
-                prefix.name, prefix.kind, prefix.documentation
-            ));
+            return Some(
+                HoverMarkup::new("Functor prefix", &format!("{}:", prefix.name))
+                    .fact("Kind", prefix.kind)
+                    .markdown(prefix.documentation)
+                    .finish(),
+            );
         }
         if let Some(data) = data_context(line)
             && let Some((_, file)) = self.file(path, overlays)
@@ -493,10 +545,12 @@ impl WorkspaceSnapshot {
                     .get(enumeration)
                     .is_some_and(|values| values.iter().any(|value| value == word))
                 {
-                    return Some(format!(
-                        "**Enum value** `{word}`\n\nEnumeration: `{enumeration}`\n\nField: `{}`",
-                        data.field
-                    ));
+                    return Some(
+                        HoverMarkup::new("Enum value", word)
+                            .fact("Enumeration", enumeration)
+                            .fact("Field", &data.field)
+                            .finish(),
+                    );
                 }
             }
         }
@@ -517,25 +571,31 @@ impl WorkspaceSnapshot {
             && let Some(thoth) = &file.thoth
             && let Some(signature) = function_annotation(&thoth.annotations, word)
         {
-            return Some(format!(
-                "**Thoth function** `{word}`\n\nSignature: `{}`\n\n{}",
-                signature.label(word),
-                signature.documentation("Explicit Thoth annotation.")
-            ));
+            return Some(
+                annotated_hover_documentation(
+                    HoverMarkup::new("Thoth function", word)
+                        .fact("Signature", &signature.label(word)),
+                    &signature,
+                    "Explicit Thoth annotation.",
+                )
+                .finish(),
+            );
         }
         if let Some(evidence) = self.loose_thoth_hover(word, overlays) {
             return Some(evidence);
         }
         if let Some((signature, module, entries)) = self.packaged_thoth_annotation(word) {
-            let mut markdown = format!(
-                "**Installed Thoth function** `{word}`\n\nModule: `{module}`\n\nSignature: `{}`\n\n{}",
-                signature.label(word),
-                signature.documentation("Explicit installed Thoth annotation.")
+            let mut markdown = annotated_hover_documentation(
+                HoverMarkup::new("Installed Thoth function", word)
+                    .fact("Module", &module)
+                    .fact("Signature", &signature.label(word)),
+                &signature,
+                "Explicit installed Thoth annotation.",
             );
             if !entries.is_empty() {
-                markdown.push_str(&format!("\n\nPackage entries: `{}`", entries.join("`, `")));
+                markdown = markdown.fact("Package entries", &bounded_package_entries(&entries));
             }
-            return Some(markdown);
+            return Some(markdown.finish());
         }
         if let Some(evidence) = self.packaged_thoth_function_evidence(word) {
             return Some(evidence);
@@ -560,7 +620,7 @@ impl WorkspaceSnapshot {
     ) -> Option<String> {
         let column = usize::try_from(position.character).ok()?;
         let (name, value) = data_clause_spans(line, column)?;
-        let mut markdown = format!("**Stats property** `{name}`");
+        let mut markdown = HoverMarkup::new("Stats property", name);
 
         let types: BTreeSet<String> = self
             .file(path, overlays)
@@ -581,21 +641,19 @@ impl WorkspaceSnapshot {
                     .collect()
             });
         if !types.is_empty() {
-            let listed = types.into_iter().collect::<Vec<_>>().join("`, `");
-            markdown.push_str(&format!("\n\nTypes: `{listed}`"));
+            let listed = types.into_iter().collect::<Vec<_>>().join(", ");
+            markdown = markdown.fact("Types", &listed);
         }
         if let Some(documentation) = field_documentation(name) {
-            markdown.push_str(&format!("\n\n{documentation}"));
+            markdown = markdown.markdown(documentation);
         }
         if let Some(preview) =
             value.filter(|value| !value.is_empty() && is_structural_stats_value(value))
         {
-            markdown.push_str(&format!(
-                "\n\n```bg3_stats_value\n{}\n```",
-                format_value_preview(preview)
-            ));
+            let preview = format!("```bg3_stats_value\n{}\n```", format_value_preview(preview));
+            markdown = markdown.markdown(&preview);
         }
-        Some(markdown)
+        Some(markdown.finish())
     }
 
     /// Completes schema export types and categories.
@@ -669,18 +727,22 @@ impl WorkspaceSnapshot {
         if let Some(object) = member.object {
             if let Some(values) = self.schema.enumerations.get(object) {
                 if values.iter().any(|value| value == word) {
-                    return Some(format!(
-                        "**Enum value** `{word}`\n\nEnumeration: `{object}`"
-                    ));
+                    return Some(
+                        HoverMarkup::new("Enum value", word)
+                            .fact("Enumeration", object)
+                            .finish(),
+                    );
                 }
                 return None;
             }
             if let Some(values) = member_enumeration(object)
                 && values.contains(&word)
             {
-                return Some(format!(
-                    "**Enum value** `{word}`\n\nEnumeration: `{object}`"
-                ));
+                return Some(
+                    HoverMarkup::new("Enum value", word)
+                        .fact("Enumeration", object)
+                        .finish(),
+                );
             }
             if object == "context"
                 && let Some(member) = context_member(word)
@@ -690,10 +752,12 @@ impl WorkspaceSnapshot {
                 } else {
                     "Context member"
                 };
-                return Some(format!(
-                    "**{kind}** `{}`\n\nMember of `context`\n\n{}",
-                    member.name, member.documentation
-                ));
+                return Some(
+                    HoverMarkup::new(kind, member.name)
+                        .fact("Object", "context")
+                        .markdown(member.documentation)
+                        .finish(),
+                );
             }
             return None;
         }
@@ -701,24 +765,32 @@ impl WorkspaceSnapshot {
             return None;
         }
         if let Some(values) = self.schema.enumerations.get(word) {
-            return Some(format!(
-                "**Enumeration** `{word}`\n\n{} documented values.",
-                values.len()
-            ));
+            return Some(
+                HoverMarkup::new("Enumeration", word)
+                    .fact("Documented values", &values.len().to_string())
+                    .finish(),
+            );
         }
         if let Some(values) = member_enumeration(word) {
-            return Some(format!(
-                "**Enumeration** `{word}`\n\n{} documented values.",
-                values.len()
-            ));
+            return Some(
+                HoverMarkup::new("Enumeration", word)
+                    .fact("Documented values", &values.len().to_string())
+                    .finish(),
+            );
         }
         if word == "context" {
             return Some(
-                "**Context object** `context`\n\nThe evaluation context. Fetch data from the causing character with `context.Source` or the affected character with `context.Target`.".to_owned(),
+                HoverMarkup::new("Context object", "context")
+                    .markdown("The evaluation context. Fetch data from the causing character with `context.Source` or the affected character with `context.Target`.")
+                    .finish(),
             );
         }
         if let Some(documentation) = context_side(word) {
-            return Some(format!("**Context side** `{word}`\n\n{documentation}"));
+            return Some(
+                HoverMarkup::new("Context side", word)
+                    .markdown(documentation)
+                    .finish(),
+            );
         }
         None
     }
@@ -1444,13 +1516,10 @@ impl WorkspaceSnapshot {
                 }
             }
         }
-        let mut markdown = format!("**Installed Thoth function** `{name}`\n\nModule: `{module}`");
+        let mut markdown =
+            HoverMarkup::new("Installed Thoth function", name).fact("Module", &module);
         if !parameters.is_empty() {
-            markdown.push_str(&format!(
-                "\n\nSignature evidence: `{}({})`",
-                name,
-                parameters.join(", ")
-            ));
+            markdown = markdown.fact("Signature", &format!("{}({})", name, parameters.join(", ")));
         }
         if !calls.is_empty() {
             let arities = calls
@@ -1458,63 +1527,76 @@ impl WorkspaceSnapshot {
                 .map(u16::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            markdown.push_str(&format!("\n\nObserved call arities: `{arities}`"));
+            markdown = markdown.fact("Observed call arities", &arities);
         }
         if ambiguous {
-            markdown.push_str("\n\nSame-priority package evidence is ambiguous.");
+            markdown = markdown.markdown("Same-priority package evidence is ambiguous.");
         }
         if !entries.is_empty() {
-            markdown.push_str("\n\nPackage entries: ");
-            markdown.push_str(
-                &entries
-                    .into_iter()
-                    .map(|entry| format!("`{entry}`"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+            markdown = markdown.fact(
+                "Package entries",
+                &bounded_package_entries(&entries.into_iter().collect::<Vec<_>>()),
             );
         }
-        Some(markdown)
+        Some(markdown.finish())
     }
 
     /// Resolves loose Thoth evidence by configured module precedence.
     fn loose_thoth_hover(&self, name: &str, overlays: &OverlaySet) -> Option<String> {
         for layer in self.layers.iter().rev() {
+            let mut candidates = Vec::new();
             for (_, overlay) in overlays.for_module(&layer.spec.name) {
-                if let Some(definition) = overlay.parsed.definitions.iter().find(|definition| {
-                    definition.kind == THOTH_FUNCTION_KIND && definition.name == name
-                }) {
-                    let parameters = thoth_parameters(definition);
-                    return Some(format!(
-                        "**Thoth function** `{name}`\n\nModule: `{}`\n\nSignature: `{}({})`",
-                        layer.spec.name,
-                        name,
-                        parameters.join(", ")
-                    ));
-                }
+                candidates.extend(
+                    overlay
+                        .parsed
+                        .definitions
+                        .iter()
+                        .filter(|definition| {
+                            definition.kind == THOTH_FUNCTION_KIND && definition.name == name
+                        })
+                        .map(|definition| thoth_parameters(definition).join(", ")),
+                );
             }
-            if let Some(definition) =
+            candidates.extend(
                 layer
                     .definitions_of_kind(THOTH_FUNCTION_KIND)
-                    .find(|record| {
+                    .filter(|record| {
                         !overlays.contains(record.path.as_ref()) && record.definition().name == name
                     })
-            {
-                let definition = definition.definition();
-                let parameters = thoth_parameters(definition);
-                return Some(format!(
-                    "**Thoth function** `{name}`\n\nModule: `{}`\n\nSignature: `{}({})`",
-                    layer.spec.name,
-                    name,
-                    parameters.join(", ")
-                ));
+                    .map(|record| thoth_parameters(record.definition()).join(", ")),
+            );
+            if candidates.len() == 1 {
+                return Some(
+                    HoverMarkup::new("Thoth function", name)
+                        .fact("Signature", &format!("{}({})", name, candidates[0]))
+                        .fact("Module", &layer.spec.name)
+                        .finish(),
+                );
+            }
+            if !candidates.is_empty() {
+                return Some(
+                    HoverMarkup::new("Thoth function", name)
+                        .fact("Module", &layer.spec.name)
+                        .fact("Declarations", &candidates.len().to_string())
+                        .markdown(
+                            "Same-rank Thoth declarations are ambiguous. The signature is not verified.",
+                        )
+                        .finish(),
+                );
             }
         }
         for layer in self.layers.iter().rev() {
             if let Some(function) = layer.functions.get(name) {
-                return Some(format!(
-                    "**Observed function** `{}`\n\nSeen {} times with {} to {} arguments. No verified signature is available.",
-                    function.name, function.count, function.min_arity, function.max_arity
-                ));
+                return Some(
+                    HoverMarkup::new("Observed Thoth function", &function.name)
+                        .fact("Observed calls", &function.count.to_string())
+                        .fact(
+                            "Observed arity",
+                            &format!("{} to {}", function.min_arity, function.max_arity),
+                        )
+                        .markdown("No verified signature is available.")
+                        .finish(),
+                );
             }
         }
         None
@@ -1578,10 +1660,17 @@ impl WorkspaceSnapshot {
                 .unwrap_or_default();
             format!("{name}({parameters})")
         };
-        Some(format!(
-            "**Thoth function** `{name}`\n\nSignature: `{label}`\n\n{}",
-            signature.documentation("Explicit Thoth annotation.")
-        ))
+        let effective = definitions.first()?;
+        Some(
+            annotated_hover_documentation(
+                HoverMarkup::new("Thoth function", name).fact("Signature", &label),
+                &signature,
+                "Explicit Thoth annotation.",
+            )
+            .fact("Module", &effective.module)
+            .fact("Source", &effective.path.display().to_string())
+            .finish(),
+        )
     }
 
     fn thoth_annotation_for_path(
@@ -1771,6 +1860,20 @@ fn add_thoth_candidate(
                 .unwrap_or_default(),
         );
     }
+}
+
+/// Joins package-entry provenance while keeping one hover section bounded.
+fn bounded_package_entries(entries: &[String]) -> String {
+    let omitted = entries.len().saturating_sub(MAX_HOVER_LIST_ENTRIES);
+    let mut visible = entries
+        .iter()
+        .take(MAX_HOVER_LIST_ENTRIES)
+        .cloned()
+        .collect::<Vec<_>>();
+    if omitted > 0 {
+        visible.push(format!("… {omitted} additional entries omitted"));
+    }
+    visible.join(", ")
 }
 
 /// Returns parameter labels stored by the Thoth syntax extractor.

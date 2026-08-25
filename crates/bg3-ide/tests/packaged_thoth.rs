@@ -240,6 +240,10 @@ fn exposes_explicit_packaged_annotations_with_provenance() {
     assert!(hover.contains("value: string"));
     assert!(hover.contains(entry));
     assert!(!hover.contains("/synthetic/"));
+    assert!(hover.contains("**Installed Thoth function** `Annotated`"));
+    assert!(hover.contains("Module: `Shared`"));
+    assert!(hover.contains("Signature: `Annotated(value: string): boolean`"));
+    assert!(!hover.contains("Signature evidence:"));
 
     let completion = workspace.completion(
         &path,
@@ -460,6 +464,8 @@ fn unknown_observed_package_calls_keep_each_exact_arity() {
             &signature_overlays,
         )
         .expect("observed hover");
+    assert!(hover.contains("**Installed Thoth function** `ObservedNative`"));
+    assert!(hover.contains("Module: `OtherBase`"));
     assert!(hover.contains("Observed call arities: `1, 2`"));
 }
 
