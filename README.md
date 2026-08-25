@@ -95,6 +95,14 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.20.3 restores LSP 3.17 protocol conformance for position encoding,
+process lifecycle, work-done progress, full-document synchronization, and
+JSON-RPC error classification. The server now negotiates UTF-8 or UTF-16,
+defaults to UTF-16 when the client does not advertise an encoding, ignores
+stale document versions, and stops background protocol activity after
+shutdown. Raw stdio regression tests cover these contracts. Existing
+configuration remains compatible, and no migration is required.
+
 Version 0.20.2 validates `localization.language` as one safe catalog name
 before any package probe. The server rejects configuration values with path
 separators, Windows-reserved filename characters, traversal components, NUL,
