@@ -95,6 +95,11 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.24.1 aligns source builds with `tree-sitter-bg3` 0.5.3, which
+improves localization markup highlighting in Neovim. The pinned parsers are
+unchanged from 0.5.2, so language-server behavior is identical. Existing
+configuration remains compatible, and no migration is required.
+
 Version 0.24.0 indexes procedures and queries declared in installed
 base-module goals the same way as packaged Thoth helpers. Hover, signature
 help, and completion show their authored parameter aliases with module
