@@ -1102,6 +1102,107 @@ fn publishes_only_proven_osiris_syntax_diagnostics() {
 }
 
 #[test]
+fn diagnoses_proven_osiris_database_alias_conflicts() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let conflicting = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\nDied(_Char)\nTHEN\nDB_Conflict(_Char);\n",
+        "IF\nAddedTo(_Item, _Holder, _How)\nTHEN\nDB_Conflict(_Item);\n",
+        "EXITSECTION\nENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, conflicting);
+    let diagnostics = workspace.diagnostics(&path, &overlays, None);
+
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code, "osiris-database-alias-mismatch");
+    assert_eq!(diagnostic.severity, bg3_ide::DiagnosticSeverity::Error);
+    assert!(
+        diagnostic
+            .message
+            .contains("Column 1 of `DB_Conflict/1` is established as `CHARACTER`"),
+        "{}",
+        diagnostic.message
+    );
+    assert!(
+        diagnostic.message.contains("supplies `GUIDSTRING`"),
+        "{}",
+        diagnostic.message
+    );
+    let conflict_line = conflicting
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("DB_Conflict(_Item)"))
+        .unwrap();
+    assert_eq!(
+        diagnostic.range.start.line,
+        u32::try_from(conflict_line.0).unwrap()
+    );
+
+    // An explicit cast at the conflicting argument removes the diagnostic,
+    // and engine calls stay unchecked so specific values remain valid.
+    let cleared = conflicting.replace("DB_Conflict(_Item);", "DB_Conflict((CHARACTER)_Item);");
+    let cleared_overlays = overlay(&workspace, &path, &cleared);
+    assert!(
+        workspace
+            .diagnostics(&path, &cleared_overlays, None)
+            .is_empty()
+    );
+
+    // Unknown events contribute no evidence and never conflict.
+    let unknown = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\nUnknownEvent(_Who)\nTHEN\nDB_Quiet(_Who);\n",
+        "IF\nOtherUnknown(_Who)\nTHEN\nDB_Quiet(_Who);\n",
+        "EXITSECTION\nENDEXITSECTION\n",
+    );
+    let unknown_overlays = overlay(&workspace, &path, unknown);
+    assert!(
+        workspace
+            .diagnostics(&path, &unknown_overlays, None)
+            .is_empty()
+    );
+}
+
+#[test]
+fn toggles_osiris_alias_diagnostics_through_cross_goal_overlays() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/SecondaryGoal.txt");
+    // MainGoal on disk establishes DB_Tracked column 1 as CHARACTER through an
+    // explicit cast. The overlay supplies a generic GUIDSTRING from a curated
+    // event signature in another goal of the same workspace.
+    let conflicting = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\nAddedTo(_Item, _Holder, _How)\nTHEN\nDB_Tracked(_Item, 3);\n",
+        "EXITSECTION\nENDEXITSECTION\n",
+    );
+    let mut overlays = overlay(&workspace, &path, conflicting);
+    let diagnostics = workspace.diagnostics(&path, &overlays, None);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "osiris-database-alias-mismatch");
+    assert!(diagnostics[0].message.contains("`DB_Tracked/2`"));
+
+    let original = fs::read_to_string(&path).unwrap();
+    let mut restored = overlay(&workspace, &path, &original)
+        .get(&path)
+        .unwrap()
+        .clone();
+    restored.version += 1;
+    overlays.insert(path.clone(), restored);
+    assert!(workspace.diagnostics(&path, &overlays, None).is_empty());
+}
+
+#[test]
 fn publishes_thoth_syntax_diagnostics_and_skips_semantic_checks() {
     let (workspace, _) = fixture_workspace(200);
     let path = fixtures().join("project/Mods/MyMod/Scripts/thoth/helpers/MyMod.khn");

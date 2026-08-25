@@ -974,6 +974,44 @@ pub fn function_spec(name: &str) -> Option<&'static FunctionSpec> {
     FUNCTIONS.iter().find(|function| function.name == name)
 }
 
+/// One curated engine event signature with ordered parameter aliases.
+///
+/// Alias names follow the Osiris story compiler vocabulary. The server treats
+/// every alias as its own exact name; it never relates two aliases, so a
+/// `CHARACTER` value and a plain `GUIDSTRING` value are different evidence.
+pub type OsirisSignature = &'static [&'static str];
+
+/// Curated engine event signatures for common gameplay events.
+///
+/// Signatures come from the machine-generated community reference of the
+/// installed engine API. Only rule heads consult this table, and only to
+/// derive evidence that an uncast head-bound variable would carry.
+const OSIRIS_SIGNATURES: &[(&str, OsirisSignature)] = &[
+    ("AddedTo", &["GUIDSTRING", "GUIDSTRING", "STRING"]),
+    ("CharacterJoinedParty", &["CHARACTER"]),
+    ("CharacterLeftParty", &["CHARACTER"]),
+    ("CharacterLoadedInPreset", &["CHARACTER"]),
+    ("Died", &["CHARACTER"]),
+    ("Dying", &["CHARACTER"]),
+    ("EnteredCombat", &["GUIDSTRING", "GUIDSTRING"]),
+    ("LeftCombat", &["GUIDSTRING", "GUIDSTRING"]),
+    ("LevelGameplayStarted", &["STRING", "INTEGER"]),
+    ("RemovedFrom", &["GUIDSTRING", "GUIDSTRING"]),
+    (
+        "TemplateAddedTo",
+        &["ROOT", "GUIDSTRING", "GUIDSTRING", "STRING"],
+    ),
+    ("TextEvent", &["STRING"]),
+];
+
+/// Returns the curated alias list for one engine event by exact arity.
+pub fn osiris_signature(name: &str, arity: u16) -> Option<OsirisSignature> {
+    OSIRIS_SIGNATURES
+        .iter()
+        .find(|(candidate, parameters)| *candidate == name && parameters.len() as u16 == arity)
+        .map(|(_, parameters)| *parameters)
+}
+
 /// Returns the typed symbol kind for one known field.
 pub fn field_kind(name: &str) -> Option<&'static str> {
     match name {
