@@ -95,6 +95,15 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.23.0 expands the curated Osiris event catalog to cover every
+installed engine event, transcribed from a machine-generated community
+reference of the installed engine API. Uncast rule-head variables now inherit
+aliases from any known event instead of only twelve common gameplay events,
+so more proven `osiris-database-alias-mismatch` diagnostics appear where
+columns receive different aliases. The original signatures are unchanged,
+unknown events stay silent, and no configuration changes. Existing valid
+configuration remains compatible, and no migration is required.
+
 Version 0.22.0 diagnoses Osiris database alias mismatches: a user database
 column established with one alias, such as `CHARACTER`, rejects a later
 argument with a different alias, such as plain `GUIDSTRING`, through the new
