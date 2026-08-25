@@ -510,6 +510,12 @@ stay silent. The server never checks engine call arguments, so a specific
 `CHARACTER` value remains valid for an engine parameter that accepts generic
 `GUIDSTRING`.
 
+Procedures and queries declared in installed base-module goals are indexed
+the same way as packaged Thoth helpers. Hover, signature help, and completion
+show their authored parameter aliases with module provenance and no file
+location. Loose declarations outrank installed ones, same-rank installed
+disagreements stay untyped, and open overlays replace disk evidence live.
+
 ### Thoth annotations
 
 Thoth helpers support a small, documented subset of

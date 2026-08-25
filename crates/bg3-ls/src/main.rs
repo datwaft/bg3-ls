@@ -15,9 +15,10 @@ use std::time::Instant;
 
 use bg3_ide::{DiagnosticSeverity, OverlaySet, WorkspaceSnapshot, definition_target};
 use bg3_index::{
-    CacheStats, CacheStore, ModuleIndex, ModuleRole, ModuleSpec, SourceKind,
-    THOTH_FACTS_EXTRACTOR_VERSION, discover_module, inventory_packaged_thoth,
-    packaged_thoth_package_candidates, parse_thoth_file, read_packaged_stats_catalog_from_packages,
+    CacheStats, CacheStore, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_FACTS_EXTRACTOR_VERSION,
+    PackagedOsirisIndex, SourceKind, THOTH_FACTS_EXTRACTOR_VERSION, discover_module,
+    inventory_packaged_thoth, packaged_thoth_package_candidates, parse_osiris_goal_source,
+    parse_thoth_file, read_packaged_osiris_catalog, read_packaged_stats_catalog_from_packages,
     read_packaged_thoth_catalog,
 };
 use clap::{Parser, Subcommand, ValueEnum};
@@ -766,6 +767,21 @@ fn build_workspace(
     } else {
         totals.misses += 1;
     }
+    let packaged_osiris_catalog = read_packaged_osiris_catalog(game_data, &base_modules)?;
+    let (packaged_osiris_facts, osiris_hit) = cache.load_packaged_thoth_facts(
+        &packaged_osiris_catalog,
+        OSIRIS_FACTS_EXTRACTOR_VERSION,
+        parse_osiris_goal_source,
+    )?;
+    if osiris_hit {
+        totals.hits += 1;
+    } else {
+        totals.misses += 1;
+    }
+    let packaged_osiris = PackagedOsirisIndex::from_catalog_and_facts(
+        &packaged_osiris_catalog,
+        &packaged_osiris_facts,
+    );
     Ok((
         WorkspaceSnapshot::new(
             schema,
@@ -776,6 +792,7 @@ fn build_workspace(
         )
         .with_packaged_thoth(Arc::new(packaged_thoth))
         .with_packaged_thoth_facts(Arc::new(packaged_thoth_facts))
+        .with_packaged_osiris(Arc::new(packaged_osiris))
         .with_packaged_stats(Arc::new(packaged_stats_catalog))
         .with_incomplete_kinds(incomplete_kinds.iter().copied()),
         totals,

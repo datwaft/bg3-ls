@@ -7,6 +7,7 @@ mod discovery;
 mod domain;
 mod localization;
 mod module;
+mod osiris_api;
 mod package;
 mod packaged_stats;
 mod parser;
@@ -55,6 +56,10 @@ pub use localization::{
     valid_language,
 };
 pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
+pub use osiris_api::{
+    OSIRIS_FACTS_EXTRACTOR_VERSION, PackagedOsirisCallable, PackagedOsirisCandidate,
+    PackagedOsirisIndex, PackagedOsirisResolution, parse_osiris_goal_source,
+};
 pub use package::{PackageEntry, PackageHeader, PackageReader};
 pub use packaged_stats::{
     PackagedStatsCatalog, PackagedStatsDefinition, PackagedStatsResolution, PackagedStatsSource,
@@ -69,8 +74,9 @@ pub use schema::{SchemaCatalog, SchemaDefinition, SchemaField, is_schema_discrim
 pub use thoth::{
     PackagedThothCatalog, PackagedThothInventory, PackagedThothModuleInventory,
     PackagedThothPackageRejection, PackagedThothResolution, PackagedThothSource,
-    PackagedThothSourceRejection, inventory_packaged_thoth, packaged_thoth_package_candidates,
-    read_packaged_thoth_catalog, thoth_module_from_entry,
+    PackagedThothSourceRejection, inventory_packaged_thoth, osiris_module_from_entry,
+    packaged_thoth_package_candidates, read_packaged_osiris_catalog, read_packaged_thoth_catalog,
+    thoth_module_from_entry,
 };
 pub use thoth_api::{
     PackagedThothApiCandidate, PackagedThothApiIndex, PackagedThothApiResolution,

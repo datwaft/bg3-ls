@@ -11,12 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bg3_index::{
-    Definition, LocalizationCatalog, ModuleIndex, ModuleSpec, OSIRIS_DATABASE_KIND,
+    Definition, LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND,
     OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
-    PackagedStatsCatalog, PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts,
-    ParsedFile, Position, Reference, SchemaCatalog, SourceKind, SymbolTarget,
-    THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile,
-    TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
+    PackagedOsirisIndex, PackagedOsirisResolution, PackagedStatsCatalog, PackagedThothApiIndex,
+    PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position, Reference, SchemaCatalog,
+    SourceKind, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange,
+    ThothExpressionKind, ThothFile, TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -189,6 +189,7 @@ pub struct WorkspaceSnapshot {
     packaged_thoth_facts: Arc<PackagedThothFacts<ThothFile>>,
     packaged_stats: Arc<PackagedStatsCatalog>,
     packaged_thoth_api: Arc<PackagedThothApiIndex>,
+    packaged_osiris: Arc<PackagedOsirisIndex>,
     tooltips: Arc<TooltipCatalog>,
     incomplete_kinds: BTreeSet<String>,
 }
@@ -222,6 +223,7 @@ impl WorkspaceSnapshot {
             packaged_thoth_facts: Arc::new(empty_packaged_thoth_facts()),
             packaged_stats: Arc::new(PackagedStatsCatalog::default()),
             packaged_thoth_api: Arc::new(PackagedThothApiIndex::default()),
+            packaged_osiris: Arc::new(PackagedOsirisIndex::default()),
             tooltips: Arc::new(TooltipCatalog::default()),
             incomplete_kinds: BTreeSet::new(),
         }
@@ -298,6 +300,17 @@ impl WorkspaceSnapshot {
     /// Returns the number of installed package entries with parsed Thoth facts.
     pub fn packaged_thoth_facts_count(&self) -> usize {
         self.packaged_thoth_facts.len()
+    }
+
+    /// Adds parsed facts extracted from installed Osiris goal package entries.
+    pub fn with_packaged_osiris(mut self, index: Arc<PackagedOsirisIndex>) -> Self {
+        self.packaged_osiris = index;
+        self
+    }
+
+    /// Shares the immutable packaged Osiris callable index.
+    pub fn packaged_osiris(&self) -> Arc<PackagedOsirisIndex> {
+        Arc::clone(&self.packaged_osiris)
     }
 
     /// Shares immutable source-backed API contracts for configured packages.
@@ -510,6 +523,9 @@ impl WorkspaceSnapshot {
         if definitions.is_empty()
             && let SymbolTarget::OsirisCallable { name, arity } = &target
         {
+            if let Some(hover) = self.packaged_osiris_callable_hover(name, *arity) {
+                return Some(hover);
+            }
             return Some(
                 HoverMarkup::new("Osiris callable", &format!("{name}/{arity}"))
                     .fact("Arity", &arity.to_string())
@@ -801,6 +817,53 @@ impl WorkspaceSnapshot {
             markdown = markdown.markdown(&goals);
         }
         Some(markdown.finish())
+    }
+
+    /// Renders installed declaration evidence for a loose-callable miss.
+    ///
+    /// Base-module goals are virtual package entries, so the hover reports
+    /// module provenance and authored parameter aliases without inventing a
+    /// source path. Same-priority disagreements stay untyped.
+    fn packaged_osiris_callable_hover(&self, name: &str, arity: u16) -> Option<String> {
+        let mut ambiguous = false;
+        for layer in self
+            .layers
+            .iter()
+            .filter(|layer| layer.spec.role == ModuleRole::Base)
+        {
+            match self.packaged_osiris.resolve(&layer.spec.name, name, arity) {
+                PackagedOsirisResolution::Missing => continue,
+                PackagedOsirisResolution::Ambiguous(_) => {
+                    ambiguous = true;
+                    break;
+                }
+                PackagedOsirisResolution::Unique(candidate) => {
+                    let callable = candidate.callable();
+                    let heading = if callable.kind == OSIRIS_PROCEDURE_KIND {
+                        "Installed Osiris procedure"
+                    } else {
+                        "Installed Osiris query"
+                    };
+                    return Some(
+                        HoverMarkup::new(heading, &format!("{name}/{arity}"))
+                            .fact("Module", &layer.spec.name)
+                            .fact("Signature", &format!("{}({})", name, callable.parameters.join(", ")))
+                            .markdown(
+                                "Declared in an installed package goal. Parameter aliases come from the authored declaration; the entry stays virtual and has no file location.",
+                            )
+                            .finish(),
+                    );
+                }
+            }
+        }
+        ambiguous.then(|| {
+            HoverMarkup::new("Installed Osiris callable", &format!("{name}/{arity}"))
+                .fact("Arity", &arity.to_string())
+                .markdown(
+                    "Same-priority installed package declarations disagree on this callable. Parameter types stay untyped.",
+                )
+                .finish()
+        })
     }
 
     /// Builds a static localized preview from effective inherited tooltip fields.

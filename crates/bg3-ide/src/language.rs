@@ -7,12 +7,13 @@ use crate::{
 };
 use bg3_index::{
     Definition, FUNCTIONS, ModuleRole, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
-    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothApiResolution, PackagedThothApiSymbol,
-    PackagedThothApiSymbolKind, PackagedThothCatalog, Position, SchemaDefinition, SchemaField,
-    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
-    ThothFunctionContract, context_member, context_members, context_properties, context_property,
-    context_side, enum_value, field_documentation, field_kind, function_spec, functor_prefix,
-    functor_prefixes, is_lsx_value_field, is_structural_stats_value, member_enumeration,
+    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedOsirisResolution, PackagedThothApiResolution,
+    PackagedThothApiSymbol, PackagedThothApiSymbolKind, PackagedThothCatalog, Position,
+    SchemaDefinition, SchemaField, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    ThothAnnotations, ThothFunctionContract, context_member, context_members, context_properties,
+    context_property, context_side, enum_value, field_documentation, field_kind, function_spec,
+    functor_prefix, functor_prefixes, is_lsx_value_field, is_structural_stats_value,
+    member_enumeration,
 };
 /// The semantic category of one completion result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1308,6 +1309,35 @@ impl WorkspaceSnapshot {
                 items.push(item);
             }
         }
+        if !context.goals {
+            for layer in self
+                .layers
+                .iter()
+                .rev()
+                .filter(|layer| layer.spec.role == ModuleRole::Base)
+            {
+                let module = layer.spec.name.clone();
+                for (name, arity, callable) in self
+                    .packaged_osiris
+                    .completions_for_module(&module, context.prefix)
+                {
+                    if !seen.insert(("callable".into(), name.clone(), arity)) {
+                        continue;
+                    }
+                    let mut item =
+                        basic_item(&name, context.prefix, position, CompletionKind::Function);
+                    item.detail = Some(format!(
+                        "{} /{arity} — installed {module}",
+                        osiris_kind_label(&callable.kind)
+                    ));
+                    if snippets {
+                        item.new_text = osiris_call_snippet(&name, arity, &callable.parameters);
+                        item.snippet = arity > 0;
+                    }
+                    items.push(item);
+                }
+            }
+        }
         items
     }
 
@@ -1758,7 +1788,14 @@ impl WorkspaceSnapshot {
             .iter()
             .filter_map(|(_, definition)| definition.arity)
             .filter(|arity| *arity == 0 || usize::from(*arity) > context.argument)
-            .min()?;
+            .min();
+        // A visible loose declaration always outranks installed evidence.
+        let Some(arity) = arity else {
+            if database {
+                return None;
+            }
+            return self.packaged_osiris_signature_help(&context.function, context.argument);
+        };
         candidates.retain(|(_, definition)| definition.arity == Some(arity));
         let parameters = if database {
             merge_osiris_database_parameters(
@@ -1768,11 +1805,7 @@ impl WorkspaceSnapshot {
                 arity,
             )
         } else {
-            let rank = candidates.iter().map(|(rank, _)| *rank).max()?;
-            candidates
-                .iter()
-                .find(|(candidate_rank, _)| *candidate_rank == rank)
-                .map(|(_, definition)| stored_parameters(definition))?
+            osiris_declared_parameters(&candidates, arity)
         };
         Some(SignatureHelp {
             label: format!("{}({})", context.function, parameters.join(", ")),
@@ -1786,6 +1819,57 @@ impl WorkspaceSnapshot {
             parameters,
             active_parameter: context.argument,
         })
+    }
+
+    /// Renders installed procedure and query declarations for signature help.
+    ///
+    /// Loose declarations always win. Same-priority installed disagreements
+    /// keep positional placeholders instead of choosing one declaration.
+    fn packaged_osiris_signature_help(&self, name: &str, argument: usize) -> Option<SignatureHelp> {
+        // The active parameter needs a declared position, mirroring the loose
+        // arity selection.
+        let needed = u16::try_from(argument + 1).ok()?;
+        for layer in self
+            .layers
+            .iter()
+            .filter(|layer| layer.spec.role == ModuleRole::Base)
+        {
+            let Some(arity) = self
+                .packaged_osiris
+                .effective_arities(&layer.spec.name, name)
+                .into_iter()
+                .filter(|arity| *arity >= needed)
+                .min()
+            else {
+                continue;
+            };
+            match self.packaged_osiris.resolve(&layer.spec.name, name, arity) {
+                PackagedOsirisResolution::Missing => continue,
+                PackagedOsirisResolution::Ambiguous(_) => {
+                    return Some(SignatureHelp {
+                        label: format!("{name}({})", positional_parameters(arity).join(", ")),
+                        documentation:
+                            "Same-priority installed package declarations disagree on this callable. Parameter types stay untyped."
+                                .into(),
+                        parameters: positional_parameters(arity),
+                        active_parameter: argument,
+                    });
+                }
+                PackagedOsirisResolution::Unique(candidate) => {
+                    let callable = candidate.callable();
+                    return Some(SignatureHelp {
+                        label: format!("{name}({})", callable.parameters.join(", ")),
+                        documentation: format!(
+                            "Declared in an installed package goal for module `{}`.",
+                            candidate.source().module()
+                        ),
+                        parameters: callable.parameters.clone(),
+                        active_parameter: argument,
+                    });
+                }
+            }
+        }
+        None
     }
 
     /// Completes localization handles with their known version suffix.
@@ -2009,6 +2093,37 @@ fn stored_parameters(definition: &Definition) -> Vec<String> {
         .fields
         .get("Parameters")
         .map_or_else(Vec::new, |parameters| split_parameters(parameters))
+}
+
+/// Picks one declared parameter list for a loose callable.
+///
+/// Same-rank declarations must agree before typed metadata is exposed; a
+/// disagreement falls back to positional placeholders instead of choosing an
+/// arbitrary declaration.
+fn osiris_declared_parameters(candidates: &[(usize, Definition)], arity: u16) -> Vec<String> {
+    let Some(rank) = candidates.iter().map(|(rank, _)| *rank).max() else {
+        return positional_parameters(arity);
+    };
+    let lists: Vec<Vec<String>> = candidates
+        .iter()
+        .filter(|(candidate_rank, _)| *candidate_rank == rank)
+        .map(|(_, definition)| stored_parameters(definition))
+        .collect();
+    let Some(first) = lists.first() else {
+        return positional_parameters(arity);
+    };
+    if lists.iter().all(|list| list == first) {
+        first.clone()
+    } else {
+        positional_parameters(arity)
+    }
+}
+
+/// Returns generic positional labels for untyped call arguments.
+fn positional_parameters(count: u16) -> Vec<String> {
+    (0..usize::from(count))
+        .map(|index| format!("value{}", index + 1))
+        .collect()
 }
 
 /// Merges database column evidence without selecting among incompatible aliases.
