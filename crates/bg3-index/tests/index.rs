@@ -1398,6 +1398,51 @@ fn derives_engine_aliases_for_uncast_head_variables() {
     assert!(missing.arguments[0].evidence.is_none());
 }
 
+#[test]
+fn leaves_repeated_engine_variables_unknown_when_aliases_conflict() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\nEnteredLevel(_Ambiguous, _Ambiguous, _Other)\nTHEN\n",
+        "DB_Ambiguous(_Ambiguous);\nDB_Consistent(_Other);\n",
+        "IF\nAddedTo(_Same, _Same, _Text)\nTHEN\n",
+        "DB_SameAlias(_Same);\nDB_Text(_Text);\n",
+        "EXITSECTION\nENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Aliases.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty());
+    let osiris = parsed.osiris.as_ref().unwrap();
+
+    let ambiguous = osiris_occurrence(&osiris.occurrences, "DB_Ambiguous");
+    assert!(ambiguous.arguments[0].evidence.is_none());
+
+    let consistent = osiris_occurrence(&osiris.occurrences, "DB_Consistent");
+    let evidence = consistent.arguments[0].evidence.as_ref().unwrap();
+    assert_eq!(evidence.type_name, "STRING");
+    assert_eq!(evidence.origin, OsirisEvidenceOrigin::Engine);
+
+    let same_alias = osiris_occurrence(&osiris.occurrences, "DB_SameAlias");
+    let evidence = same_alias.arguments[0].evidence.as_ref().unwrap();
+    assert_eq!(evidence.type_name, "GUIDSTRING");
+    assert_eq!(evidence.origin, OsirisEvidenceOrigin::Engine);
+
+    let text = osiris_occurrence(&osiris.occurrences, "DB_Text");
+    let evidence = text.arguments[0].evidence.as_ref().unwrap();
+    assert_eq!(evidence.type_name, "STRING");
+    assert_eq!(evidence.origin, OsirisEvidenceOrigin::Engine);
+}
+
 fn osiris_occurrence<'a>(
     occurrences: &'a [bg3_index::OsirisDatabaseOccurrence],
     name: &str,
