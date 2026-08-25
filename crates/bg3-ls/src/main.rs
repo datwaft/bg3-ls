@@ -1,6 +1,7 @@
 mod config;
 mod conversion;
 mod coordinator;
+mod lifecycle;
 mod server;
 
 use std::collections::{BTreeSet, HashSet};
@@ -193,9 +194,11 @@ async fn main() -> ExitCode {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let cache_dir = cli.cache_dir;
+    let lifecycle = lifecycle::State::default();
     let (service, socket) = LspService::new(move |client| Backend::new(client, cache_dir.clone()));
+    let service = lifecycle::Service::new(service, lifecycle.clone());
     Server::new(stdin, stdout, socket).serve(service).await;
-    ExitCode::SUCCESS
+    lifecycle.exit_code()
 }
 
 /// Executes one non-LSP command and writes only human-readable stdout.

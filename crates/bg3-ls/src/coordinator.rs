@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
@@ -14,7 +14,8 @@ use bg3_index::{
     read_packaged_stats_catalog_from_packages, read_packaged_thoth_catalog,
 };
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
+use tokio::task::JoinHandle;
 use tower_lsp_server::Client;
 use tower_lsp_server::ls_types::{MessageType, ProgressToken, request};
 
@@ -66,8 +67,35 @@ pub struct Coordinator {
     state_tx: watch::Sender<BuildState>,
     build_guard: Mutex<()>,
     generation: AtomicU64,
-    watcher: Mutex<Option<RecommendedWatcher>>,
+    watcher: Mutex<WatcherState>,
+    active_rebuilds: AtomicUsize,
+    shutdown_notify: Notify,
+    stopping: Arc<AtomicBool>,
     cache_dir: Option<PathBuf>,
+}
+
+/// Owns both halves of the filesystem watcher so shutdown can stop them as a unit.
+struct WatcherState {
+    watcher: Option<RecommendedWatcher>,
+    task: Option<JoinHandle<()>>,
+}
+
+/// Releases the coordinator's active-operation slot when a rebuild exits.
+struct ActiveRebuild<'a> {
+    coordinator: &'a Coordinator,
+}
+
+impl Drop for ActiveRebuild<'_> {
+    fn drop(&mut self) {
+        if self
+            .coordinator
+            .active_rebuilds
+            .fetch_sub(1, Ordering::AcqRel)
+            == 1
+        {
+            self.coordinator.shutdown_notify.notify_waiters();
+        }
+    }
 }
 
 impl Coordinator {
@@ -79,9 +107,89 @@ impl Coordinator {
             state_tx,
             build_guard: Mutex::new(()),
             generation: AtomicU64::new(0),
-            watcher: Mutex::new(None),
+            watcher: Mutex::new(WatcherState {
+                watcher: None,
+                task: None,
+            }),
+            active_rebuilds: AtomicUsize::new(0),
+            shutdown_notify: Notify::new(),
+            stopping: Arc::new(AtomicBool::new(false)),
             cache_dir,
         }
+    }
+
+    /// Returns whether this coordinator has entered its terminal shutdown state.
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::Acquire)
+    }
+
+    /// Stops the watcher and waits for all in-flight rebuilds to become quiescent.
+    ///
+    /// Rebuilds use this same lifecycle gate before every client-facing
+    /// notification. Waiting for active rebuilds here ensures that a caller can
+    /// send the shutdown response without a later progress or log notification
+    /// racing it on the transport.
+    pub async fn shutdown(&self) {
+        self.stopping.store(true, Ordering::Release);
+
+        let (watcher, task) = {
+            let mut state = self.watcher.lock().await;
+            (state.watcher.take(), state.task.take())
+        };
+        drop(watcher);
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+
+        while self.active_rebuilds.load(Ordering::Acquire) != 0 {
+            let notified = self.shutdown_notify.notified();
+            if self.active_rebuilds.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    /// Enters a rebuild if the coordinator is still accepting work.
+    fn begin_rebuild(&self) -> Option<ActiveRebuild<'_>> {
+        if self.is_stopping() {
+            return None;
+        }
+        self.active_rebuilds.fetch_add(1, Ordering::AcqRel);
+        if self.is_stopping() {
+            self.active_rebuilds.fetch_sub(1, Ordering::AcqRel);
+            self.shutdown_notify.notify_waiters();
+            None
+        } else {
+            Some(ActiveRebuild { coordinator: self })
+        }
+    }
+
+    /// Sends a log notification while the coordinator is still active.
+    async fn log_message_if_running(
+        &self,
+        client: &Client,
+        message_type: MessageType,
+        message: impl Into<String>,
+    ) {
+        if self.is_stopping() {
+            return;
+        }
+        client.log_message(message_type, message.into()).await;
+    }
+
+    /// Sends a user-facing message while the coordinator is still active.
+    async fn show_message_if_running(
+        &self,
+        client: &Client,
+        message_type: MessageType,
+        message: impl Into<String>,
+    ) {
+        if self.is_stopping() {
+            return;
+        }
+        client.show_message(message_type, message.into()).await;
     }
 
     /// Returns a receiver that tracks build readiness and failures.
@@ -117,9 +225,26 @@ impl Coordinator {
         self.state_tx.borrow().clone()
     }
 
-    /// Builds and atomically publishes the configured workspace.
-    pub async fn rebuild(&self, config: Arc<ResolvedConfig>, client: &Client) -> bool {
-        self.rebuild_scoped(config, client, None).await
+    /// Rebuilds while optionally reporting work-done progress.
+    ///
+    /// A caller-provided token belongs to the request that started this
+    /// rebuild, so it is used directly. Independent progress receives a new
+    /// token only when the client advertised work-done progress support.
+    pub async fn rebuild_with_progress(
+        &self,
+        config: Arc<ResolvedConfig>,
+        client: &Client,
+        client_supports_work_done_progress: bool,
+        request_token: Option<ProgressToken>,
+    ) -> bool {
+        self.rebuild_scoped(
+            config,
+            client,
+            None,
+            client_supports_work_done_progress,
+            request_token,
+        )
+        .await
     }
 
     /// Rebuilds only configured modules whose watched source paths changed.
@@ -128,8 +253,16 @@ impl Coordinator {
         config: Arc<ResolvedConfig>,
         client: &Client,
         affected: HashSet<String>,
+        client_supports_work_done_progress: bool,
     ) -> bool {
-        self.rebuild_scoped(config, client, Some(affected)).await
+        self.rebuild_scoped(
+            config,
+            client,
+            Some(affected),
+            client_supports_work_done_progress,
+            None,
+        )
+        .await
     }
 
     /// Serializes a full or scoped build and keeps the last snapshot queryable.
@@ -138,30 +271,50 @@ impl Coordinator {
         config: Arc<ResolvedConfig>,
         client: &Client,
         affected: Option<HashSet<String>>,
+        client_supports_work_done_progress: bool,
+        request_token: Option<ProgressToken>,
     ) -> bool {
+        let Some(_active_rebuild) = self.begin_rebuild() else {
+            return false;
+        };
         let _guard = self.build_guard.lock().await;
+        if self.is_stopping() {
+            return false;
+        }
         self.state_tx.send_replace(BuildState::Building);
-        let token = ProgressToken::String(format!(
-            "bg3-index-{}",
-            self.generation.load(Ordering::Relaxed) + 1
-        ));
-        let progress = if client
-            .send_request::<request::WorkDoneProgressCreate>(
-                tower_lsp_server::ls_types::WorkDoneProgressCreateParams {
-                    token: token.clone(),
-                },
-            )
-            .await
-            .is_ok()
-        {
-            Some(
-                client
-                    .progress(token, "Indexing BG3 data")
-                    .with_message("Loading schema metadata")
-                    .with_percentage(0)
-                    .begin()
-                    .await,
-            )
+        let progress = if client_supports_work_done_progress || request_token.is_some() {
+            let caller_token = request_token.is_some();
+            let token = request_token.unwrap_or_else(|| {
+                ProgressToken::String(format!(
+                    "bg3-index-{}",
+                    self.generation.load(Ordering::Relaxed) + 1
+                ))
+            });
+            let create_progress = !caller_token;
+            if create_progress && self.is_stopping() {
+                return false;
+            }
+            let created = !create_progress
+                || client
+                    .send_request::<request::WorkDoneProgressCreate>(
+                        tower_lsp_server::ls_types::WorkDoneProgressCreateParams {
+                            token: token.clone(),
+                        },
+                    )
+                    .await
+                    .is_ok();
+            if !created || self.is_stopping() {
+                None
+            } else {
+                Some(
+                    client
+                        .progress(token, "Indexing BG3 data")
+                        .with_message("Loading schema metadata")
+                        .with_percentage(0)
+                        .begin()
+                        .await,
+                )
+            }
         } else {
             None
         };
@@ -169,6 +322,9 @@ impl Coordinator {
         let result = self
             .build(config.clone(), client, progress.as_ref(), affected)
             .await;
+        if self.is_stopping() {
+            return false;
+        }
         match result {
             Ok((snapshot, mut info)) => {
                 info.elapsed_milliseconds = started.elapsed().as_millis();
@@ -177,19 +333,20 @@ impl Coordinator {
                 if let Some(progress) = progress {
                     progress.finish_with_message("BG3 index is ready").await;
                 }
-                client
-                    .log_message(
-                        MessageType::INFO,
-                        format!(
-                            "BG3 index generation {} is ready: {} files, {} definitions, {} ms",
-                            info.generation,
-                            info.documents,
-                            info.definitions,
-                            info.elapsed_milliseconds
-                        ),
-                    )
-                    .await;
+                self.log_message_if_running(
+                    client,
+                    MessageType::INFO,
+                    format!(
+                        "BG3 index generation {} is ready: {} files, {} definitions, {} ms",
+                        info.generation,
+                        info.documents,
+                        info.definitions,
+                        info.elapsed_milliseconds
+                    ),
+                )
+                .await;
                 let cache_dir = self.cache_dir.clone();
+                let stopping = Arc::clone(&self.stopping);
                 let gc_client = client.clone();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
@@ -202,13 +359,17 @@ impl Coordinator {
                     })
                     .await;
                     if let Err(error) = result {
-                        gc_client
-                            .log_message(
-                                MessageType::WARNING,
-                                format!("BG3 cache cleanup task failed: {error}"),
-                            )
-                            .await;
-                    } else if let Ok(Err(error)) = result {
+                        if !stopping.load(Ordering::Acquire) {
+                            gc_client
+                                .log_message(
+                                    MessageType::WARNING,
+                                    format!("BG3 cache cleanup task failed: {error}"),
+                                )
+                                .await;
+                        }
+                    } else if let Ok(Err(error)) = result
+                        && !stopping.load(Ordering::Acquire)
+                    {
                         gc_client
                             .log_message(
                                 MessageType::WARNING,
@@ -225,7 +386,8 @@ impl Coordinator {
                 if let Some(progress) = progress {
                     progress.finish_with_message("BG3 indexing failed").await;
                 }
-                client.show_message(MessageType::ERROR, message).await;
+                self.show_message_if_running(client, MessageType::ERROR, message)
+                    .await;
             }
         }
         true
@@ -311,6 +473,9 @@ impl Coordinator {
             .map_err(|error| Error::Index(format!("schema task failed: {error}")))??;
             Arc::new(schema)
         };
+        if self.is_stopping() {
+            return Err(Error::Index("index coordinator is shutting down".into()));
+        }
         if let Some(progress) = progress {
             progress
                 .report_with_message("Loaded schema metadata", 10)
@@ -345,6 +510,9 @@ impl Coordinator {
                 .map(|workspace| workspace.base_localization())
                 .ok_or_else(|| Error::Index("a scoped build has no previous snapshot".into()))?
         } else {
+            if self.is_stopping() {
+                return Err(Error::Index("index coordinator is shutting down".into()));
+            }
             if let Some(progress) = progress {
                 progress
                     .report_with_message("Finishing base localization", 15)
@@ -364,6 +532,9 @@ impl Coordinator {
                 }
                 Ok(Ok(None)) => Arc::new(LocalizationCatalog::new(config.language.clone())),
                 Ok(Err(error)) => {
+                    if self.is_stopping() {
+                        return Err(Error::Index("index coordinator is shutting down".into()));
+                    }
                     client
                         .log_message(
                             MessageType::WARNING,
@@ -375,6 +546,9 @@ impl Coordinator {
                     Arc::new(LocalizationCatalog::new(config.language.clone()))
                 }
                 Err(error) => {
+                    if self.is_stopping() {
+                        return Err(Error::Index("index coordinator is shutting down".into()));
+                    }
                     client
                         .log_message(
                             MessageType::WARNING,
@@ -407,6 +581,9 @@ impl Coordinator {
                 }
                 Ok(Ok(None)) => Arc::new(TooltipCatalog::default()),
                 Ok(Err(error)) => {
+                    if self.is_stopping() {
+                        return Err(Error::Index("index coordinator is shutting down".into()));
+                    }
                     client
                         .log_message(
                             MessageType::WARNING,
@@ -418,6 +595,9 @@ impl Coordinator {
                     Arc::new(TooltipCatalog::default())
                 }
                 Err(error) => {
+                    if self.is_stopping() {
+                        return Err(Error::Index("index coordinator is shutting down".into()));
+                    }
                     client
                         .log_message(
                             MessageType::WARNING,
@@ -442,7 +622,7 @@ impl Coordinator {
                 } else {
                     cache_stats.misses += 1;
                 }
-                if facts.rejected_count() > 0 {
+                if facts.rejected_count() > 0 && !self.is_stopping() {
                     client
                         .log_message(
                             MessageType::WARNING,
@@ -461,6 +641,9 @@ impl Coordinator {
                 (Arc::new(catalog), Arc::new(facts))
             }
             Ok(Err(error)) => {
+                if self.is_stopping() {
+                    return Err(Error::Index("index coordinator is shutting down".into()));
+                }
                 client
                     .log_message(
                         MessageType::WARNING,
@@ -480,6 +663,9 @@ impl Coordinator {
                 )
             }
             Err(error) => {
+                if self.is_stopping() {
+                    return Err(Error::Index("index coordinator is shutting down".into()));
+                }
                 client
                     .log_message(
                         MessageType::WARNING,
@@ -503,6 +689,9 @@ impl Coordinator {
         let mut layers = Vec::new();
         let module_count = config.modules.len();
         for (index, module) in config.modules.iter().cloned().enumerate() {
+            if self.is_stopping() {
+                return Err(Error::Index("index coordinator is shutting down".into()));
+            }
             if affected
                 .as_ref()
                 .is_some_and(|affected| !affected.contains(&module.name))
@@ -558,7 +747,8 @@ impl Coordinator {
                             .iter()
                             .find(|layer| layer.spec.name == config.modules[index].name)
                     }) {
-                        client
+                        if !self.is_stopping() {
+                            client
                             .log_message(
                                 MessageType::WARNING,
                                 format!(
@@ -568,6 +758,7 @@ impl Coordinator {
                                 ),
                             )
                             .await;
+                        }
                         layers.push(Arc::clone(layer));
                         continue;
                     }
@@ -604,6 +795,9 @@ impl Coordinator {
                 Arc::new(catalog)
             }
             Ok(Err(error)) => {
+                if self.is_stopping() {
+                    return Err(Error::Index("index coordinator is shutting down".into()));
+                }
                 client
                     .log_message(
                         MessageType::WARNING,
@@ -618,6 +812,9 @@ impl Coordinator {
                 )
             }
             Err(error) => {
+                if self.is_stopping() {
+                    return Err(Error::Index("index coordinator is shutting down".into()));
+                }
                 client
                     .log_message(
                         MessageType::WARNING,
@@ -633,6 +830,9 @@ impl Coordinator {
             }
         };
 
+        if self.is_stopping() {
+            return Err(Error::Index("index coordinator is shutting down".into()));
+        }
         if let Some(progress) = progress {
             progress
                 .report_with_message("Publishing the complete workspace", 95)
@@ -658,14 +858,15 @@ impl Coordinator {
         Ok((workspace, info))
     }
 
-    /// Starts one recursive watcher and coalesces external changes before rebuilding.
-    pub async fn start_watcher(
+    /// Starts the watcher and enables independent progress when the client supports it.
+    pub async fn start_watcher_with_progress(
         self: &Arc<Self>,
         config: Arc<ResolvedConfig>,
         client: Client,
+        client_supports_work_done_progress: bool,
     ) -> Result<(), Error> {
         let mut active = self.watcher.lock().await;
-        if active.is_some() {
+        if self.is_stopping() || active.watcher.is_some() {
             return Ok(());
         }
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -697,17 +898,18 @@ impl Coordinator {
         if tooltip_package.is_file() {
             watcher.watch(&tooltip_package, RecursiveMode::NonRecursive)?;
         }
-        *active = Some(watcher);
-        drop(active);
-
         let coordinator = Arc::clone(self);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
+                if coordinator.is_stopping() {
+                    break;
+                }
                 let mut paths = match event {
                     Ok(event) => event.paths,
                     Err(error) => {
-                        client
-                            .log_message(
+                        coordinator
+                            .log_message_if_running(
+                                &client,
                                 MessageType::WARNING,
                                 format!("BG3 watcher error: {error}"),
                             )
@@ -716,12 +918,16 @@ impl Coordinator {
                     }
                 };
                 tokio::time::sleep(Duration::from_millis(250)).await;
+                if coordinator.is_stopping() {
+                    break;
+                }
                 while let Ok(event) = receiver.try_recv() {
                     match event {
                         Ok(event) => paths.extend(event.paths),
                         Err(error) => {
-                            client
-                                .log_message(
+                            coordinator
+                                .log_message_if_running(
+                                    &client,
                                     MessageType::WARNING,
                                     format!("BG3 watcher error: {error}"),
                                 )
@@ -735,7 +941,12 @@ impl Coordinator {
                     .any(|path| is_packaged_base_package(path, &config.game_data, &config.modules))
                 {
                     coordinator
-                        .rebuild_affected(Arc::clone(&config), &client, HashSet::new())
+                        .rebuild_affected(
+                            Arc::clone(&config),
+                            &client,
+                            HashSet::new(),
+                            client_supports_work_done_progress,
+                        )
                         .await;
                     continue;
                 }
@@ -746,7 +957,14 @@ impl Coordinator {
                         || path == &base_tooltip_package_path(&config.game_data)
                 });
                 if full_rebuild_required {
-                    coordinator.rebuild(Arc::clone(&config), &client).await;
+                    coordinator
+                        .rebuild_with_progress(
+                            Arc::clone(&config),
+                            &client,
+                            client_supports_work_done_progress,
+                            None,
+                        )
+                        .await;
                     continue;
                 }
                 let affected: HashSet<_> = config
@@ -761,11 +979,24 @@ impl Coordinator {
                     .collect();
                 if !affected.is_empty() {
                     coordinator
-                        .rebuild_affected(Arc::clone(&config), &client, affected)
+                        .rebuild_affected(
+                            Arc::clone(&config),
+                            &client,
+                            affected,
+                            client_supports_work_done_progress,
+                        )
                         .await;
                 }
             }
         });
+
+        if self.is_stopping() {
+            task.abort();
+            let _ = task.await;
+            return Ok(());
+        }
+        active.watcher = Some(watcher);
+        active.task = Some(task);
         Ok(())
     }
 }
