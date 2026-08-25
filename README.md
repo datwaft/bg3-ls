@@ -492,13 +492,14 @@ out of scope.
 
 Osiris goals receive the stable `osiris-database-alias-mismatch` error when a
 user database column receives two different aliases across the visible loose
-goals of the workspace. A column established as `CHARACTER` by a cast or a
-curated engine event signature rejects a later plain `GUIDSTRING` argument,
-matching the story compiler. Uncast variables inherit an alias only from
-curated common gameplay event signatures such as `Died` or `AddedTo`; unknown
-events and unknown columns stay silent. The server never checks engine call
-arguments, so a specific `CHARACTER` value remains valid for an engine
-parameter that accepts generic `GUIDSTRING`.
+goals of the workspace. A column established as `CHARACTER` by a cast or an
+engine event signature rejects a later plain `GUIDSTRING` argument, matching
+the story compiler. Uncast variables inherit an alias from the curated engine
+event catalog, which covers every installed engine event transcribed from a
+machine-generated community reference; unknown events and unknown columns
+stay silent. The server never checks engine call arguments, so a specific
+`CHARACTER` value remains valid for an engine parameter that accepts generic
+`GUIDSTRING`.
 
 ### Thoth annotations
 
