@@ -31,9 +31,10 @@ pub use annotation::{
 pub use cache::{CacheStats, CacheStore};
 pub use catalog::{
     ContextMemberSpec, ContextPropertySpec, FUNCTIONS, FunctionForm, FunctionSpec,
-    FunctorPrefixSpec, ParameterSpec, context_member, context_members, context_properties,
-    context_property, context_side, enum_value, field_documentation, field_kind, function_spec,
-    functor_prefix, functor_prefixes, is_lsx_value_field, member_enumeration,
+    FunctorPrefixSpec, OsirisSignature, ParameterSpec, context_member, context_members,
+    context_properties, context_property, context_side, enum_value, field_documentation,
+    field_kind, function_spec, functor_prefix, functor_prefixes, is_lsx_value_field,
+    member_enumeration, osiris_signature,
 };
 pub use discovery::{
     discover_module, module_watch_roots, path_is_within, resolve_path, source_kind_for_document,

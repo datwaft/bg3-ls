@@ -1,8 +1,72 @@
 use bg3_index::{
     context_member, context_members, context_properties, context_property, context_side,
     enum_value, field_documentation, function_spec, functor_prefix, functor_prefixes,
-    member_enumeration,
+    member_enumeration, osiris_signature,
 };
+
+#[test]
+fn preserves_the_original_engine_event_signatures() {
+    let expected: &[(&str, u16, &[&str])] = &[
+        ("AddedTo", 3, &["GUIDSTRING", "GUIDSTRING", "STRING"]),
+        ("CharacterJoinedParty", 1, &["CHARACTER"]),
+        ("CharacterLeftParty", 1, &["CHARACTER"]),
+        ("CharacterLoadedInPreset", 1, &["CHARACTER"]),
+        ("Died", 1, &["CHARACTER"]),
+        ("Dying", 1, &["CHARACTER"]),
+        ("EnteredCombat", 2, &["GUIDSTRING", "GUIDSTRING"]),
+        ("LeftCombat", 2, &["GUIDSTRING", "GUIDSTRING"]),
+        ("LevelGameplayStarted", 2, &["STRING", "INTEGER"]),
+        ("RemovedFrom", 2, &["GUIDSTRING", "GUIDSTRING"]),
+        (
+            "TemplateAddedTo",
+            4,
+            &["ROOT", "GUIDSTRING", "GUIDSTRING", "STRING"],
+        ),
+        ("TextEvent", 1, &["STRING"]),
+    ];
+    for (name, arity, aliases) in expected {
+        assert_eq!(
+            osiris_signature(name, *arity),
+            Some(*aliases),
+            "{name}/{arity} drifted from the shipped signature"
+        );
+    }
+}
+
+#[test]
+fn resolves_transcribed_engine_event_signatures() {
+    // Spot checks transcribed from the generated reference, including the
+    // primitive spellings that map to Osiris aliases.
+    assert_eq!(
+        osiris_signature("AttackedBy", 7),
+        Some(
+            &[
+                "GUIDSTRING",
+                "GUIDSTRING",
+                "GUIDSTRING",
+                "STRING",
+                "INTEGER",
+                "STRING",
+                "INTEGER",
+            ][..]
+        )
+    );
+    assert_eq!(
+        osiris_signature("DialogStarted", 2),
+        Some(&["DIALOGRESOURCE", "INTEGER"][..])
+    );
+    assert_eq!(osiris_signature("LevelLoaded", 1), Some(&["STRING"][..]));
+    assert_eq!(
+        osiris_signature("LongRestStarted", 0),
+        Some(&[][..]),
+        "zero-parameter events stay resolvable"
+    );
+
+    // Arity is part of the key; wrong arities resolve to nothing so unknown
+    // callables keep producing no evidence.
+    assert_eq!(osiris_signature("Died", 2), None);
+    assert_eq!(osiris_signature("NotAnEngineEvent", 1), None);
+}
 
 #[test]
 fn finds_documented_keywords_and_attested_weapon_data() {
