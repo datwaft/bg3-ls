@@ -640,6 +640,85 @@ pub fn thoth_module_from_entry(entry: &str) -> Option<&str> {
     .then_some(module)
 }
 
+/// Extracts the module name from a packaged Osiris goal entry path.
+pub fn osiris_module_from_entry(entry: &str) -> Option<&str> {
+    let mut parts = entry.split('/');
+    if parts.next() != Some("Mods") {
+        return None;
+    }
+    let module = parts.next()?;
+    if module.is_empty()
+        || parts.next() != Some("Story")
+        || parts.next() != Some("RawFiles")
+        || parts.next() != Some("Goals")
+    {
+        return None;
+    }
+    let file = parts.next()?;
+    (!file.is_empty()
+        && entry.ends_with(".txt")
+        && file != "."
+        && file != ".."
+        && !file.contains('\\'))
+    .then_some(module)
+}
+
+/// Reads configured base-module Osiris goals from the selected packages.
+///
+/// The shared packaged-source catalog carries goal texts so that priority and
+/// ambiguity resolution behave exactly like Thoth sources. Package paths and
+/// virtual entry names remain provenance; no package entry is extracted as a
+/// filesystem document.
+pub fn read_packaged_osiris_catalog(
+    game_data: &Path,
+    base_modules: &[String],
+) -> Result<PackagedThothCatalog, Error> {
+    let packages = packaged_thoth_package_candidates(game_data, base_modules)?;
+    let modules: BTreeSet<_> = base_modules.iter().map(String::as_str).collect();
+    let mut sources = Vec::new();
+    let mut total_size = 0_usize;
+    for package in packages {
+        let reader = PackageReader::open(&package)?;
+        let priority = reader.header().priority;
+        for module in modules.iter().copied() {
+            let entries = reader.osiris_goal_entries(module)?;
+            for entry in entries {
+                let entry_size = entry.uncompressed_size().max(entry.size_on_disk());
+                if entry_size > MAX_THOTH_ENTRY_SIZE {
+                    return Err(Error::Package(format!(
+                        "Osiris entry {} exceeds the {MAX_THOTH_ENTRY_SIZE} byte limit",
+                        entry.name()
+                    )));
+                }
+                total_size = total_size
+                    .checked_add(entry_size)
+                    .ok_or_else(|| Error::Package("total Osiris catalog size overflowed".into()))?;
+                if total_size > MAX_THOTH_CATALOG_SIZE {
+                    return Err(Error::Package(
+                        "Osiris catalog exceeds its aggregate byte limit".into(),
+                    ));
+                }
+                let bytes = reader.read_entry(entry, MAX_THOTH_ENTRY_SIZE)?;
+                let module_from_entry =
+                    osiris_module_from_entry(entry.name()).ok_or_else(|| {
+                        Error::Package(format!(
+                            "package reader returned an invalid Osiris entry {}",
+                            entry.name()
+                        ))
+                    })?;
+                sources.push(PackagedThothSource::from_bytes(
+                    module_from_entry,
+                    package.clone(),
+                    entry.name(),
+                    priority,
+                    &bytes,
+                )?);
+            }
+        }
+    }
+    PackagedThothCatalog::from_sources(sources)
+}
+
 fn validate_module(module: &str) -> Result<(), Error> {
     if module.is_empty()
         || module == "."
@@ -656,9 +735,14 @@ fn validate_module(module: &str) -> Result<(), Error> {
 }
 
 fn validate_entry(entry: &str, module: &str) -> Result<(), Error> {
-    if thoth_module_from_entry(entry) != Some(module) {
+    // The packaged source model carries both supported text kinds: Thoth
+    // helpers and Osiris goals. Provenance must stay consistent with one of
+    // the two entry layouts.
+    let matches_module = thoth_module_from_entry(entry) == Some(module)
+        || osiris_module_from_entry(entry) == Some(module);
+    if !matches_module {
         return Err(Error::Package(format!(
-            "package entry `{entry}` is not a Thoth source for module `{module}`"
+            "package entry `{entry}` is not a packaged source for module `{module}`"
         )));
     }
     if entry

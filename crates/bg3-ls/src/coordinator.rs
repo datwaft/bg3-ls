@@ -7,11 +7,13 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use bg3_ide::WorkspaceSnapshot;
 use bg3_index::{
-    CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole, PackagedStatsCatalog,
+    CacheStats, CacheStore, LocalizationCatalog, ModuleIndex, ModuleRole,
+    OSIRIS_FACTS_EXTRACTOR_VERSION, PackagedOsirisIndex, PackagedStatsCatalog,
     PackagedThothCatalog, PackagedThothFacts, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND,
     ThothFile, TooltipCatalog, base_tooltip_package_path, discover_module, module_watch_roots,
-    packaged_thoth_package_candidates, parse_packaged_thoth_facts, parse_thoth_file,
-    read_packaged_stats_catalog_from_packages, read_packaged_thoth_catalog,
+    packaged_thoth_package_candidates, parse_osiris_goal_source, parse_packaged_thoth_facts,
+    parse_thoth_file, read_packaged_osiris_catalog, read_packaged_stats_catalog_from_packages,
+    read_packaged_thoth_catalog,
 };
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, Notify, mpsc, watch};
@@ -455,7 +457,25 @@ impl Coordinator {
                     THOTH_FACTS_EXTRACTOR_VERSION,
                     |source| parse_thoth_file(source.text()),
                 )?;
-                Ok::<_, Error>((catalog, catalog_hit, facts, facts_hit))
+                let (osiris_catalog, osiris_catalog_hit) =
+                    thoth_cache.load_packaged_thoth(&base_modules, &candidates, || {
+                        read_packaged_osiris_catalog(&game_data, &base_modules)
+                    })?;
+                let (osiris_facts, _) = thoth_cache.load_packaged_thoth_facts(
+                    &osiris_catalog,
+                    OSIRIS_FACTS_EXTRACTOR_VERSION,
+                    parse_osiris_goal_source,
+                )?;
+                let packaged_osiris =
+                    PackagedOsirisIndex::from_catalog_and_facts(&osiris_catalog, &osiris_facts);
+                Ok::<_, Error>((
+                    catalog,
+                    catalog_hit,
+                    facts,
+                    facts_hit,
+                    Arc::new(packaged_osiris),
+                    osiris_catalog_hit,
+                ))
             })
         };
         let schema = if affected.is_some() {
@@ -610,14 +630,26 @@ impl Coordinator {
                 }
             }
         };
-        let (packaged_thoth, packaged_thoth_facts) = match thoth_task.await {
-            Ok(Ok((catalog, catalog_hit, facts, facts_hit))) => {
+        let (packaged_thoth, packaged_thoth_facts, packaged_osiris) = match thoth_task.await {
+            Ok(Ok((
+                catalog,
+                catalog_hit,
+                facts,
+                facts_hit,
+                packaged_osiris,
+                osiris_catalog_hit,
+            ))) => {
                 if catalog_hit {
                     cache_stats.hits += 1;
                 } else {
                     cache_stats.misses += 1;
                 }
                 if facts_hit {
+                    cache_stats.hits += 1;
+                } else {
+                    cache_stats.misses += 1;
+                }
+                if osiris_catalog_hit {
                     cache_stats.hits += 1;
                 } else {
                     cache_stats.misses += 1;
@@ -638,7 +670,7 @@ impl Coordinator {
                         )
                         .await;
                 }
-                (Arc::new(catalog), Arc::new(facts))
+                (Arc::new(catalog), Arc::new(facts), packaged_osiris)
             }
             Ok(Err(error)) => {
                 if self.is_stopping() {
@@ -657,9 +689,16 @@ impl Coordinator {
                         (
                             Arc::new(PackagedThothCatalog::default()),
                             Arc::new(empty_packaged_thoth_facts()),
+                            Arc::new(PackagedOsirisIndex::default()),
                         )
                     },
-                    |workspace| (workspace.packaged_thoth(), workspace.packaged_thoth_facts()),
+                    |workspace| {
+                        (
+                            workspace.packaged_thoth(),
+                            workspace.packaged_thoth_facts(),
+                            workspace.packaged_osiris(),
+                        )
+                    },
                 )
             }
             Err(error) => {
@@ -679,9 +718,16 @@ impl Coordinator {
                         (
                             Arc::new(PackagedThothCatalog::default()),
                             Arc::new(empty_packaged_thoth_facts()),
+                            Arc::new(PackagedOsirisIndex::default()),
                         )
                     },
-                    |workspace| (workspace.packaged_thoth(), workspace.packaged_thoth_facts()),
+                    |workspace| {
+                        (
+                            workspace.packaged_thoth(),
+                            workspace.packaged_thoth_facts(),
+                            workspace.packaged_osiris(),
+                        )
+                    },
                 )
             }
         };
@@ -851,6 +897,7 @@ impl Coordinator {
         .with_base_localization(base_localization)
         .with_packaged_thoth(packaged_thoth)
         .with_packaged_thoth_facts(packaged_thoth_facts)
+        .with_packaged_osiris(packaged_osiris)
         .with_packaged_stats(packaged_stats_catalog)
         .with_tooltips(tooltips)
         .with_incomplete_kinds(incomplete_kinds);

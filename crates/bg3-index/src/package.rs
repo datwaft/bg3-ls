@@ -172,6 +172,21 @@ impl PackageReader {
             .collect())
     }
 
+    /// Returns exact Osiris goal entries from one module in the package.
+    pub fn osiris_goal_entries(&self, module: &str) -> Result<Vec<&PackageEntry>, Error> {
+        validate_module_name(module)?;
+        let prefix = format!("Mods/{module}/Story/RawFiles/Goals/");
+        Ok(self
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.name.starts_with(&prefix)
+                    && entry.name.ends_with(".txt")
+                    && entry.name.len() > prefix.len() + ".txt".len()
+            })
+            .collect())
+    }
+
     /// Returns exact Thoth source entries from every module in the package.
     ///
     /// The returned entries retain package-relative names and remain in file
