@@ -182,6 +182,29 @@ fn condition_result_and_inferred_result_expose_boolean_result_without_definition
         .expect("ConditionResult field hover");
     assert!(hover.contains("Result"));
     assert!(hover.contains("boolean"));
+    let facts = bg3_index::parse_thoth_file(text).expect("facts");
+    let expression_range = facts
+        .expression_facts
+        .iter()
+        .find(|fact| fact.text == "inferred.Result")
+        .map(|fact| fact.range)
+        .expect("inferred expression range");
+    assert_eq!(hover.range, Some(expression_range));
+    let result_range = facts
+        .expression_facts
+        .iter()
+        .find_map(|fact| match &fact.kind {
+            bg3_index::ThothExpressionKind::MemberAccess(segments) => segments
+                .iter()
+                .find(|segment| segment.text == "Result" && fact.text == "inferred.Result")
+                .map(|segment| segment.range),
+            _ => None,
+        })
+        .expect("Result member range");
+    let member_hover = workspace
+        .language_hover(path, position(text, "Result", false), &open)
+        .expect("ConditionResult member hover");
+    assert_eq!(member_hover.range, Some(result_range));
 
     assert!(
         workspace

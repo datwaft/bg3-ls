@@ -39,6 +39,7 @@ struct Inner {
     coordinator: Arc<Coordinator>,
     snippet_support: AtomicBool,
     client_supports_work_done_progress: AtomicBool,
+    hover_markdown: AtomicBool,
     stopping: AtomicBool,
     position_encoding: RwLock<PositionEncoding>,
     diagnostic_tasks: Mutex<HashMap<PathBuf, JoinHandle<()>>>,
@@ -73,6 +74,7 @@ impl Backend {
                 coordinator: Arc::new(Coordinator::new(cache_dir)),
                 snippet_support: AtomicBool::new(false),
                 client_supports_work_done_progress: AtomicBool::new(false),
+                hover_markdown: AtomicBool::new(true),
                 stopping: AtomicBool::new(false),
                 position_encoding: RwLock::new(PositionEncoding::Utf16),
                 diagnostic_tasks: Mutex::new(HashMap::new()),
@@ -322,6 +324,17 @@ impl LanguageServer for Backend {
         self.inner
             .snippet_support
             .store(snippet_support, Ordering::Release);
+        let hover_markdown = params
+            .capabilities
+            .text_document
+            .as_ref()
+            .and_then(|text| text.hover.as_ref())
+            .and_then(|hover| hover.content_format.as_ref())
+            .and_then(|formats| formats.first())
+            .is_some_and(|format| *format == MarkupKind::Markdown);
+        self.inner
+            .hover_markdown
+            .store(hover_markdown, Ordering::Release);
         let client_supports_work_done_progress = params
             .capabilities
             .window
@@ -595,10 +608,20 @@ impl LanguageServer for Backend {
             .or_else(|| snapshot.language_hover(&path, position, &overlays))
             .map(|value| Hover {
                 contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value,
+                    kind: if self.inner.hover_markdown.load(Ordering::Acquire) {
+                        MarkupKind::Markdown
+                    } else {
+                        MarkupKind::PlainText
+                    },
+                    value: if self.inner.hover_markdown.load(Ordering::Acquire) {
+                        value.markdown.clone()
+                    } else {
+                        hover_plaintext(&value.markdown)
+                    },
                 }),
-                range: None,
+                range: value
+                    .range
+                    .map(|range| to_lsp_range(range, &source_text, encoding)),
             }))
     }
 
@@ -821,6 +844,64 @@ fn select_position_encoding(capabilities: &ClientCapabilities) -> Option<Positio
     }
 }
 
+/// Degrades the hover renderer's constrained Markdown to readable plain text.
+fn hover_plaintext(markdown: &str) -> String {
+    let mut in_code_block = false;
+    markdown
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed
+                .chars()
+                .take_while(|character| *character == '`')
+                .count()
+                >= 3
+            {
+                in_code_block = !in_code_block;
+                return None;
+            }
+            if line.trim() == "---" {
+                return None;
+            }
+            if in_code_block {
+                return Some(line.to_owned());
+            }
+            let line = line.strip_prefix("### ").unwrap_or(line);
+            let line = line.strip_prefix("- ").unwrap_or(line);
+            Some(plain_hover_line(line))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Removes the constrained Markdown syntax emitted by the hover renderers.
+fn plain_hover_line(line: &str) -> String {
+    let mut plain = String::with_capacity(line.len());
+    let mut characters = line.chars();
+    while let Some(character) = characters.next() {
+        if character == '\\' {
+            match characters.next() {
+                Some(next)
+                    if matches!(
+                        next,
+                        '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '#' | '<' | '>'
+                    ) =>
+                {
+                    plain.push(next);
+                }
+                Some(next) => {
+                    plain.push('\\');
+                    plain.push(next);
+                }
+                None => plain.push('\\'),
+            }
+        } else if !matches!(character, '`' | '*') {
+            plain.push(character);
+        }
+    }
+    plain
+}
+
 /// Returns one source line and its byte offset, preserving carriage returns.
 fn source_line(source: &str, line: u32) -> &str {
     for (index, value) in source.split('\n').enumerate() {
@@ -1007,3 +1088,23 @@ fn rpc_error(error: Error) -> jsonrpc::Error {
 
 #[allow(dead_code)]
 fn _location_type_contract(_: SourceLocation) {}
+
+#[cfg(test)]
+mod tests {
+    use super::hover_plaintext;
+
+    #[test]
+    fn hover_plaintext_keeps_code_contents_and_unescapes_markdown() {
+        let markdown = r###"**Field** \*literal\* \`inline\`
+
+```bg3_stats
+new entry "PREVIEW"
+data "Boosts" "UnlockSpell(Target_Test)"
+```"###;
+
+        assert_eq!(
+            hover_plaintext(markdown),
+            "Field *literal* `inline`\n\nnew entry \"PREVIEW\"\ndata \"Boosts\" \"UnlockSpell(Target_Test)\""
+        );
+    }
+}

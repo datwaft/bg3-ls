@@ -36,6 +36,46 @@ fn initialized_client(position_encodings: Option<&[&str]>) -> (TestWorkspace, Ls
     (workspace, client, initialize)
 }
 
+fn initialized_hover_client(format: &str) -> (TestWorkspace, LspClient) {
+    initialized_hover_client_with_formats(&[format], "utf-16")
+}
+
+fn initialized_hover_client_with_encoding(
+    format: &str,
+    position_encoding: &str,
+) -> (TestWorkspace, LspClient) {
+    initialized_hover_client_with_formats(&[format], position_encoding)
+}
+
+fn initialized_hover_client_with_formats(
+    formats: &[&str],
+    position_encoding: &str,
+) -> (TestWorkspace, LspClient) {
+    let workspace = TestWorkspace::new();
+    let mut client = LspClient::spawn(&workspace);
+    client
+        .initialize(json!({
+            "general": { "positionEncodings": [position_encoding] },
+            "textDocument": { "hover": { "contentFormat": formats } }
+        }))
+        .expect("initialize");
+    client.initialized().expect("initialized");
+    (workspace, client)
+}
+
+fn initialized_hover_client_without_content_format() -> (TestWorkspace, LspClient) {
+    let workspace = TestWorkspace::new();
+    let mut client = LspClient::spawn(&workspace);
+    client
+        .initialize(json!({
+            "general": { "positionEncodings": ["utf-16"] },
+            "textDocument": {}
+        }))
+        .expect("initialize");
+    client.initialized().expect("initialized");
+    (workspace, client)
+}
+
 fn document_uri(workspace: &TestWorkspace) -> String {
     Url::from_file_path(
         workspace
@@ -50,6 +90,10 @@ fn document_uri(workspace: &TestWorkspace) -> String {
 fn utf16_column(line: &str, needle: &str) -> u32 {
     let offset = line.find(needle).expect("needle in synthetic line");
     u32::try_from(line[..offset].encode_utf16().count()).expect("UTF-16 column fits")
+}
+
+fn utf8_column(line: &str, needle: &str) -> u32 {
+    u32::try_from(line.find(needle).expect("needle in synthetic line")).expect("UTF-8 column fits")
 }
 
 fn open(client: &mut LspClient, workspace: &TestWorkspace, version: i32, text: &str) {
@@ -110,6 +154,234 @@ fn notification(client: &mut LspClient, method: &str) -> Value {
             return message;
         }
     }
+}
+
+#[test]
+fn hover_returns_the_source_range_and_negotiated_markdown() {
+    let (workspace, mut client) = initialized_hover_client("markdown");
+    let text = "new entry \"WIRE\"\ntype \"PassiveData\"\ndata \"Enabled\" \"Yes\"\n";
+    wait_for_index(&mut client);
+    open(&mut client, &workspace, 1, text);
+    let hover = client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": document_uri(&workspace) },
+                "position": { "line": 2, "character": 8 }
+            }),
+        )
+        .expect("hover request");
+    assert_eq!(hover["contents"]["kind"], "markdown");
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| { value.contains("**Stats property** `Enabled`") })
+    );
+    assert_eq!(
+        hover["range"]["start"],
+        json!({ "line": 2, "character": 6 })
+    );
+    assert_eq!(hover["range"]["end"], json!({ "line": 2, "character": 13 }));
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+}
+
+#[test]
+fn hover_degrades_to_plaintext_when_markdown_is_not_supported() {
+    let (workspace, mut client) = initialized_hover_client("plaintext");
+    let text = "new entry \"WIRE\"\ntype \"PassiveData\"\ndata \"Enabled\" \"Yes\"\n";
+    wait_for_index(&mut client);
+    open(&mut client, &workspace, 1, text);
+    let hover = client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": document_uri(&workspace) },
+                "position": { "line": 2, "character": 8 }
+            }),
+        )
+        .expect("hover request");
+    assert_eq!(hover["contents"]["kind"], "plaintext");
+    let value = hover["contents"]["value"].as_str().expect("plain text");
+    assert!(value.contains("Stats property Enabled"), "{value}");
+    assert!(!value.contains("**"), "{value}");
+    assert!(!value.contains('`'), "{value}");
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+}
+
+#[test]
+fn hover_defaults_to_plaintext_when_content_format_is_omitted() {
+    let (workspace, mut client) = initialized_hover_client_without_content_format();
+    let text = "new entry \"WIRE\"\ntype \"PassiveData\"\ndata \"Enabled\" \"Yes\"\n";
+    wait_for_index(&mut client);
+    open(&mut client, &workspace, 1, text);
+    let hover = client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": document_uri(&workspace) },
+                "position": { "line": 2, "character": 8 }
+            }),
+        )
+        .expect("hover request");
+    assert_eq!(hover["contents"]["kind"], "plaintext");
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Stats property Enabled"))
+    );
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+}
+
+#[test]
+fn hover_uses_the_first_supported_format_in_client_preference_order() {
+    let (workspace, mut plaintext_client) =
+        initialized_hover_client_with_formats(&["plaintext", "markdown"], "utf-16");
+    let text = "new entry \"WIRE\"\ntype \"PassiveData\"\ndata \"Enabled\" \"Yes\"\n";
+    wait_for_index(&mut plaintext_client);
+    open(&mut plaintext_client, &workspace, 1, text);
+    let plaintext_hover = plaintext_client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": document_uri(&workspace) },
+                "position": { "line": 2, "character": 8 }
+            }),
+        )
+        .expect("plaintext-preferred hover request");
+    assert_eq!(plaintext_hover["contents"]["kind"], "plaintext");
+    plaintext_client.shutdown().expect("shutdown");
+    assert_eq!(plaintext_client.exit().expect("exit"), Some(0));
+
+    let (workspace, mut markdown_client) =
+        initialized_hover_client_with_formats(&["markdown", "plaintext"], "utf-16");
+    wait_for_index(&mut markdown_client);
+    open(&mut markdown_client, &workspace, 1, text);
+    let markdown_hover = markdown_client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": document_uri(&workspace) },
+                "position": { "line": 2, "character": 8 }
+            }),
+        )
+        .expect("markdown-preferred hover request");
+    assert_eq!(markdown_hover["contents"]["kind"], "markdown");
+    markdown_client.shutdown().expect("shutdown");
+    assert_eq!(markdown_client.exit().expect("exit"), Some(0));
+}
+
+#[test]
+fn plaintext_hover_preserves_stats_declaration_preview_contents() {
+    let (workspace, mut client) = initialized_hover_client("plaintext");
+    let text = concat!(
+        "new entry \"CONSUMER\"\n",
+        "type \"PassiveData\"\n",
+        "data \"Boosts\" \"UnlockSpell(Target_Test)\"\n",
+    );
+    wait_for_index(&mut client);
+    open(&mut client, &workspace, 1, text);
+    let hover = client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": document_uri(&workspace) },
+                "position": { "line": 0, "character": 13 }
+            }),
+        )
+        .expect("declaration hover request");
+    assert_eq!(hover["contents"]["kind"], "plaintext");
+    let value = hover["contents"]["value"].as_str().expect("plain text");
+    assert!(value.contains("new entry \"CONSUMER\""), "{value}");
+    assert!(
+        value.contains("data \"Boosts\" \"UnlockSpell(Target_Test)\""),
+        "{value}"
+    );
+    assert!(!value.contains("```"), "{value}");
+    assert!(!value.contains("**"), "{value}");
+    assert!(!value.contains('`'), "{value}");
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+}
+
+#[test]
+fn hover_returns_utf16_range_after_an_emoji() {
+    let (workspace, mut client) = initialized_hover_client_with_encoding("markdown", "utf-16");
+    let text = concat!(
+        "new entry \"CONSUMER\"\n",
+        "type \"PassiveData\"\n",
+        "data \"Boosts\" \"'😀';UnlockSpell(Target_Test)\"\n",
+    );
+    wait_for_index(&mut client);
+    open(&mut client, &workspace, 1, text);
+    let line = text.lines().nth(2).expect("hover line");
+    let hover = client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": document_uri(&workspace) },
+                "position": {
+                    "line": 2,
+                    "character": utf16_column(line, "Target_Test")
+                }
+            }),
+        )
+        .expect("hover request");
+    let start = utf16_column(line, "Target_Test");
+    let end = start + u32::try_from("Target_Test".encode_utf16().count()).expect("range fits");
+    assert_eq!(
+        hover["range"],
+        json!({
+            "start": { "line": 2, "character": start },
+            "end": { "line": 2, "character": end }
+        })
+    );
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+}
+
+#[test]
+fn hover_returns_utf8_range_after_an_emoji() {
+    let (workspace, mut client) = initialized_hover_client_with_encoding("markdown", "utf-8");
+    let text = concat!(
+        "new entry \"CONSUMER\"\n",
+        "type \"PassiveData\"\n",
+        "data \"Boosts\" \"'😀';UnlockSpell(Target_Test)\"\n",
+    );
+    wait_for_index(&mut client);
+    open(&mut client, &workspace, 1, text);
+    let line = text.lines().nth(2).expect("hover line");
+    let hover = client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": document_uri(&workspace) },
+                "position": {
+                    "line": 2,
+                    "character": utf8_column(line, "Target_Test")
+                }
+            }),
+        )
+        .expect("hover request");
+    let start = utf8_column(line, "Target_Test");
+    let end = start + u32::try_from("Target_Test".len()).expect("range fits");
+    assert_eq!(
+        hover["range"],
+        json!({
+            "start": { "line": 2, "character": start },
+            "end": { "line": 2, "character": end }
+        })
+    );
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
 }
 
 #[test]
