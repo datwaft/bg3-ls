@@ -95,6 +95,13 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.21.0 unifies hover presentation across supported languages. Hovers
+now use consistent headings, evidence wording, provenance, bounded disclosure,
+exact symbol ranges, and client content-format negotiation. The server adds a
+conservative description for unresolved Osiris callables when syntax proves the
+name and arity, without guessing callable kind or parameter types. Existing
+configuration remains compatible, and no migration is required.
+
 Version 0.20.3 restores LSP 3.17 protocol conformance for position encoding,
 process lifecycle, work-done progress, full-document synchronization, and
 JSON-RPC error classification. The server now negotiates UTF-8 or UTF-16,
