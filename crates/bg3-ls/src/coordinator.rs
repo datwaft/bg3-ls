@@ -458,10 +458,10 @@ impl Coordinator {
                     |source| parse_thoth_file(source.text()),
                 )?;
                 let (osiris_catalog, osiris_catalog_hit) =
-                    thoth_cache.load_packaged_thoth(&base_modules, &candidates, || {
+                    thoth_cache.load_packaged_osiris(&base_modules, &candidates, || {
                         read_packaged_osiris_catalog(&game_data, &base_modules)
                     })?;
-                let (osiris_facts, _) = thoth_cache.load_packaged_thoth_facts(
+                let (osiris_facts, osiris_facts_hit) = thoth_cache.load_packaged_thoth_facts(
                     &osiris_catalog,
                     OSIRIS_FACTS_EXTRACTOR_VERSION,
                     parse_osiris_goal_source,
@@ -475,6 +475,7 @@ impl Coordinator {
                     facts_hit,
                     Arc::new(packaged_osiris),
                     osiris_catalog_hit,
+                    osiris_facts_hit,
                 ))
             })
         };
@@ -638,6 +639,7 @@ impl Coordinator {
                 facts_hit,
                 packaged_osiris,
                 osiris_catalog_hit,
+                osiris_facts_hit,
             ))) => {
                 if catalog_hit {
                     cache_stats.hits += 1;
@@ -650,6 +652,11 @@ impl Coordinator {
                     cache_stats.misses += 1;
                 }
                 if osiris_catalog_hit {
+                    cache_stats.hits += 1;
+                } else {
+                    cache_stats.misses += 1;
+                }
+                if osiris_facts_hit {
                     cache_stats.hits += 1;
                 } else {
                     cache_stats.misses += 1;
