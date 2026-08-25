@@ -95,6 +95,17 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.22.0 diagnoses Osiris database alias mismatches: a user database
+column established with one alias, such as `CHARACTER`, rejects a later
+argument with a different alias, such as plain `GUIDSTRING`, through the new
+stable `osiris-database-alias-mismatch` error. Uncast rule-head variables
+inherit an alias from curated common gameplay event signatures such as `Died`
+or `AddedTo`. Unknown events and unknown columns stay silent, and engine call
+arguments stay unchecked so specific values remain valid for generic engine
+parameters. The index cache rebuilds once after this release because cached
+Osiris evidence gained provenance. Existing configuration remains compatible,
+and no migration is required.
+
 Version 0.21.0 unifies hover presentation across supported languages. Hovers
 now use consistent headings, evidence wording, provenance, bounded disclosure,
 exact symbol ranges, and client content-format negotiation. The server adds a
