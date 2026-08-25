@@ -95,6 +95,14 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.24.0 indexes procedures and queries declared in installed
+base-module goals the same way as packaged Thoth helpers. Hover, signature
+help, and completion show their authored parameter aliases with module
+provenance and no file location. Loose declarations outrank installed ones,
+same-rank installed disagreements stay untyped, and open overlays replace
+disk evidence live. Existing configuration remains compatible, and no
+migration is required.
+
 Version 0.23.0 expands the curated Osiris event catalog to cover every
 installed engine event, transcribed from a machine-generated community
 reference of the installed engine API. Uncast rule-head variables now inherit
