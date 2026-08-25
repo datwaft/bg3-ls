@@ -30,6 +30,7 @@ tempfile = "3.23"
 thiserror = "2.0"
 tokio = { version = "1.49", features = ["fs", "io-std", "macros", "rt-multi-thread", "sync", "time"] }
 tower-lsp-server = "0.23"
+tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tree-sitter = "0.26.11"

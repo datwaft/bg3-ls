@@ -140,7 +140,7 @@ fn advertises_full_sync_with_save_support() {
     );
     assert_eq!(sync["openClose"], true);
     assert_eq!(sync["change"], 1);
-    assert_eq!(sync["save"], true);
+    assert_eq!(sync["save"]["includeText"], true);
     finish(client);
 }
 

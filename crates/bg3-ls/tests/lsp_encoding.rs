@@ -175,14 +175,14 @@ fn converts_utf16_input_for_completion_after_an_emoji() {
     let initial_text = concat!(
         "new entry \"CONSUMER\"\n",
         "type \"PassiveData\"\n",
-        "data \"Boosts\" \"'😀';UnlockSpell(Target_T\"\n",
+        "data \"Boosts\" \"'😀';UnlockSpell(Target_T\n",
     );
     wait_for_index(&mut client);
     open(&mut client, &workspace, 1, initial_text);
     let completion_text = concat!(
         "new entry \"CONSUMER\"\n",
         "type \"PassiveData\"\n",
-        "data \"Boosts\" \"'😀';UnlockSpell(Target_T\"\n",
+        "data \"Boosts\" \"'😀';UnlockSpell(Target_T\n",
     );
     change(&mut client, &workspace, 2, completion_text);
     let line = completion_text.lines().nth(2).expect("completion line");

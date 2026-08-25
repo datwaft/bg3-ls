@@ -12,7 +12,10 @@ fn raw_stdio_client_can_initialize_and_shutdown() {
         .initialize(json!({"general": {"positionEncodings": ["utf-8"]}}))
         .expect("initialize response");
     assert_eq!(initialize["serverInfo"]["name"], "bg3-ls");
-    assert_eq!(initialize["capabilities"]["textDocumentSync"], 1);
+    let sync = &initialize["capabilities"]["textDocumentSync"];
+    assert_eq!(sync["openClose"], true);
+    assert_eq!(sync["change"], 1);
+    assert_eq!(sync["save"]["includeText"], true);
 
     client.initialized().expect("initialized notification");
     client.shutdown().expect("shutdown response");

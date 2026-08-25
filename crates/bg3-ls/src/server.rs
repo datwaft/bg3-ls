@@ -1,4 +1,6 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,7 +38,28 @@ struct Inner {
     overlays: RwLock<OverlaySet>,
     coordinator: Arc<Coordinator>,
     snippet_support: AtomicBool,
+    client_supports_work_done_progress: AtomicBool,
+    stopping: AtomicBool,
+    position_encoding: RwLock<PositionEncoding>,
     diagnostic_tasks: Mutex<HashMap<PathBuf, JoinHandle<()>>>,
+    diagnostic_monitor: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Position encoding selected during the LSP initialization handshake.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PositionEncoding {
+    Utf8,
+    Utf16,
+}
+
+impl PositionEncoding {
+    /// Returns the protocol spelling for the negotiated encoding.
+    const fn lsp_kind(self) -> PositionEncodingKind {
+        match self {
+            Self::Utf8 => PositionEncodingKind::UTF8,
+            Self::Utf16 => PositionEncodingKind::UTF16,
+        }
+    }
 }
 
 impl Backend {
@@ -49,7 +72,11 @@ impl Backend {
                 overlays: RwLock::new(OverlaySet::default()),
                 coordinator: Arc::new(Coordinator::new(cache_dir)),
                 snippet_support: AtomicBool::new(false),
+                client_supports_work_done_progress: AtomicBool::new(false),
+                stopping: AtomicBool::new(false),
+                position_encoding: RwLock::new(PositionEncoding::Utf16),
                 diagnostic_tasks: Mutex::new(HashMap::new()),
+                diagnostic_monitor: Mutex::new(None),
             }),
         }
     }
@@ -64,6 +91,29 @@ impl Backend {
             .ok_or_else(|| Error::Config("the server is not initialized".into()))
     }
 
+    /// Returns the position encoding selected for this client session.
+    async fn position_encoding(&self) -> PositionEncoding {
+        *self.inner.position_encoding.read().await
+    }
+
+    /// Returns whether this adapter has entered its terminal shutdown state.
+    fn is_stopping(&self) -> bool {
+        self.inner.stopping.load(Ordering::Acquire) || self.inner.coordinator.is_stopping()
+    }
+
+    /// Returns the current source text for a path, preferring its open overlay.
+    fn source_text<'a>(path: &Path, overlays: &'a OverlaySet) -> Result<Cow<'a, str>, Error> {
+        overlays
+            .get(path)
+            .map(|document| Cow::Borrowed(document.text.as_str()))
+            .map(Ok)
+            .unwrap_or_else(|| {
+                fs::read_to_string(path)
+                    .map(Cow::Owned)
+                    .map_err(Error::from)
+            })
+    }
+
     /// Waits for a complete index generation.
     async fn snapshot(&self) -> jsonrpc::Result<Arc<WorkspaceSnapshot>> {
         self.inner
@@ -74,7 +124,16 @@ impl Backend {
     }
 
     /// Parses and stores one full open-document overlay.
-    async fn update_overlay(&self, uri: &Uri, text: String, version: i32) -> Result<(), Error> {
+    async fn update_overlay(
+        &self,
+        uri: &Uri,
+        text: String,
+        version: i32,
+        allow_equal_version: bool,
+    ) -> Result<bool, Error> {
+        if self.is_stopping() {
+            return Ok(false);
+        }
         let path = uri_to_path(uri)?;
         let snapshot = self.inner.coordinator.wait_snapshot().await?;
         let module = snapshot.module_for_path(&path).ok_or_else(|| {
@@ -92,7 +151,13 @@ impl Backend {
             &snapshot.schema,
             &self.config().await?.language,
         )?;
-        self.inner.overlays.write().await.insert(
+        let mut overlays = self.inner.overlays.write().await;
+        if overlays.get(&path).is_some_and(|document| {
+            document.version > version || (!allow_equal_version && document.version == version)
+        }) {
+            return Ok(false);
+        }
+        overlays.insert(
             path,
             OverlayDocument {
                 module: module.name.clone(),
@@ -101,26 +166,50 @@ impl Backend {
                 parsed: Arc::new(parsed),
             },
         );
-        Ok(())
+        Ok(true)
     }
 
     /// Executes an overlay update and reports notification failures to the client log.
-    async fn update_overlay_logged(&self, uri: &Uri, text: String, version: i32) {
-        if let Err(error) = self.update_overlay(uri, text, version).await {
-            self.client
-                .log_message(MessageType::ERROR, error.to_string())
-                .await;
+    async fn update_overlay_logged(
+        &self,
+        uri: &Uri,
+        text: String,
+        version: i32,
+        allow_equal_version: bool,
+    ) -> bool {
+        if self.is_stopping() {
+            return false;
+        }
+        match self
+            .update_overlay(uri, text, version, allow_equal_version)
+            .await
+        {
+            Ok(updated) => updated,
+            Err(error) => {
+                if !self.is_stopping() {
+                    self.client
+                        .log_message(MessageType::ERROR, error.to_string())
+                        .await;
+                }
+                false
+            }
         }
     }
 
     /// Debounces diagnostics and rejects work for an obsolete document version.
     async fn schedule_diagnostics(&self, uri: Uri, version: i32) {
+        if self.is_stopping() {
+            return;
+        }
         let Ok(path) = uri_to_path(&uri) else {
             return;
         };
         let backend = self.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            if backend.is_stopping() {
+                return;
+            }
             backend.publish_diagnostics_now(uri, version).await;
         });
         if let Some(previous) = self.inner.diagnostic_tasks.lock().await.insert(path, task) {
@@ -130,6 +219,9 @@ impl Backend {
 
     /// Publishes diagnostics when the requested overlay version is still current.
     async fn publish_diagnostics_now(&self, uri: Uri, version: i32) {
+        if self.is_stopping() {
+            return;
+        }
         let Ok(path) = uri_to_path(&uri) else {
             return;
         };
@@ -143,6 +235,10 @@ impl Backend {
         let Ok(config) = self.config().await else {
             return;
         };
+        let Ok(source_text) = Self::source_text(&path, &overlays) else {
+            return;
+        };
+        let encoding = self.position_encoding().await;
         let severity = config
             .unresolved_references
             .as_deref()
@@ -151,7 +247,7 @@ impl Backend {
             .diagnostics(&path, &overlays, severity)
             .into_iter()
             .map(|diagnostic| Diagnostic {
-                range: to_lsp_range(diagnostic.range),
+                range: to_lsp_range(diagnostic.range, &source_text, encoding),
                 severity: Some(match diagnostic.severity {
                     Bg3DiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
                     Bg3DiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
@@ -168,20 +264,28 @@ impl Backend {
             })
             .collect();
         drop(overlays);
-        self.client
-            .publish_diagnostics(uri, diagnostics, Some(version))
-            .await;
+        if !self.is_stopping() {
+            self.client
+                .publish_diagnostics(uri, diagnostics, Some(version))
+                .await;
+        }
     }
 
     /// Republishes all open-document diagnostics after each successful index generation.
     async fn monitor_diagnostics(&self) {
         let mut states = self.inner.coordinator.subscribe();
         while states.changed().await.is_ok() {
+            if self.is_stopping() {
+                return;
+            }
             if !matches!(*states.borrow(), BuildState::Ready(_)) {
                 continue;
             }
             let documents = self.inner.overlays.read().await.versions();
             for (path, version) in documents {
+                if self.is_stopping() {
+                    return;
+                }
                 if let Ok(uri) = path_to_uri(&path) {
                     self.schedule_diagnostics(uri, version).await;
                 }
@@ -204,6 +308,9 @@ fn open_document_kind(path: &Path) -> Result<SourceKind, Error> {
 impl LanguageServer for Backend {
     /// Validates configuration and advertises native navigation capabilities.
     async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
+        let position_encoding = select_position_encoding(&params.capabilities)
+            .ok_or_else(|| jsonrpc::Error::invalid_params("unsupported position encoding"))?;
+        *self.inner.position_encoding.write().await = position_encoding;
         let snippet_support = params
             .capabilities
             .text_document
@@ -215,6 +322,15 @@ impl LanguageServer for Backend {
         self.inner
             .snippet_support
             .store(snippet_support, Ordering::Release);
+        let client_supports_work_done_progress = params
+            .capabilities
+            .window
+            .as_ref()
+            .and_then(|window| window.work_done_progress)
+            .unwrap_or(false);
+        self.inner
+            .client_supports_work_done_progress
+            .store(client_supports_work_done_progress, Ordering::Release);
         let root_uri = params
             .workspace_folders
             .as_ref()
@@ -229,9 +345,16 @@ impl LanguageServer for Backend {
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                position_encoding: Some(PositionEncodingKind::UTF8),
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                position_encoding: Some(position_encoding.lsp_kind()),
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::FULL),
+                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                            include_text: Some(true),
+                        })),
+                        ..TextDocumentSyncOptions::default()
+                    },
                 )),
                 definition_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
@@ -274,20 +397,36 @@ impl LanguageServer for Backend {
             return;
         };
         let monitor = self.clone();
-        tokio::spawn(async move { monitor.monitor_diagnostics().await });
+        let monitor_task = tokio::spawn(async move { monitor.monitor_diagnostics().await });
+        if self.is_stopping() {
+            monitor_task.abort();
+        } else {
+            *self.inner.diagnostic_monitor.lock().await = Some(monitor_task);
+        }
         let backend = self.clone();
         tokio::spawn(async move {
+            let supports_progress = backend
+                .inner
+                .client_supports_work_done_progress
+                .load(Ordering::Acquire);
             backend
                 .inner
                 .coordinator
-                .rebuild(Arc::clone(&config), &backend.client)
+                .rebuild_with_progress(
+                    Arc::clone(&config),
+                    &backend.client,
+                    supports_progress,
+                    None,
+                )
                 .await;
             if matches!(backend.inner.coordinator.state(), BuildState::Ready(_))
+                && !backend.is_stopping()
                 && let Err(error) = backend
                     .inner
                     .coordinator
-                    .start_watcher(config, backend.client.clone())
+                    .start_watcher_with_progress(config, backend.client.clone(), supports_progress)
                     .await
+                && !backend.is_stopping()
             {
                 backend
                     .client
@@ -299,63 +438,117 @@ impl LanguageServer for Backend {
 
     /// Accepts graceful LSP shutdown.
     async fn shutdown(&self) -> jsonrpc::Result<()> {
+        if self.inner.stopping.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let tasks = {
+            let mut tasks = self.inner.diagnostic_tasks.lock().await;
+            tasks
+                .drain()
+                .map(|(_, task)| {
+                    task.abort();
+                    task
+                })
+                .collect::<Vec<_>>()
+        };
+        for task in tasks {
+            let _ = task.await;
+        }
+        if let Some(task) = self.inner.diagnostic_monitor.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.inner.coordinator.shutdown().await;
         Ok(())
     }
 
     /// Replaces the disk record with the complete opened buffer text.
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        if self.is_stopping() {
+            return;
+        }
         let uri = params.text_document.uri.clone();
         let version = params.text_document.version;
-        self.update_overlay_logged(
-            &params.text_document.uri,
-            params.text_document.text,
-            version,
-        )
-        .await;
-        self.schedule_diagnostics(uri, version).await;
+        if self
+            .update_overlay_logged(
+                &params.text_document.uri,
+                params.text_document.text,
+                version,
+                false,
+            )
+            .await
+        {
+            self.schedule_diagnostics(uri, version).await;
+        }
     }
 
     /// Applies full-document synchronization for unsaved changes.
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        if self.is_stopping() {
+            return;
+        }
         if let Some(change) = params.content_changes.last() {
             let uri = params.text_document.uri.clone();
             let version = params.text_document.version;
-            self.update_overlay_logged(&params.text_document.uri, change.text.clone(), version)
-                .await;
-            self.schedule_diagnostics(uri, version).await;
+            if self
+                .update_overlay_logged(
+                    &params.text_document.uri,
+                    change.text.clone(),
+                    version,
+                    false,
+                )
+                .await
+            {
+                self.schedule_diagnostics(uri, version).await;
+            }
         }
     }
 
     /// Refreshes an overlay when the client includes saved text.
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let version = uri_to_path(&params.text_document.uri)
-            .ok()
-            .and_then(|path| {
-                self.inner
-                    .overlays
-                    .try_read()
-                    .ok()
-                    .and_then(|overlays| overlays.get(&path).map(|overlay| overlay.version))
-            })
-            .unwrap_or(0);
-        if let Some(text) = params.text {
-            self.update_overlay_logged(&params.text_document.uri, text, version)
+        if self.is_stopping() {
+            return;
+        }
+        let Ok(path) = uri_to_path(&params.text_document.uri) else {
+            return;
+        };
+        let version = self
+            .inner
+            .overlays
+            .read()
+            .await
+            .get(&path)
+            .map(|overlay| overlay.version);
+        let Some(version) = version else {
+            return;
+        };
+        let updated = if let Some(text) = params.text {
+            self.update_overlay_logged(&params.text_document.uri, text, version, true)
+                .await
+        } else {
+            true
+        };
+        if updated {
+            self.schedule_diagnostics(params.text_document.uri, version)
                 .await;
         }
-        self.schedule_diagnostics(params.text_document.uri, version)
-            .await;
     }
 
     /// Restores the indexed disk record when a document closes.
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        if self.is_stopping() {
+            return;
+        }
         if let Ok(path) = uri_to_path(&params.text_document.uri) {
             self.inner.overlays.write().await.remove(&path);
             if let Some(task) = self.inner.diagnostic_tasks.lock().await.remove(&path) {
                 task.abort();
             }
-            self.client
-                .publish_diagnostics(params.text_document.uri, Vec::new(), None)
-                .await;
+            if !self.is_stopping() {
+                self.client
+                    .publish_diagnostics(params.text_document.uri, Vec::new(), None)
+                    .await;
+            }
         }
     }
 
@@ -367,12 +560,18 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot().await?;
         let path = uri_to_path(&params.text_document_position_params.text_document.uri)
             .map_err(rpc_error)?;
-        let position = to_bg3_position(params.text_document_position_params.position);
+        let encoding = self.position_encoding().await;
         let overlays = self.inner.overlays.read().await;
+        let source_text = Self::source_text(&path, &overlays).map_err(rpc_error)?;
+        let position = to_bg3_position(
+            params.text_document_position_params.position,
+            &source_text,
+            encoding,
+        );
         let locations = snapshot
             .definition_locations_at(&path, position, &overlays)
             .into_iter()
-            .map(|source| location(&source.path, source.range))
+            .map(|source| location(&source.path, source.range, &overlays, encoding))
             .collect::<Result<Vec<_>, _>>()
             .map_err(rpc_error)?;
         Ok((!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations)))
@@ -383,8 +582,14 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot().await?;
         let path = uri_to_path(&params.text_document_position_params.text_document.uri)
             .map_err(rpc_error)?;
-        let position = to_bg3_position(params.text_document_position_params.position);
+        let encoding = self.position_encoding().await;
         let overlays = self.inner.overlays.read().await;
+        let source_text = Self::source_text(&path, &overlays).map_err(rpc_error)?;
+        let position = to_bg3_position(
+            params.text_document_position_params.position,
+            &source_text,
+            encoding,
+        );
         Ok(snapshot
             .hover(&path, position, &overlays)
             .or_else(|| snapshot.language_hover(&path, position, &overlays))
@@ -405,8 +610,14 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot().await?;
         let path =
             uri_to_path(&params.text_document_position.text_document.uri).map_err(rpc_error)?;
-        let position = to_bg3_position(params.text_document_position.position);
+        let encoding = self.position_encoding().await;
         let overlays = self.inner.overlays.read().await;
+        let source_text = Self::source_text(&path, &overlays).map_err(rpc_error)?;
+        let position = to_bg3_position(
+            params.text_document_position.position,
+            &source_text,
+            encoding,
+        );
         let completion = snapshot.completion(
             &path,
             position,
@@ -415,7 +626,11 @@ impl LanguageServer for Backend {
         );
         Ok(Some(CompletionResponse::List(CompletionList {
             is_incomplete: completion.incomplete,
-            items: completion.items.into_iter().map(completion_item).collect(),
+            items: completion
+                .items
+                .into_iter()
+                .map(|item| completion_item(item, &source_text, encoding))
+                .collect(),
         })))
     }
 
@@ -427,8 +642,14 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot().await?;
         let path = uri_to_path(&params.text_document_position_params.text_document.uri)
             .map_err(rpc_error)?;
-        let position = to_bg3_position(params.text_document_position_params.position);
+        let encoding = self.position_encoding().await;
         let overlays = self.inner.overlays.read().await;
+        let source_text = Self::source_text(&path, &overlays).map_err(rpc_error)?;
+        let position = to_bg3_position(
+            params.text_document_position_params.position,
+            &source_text,
+            encoding,
+        );
         Ok(snapshot
             .signature_help(&path, position, &overlays)
             .map(|help| tower_lsp_server::ls_types::SignatureHelp {
@@ -459,8 +680,14 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot().await?;
         let path =
             uri_to_path(&params.text_document_position.text_document.uri).map_err(rpc_error)?;
-        let position = to_bg3_position(params.text_document_position.position);
+        let encoding = self.position_encoding().await;
         let overlays = self.inner.overlays.read().await;
+        let source_text = Self::source_text(&path, &overlays).map_err(rpc_error)?;
+        let position = to_bg3_position(
+            params.text_document_position.position,
+            &source_text,
+            encoding,
+        );
         let locations = snapshot
             .references_at(
                 &path,
@@ -469,7 +696,7 @@ impl LanguageServer for Backend {
                 &overlays,
             )
             .into_iter()
-            .map(|item| location(&item.path, item.range))
+            .map(|item| location(&item.path, item.range, &overlays, encoding))
             .collect::<Result<Vec<_>, _>>()
             .map_err(rpc_error)?;
         Ok(Some(locations))
@@ -482,7 +709,9 @@ impl LanguageServer for Backend {
     ) -> jsonrpc::Result<Option<DocumentSymbolResponse>> {
         let snapshot = self.snapshot().await?;
         let path = uri_to_path(&params.text_document.uri).map_err(rpc_error)?;
+        let encoding = self.position_encoding().await;
         let overlays = self.inner.overlays.read().await;
+        let source_text = Self::source_text(&path, &overlays).map_err(rpc_error)?;
         let symbols = snapshot
             .document_symbols(&path, &overlays)
             .into_iter()
@@ -492,8 +721,8 @@ impl LanguageServer for Backend {
                 kind: symbol_kind(&symbol.kind),
                 tags: None,
                 deprecated: None,
-                range: to_lsp_range(symbol.location.range),
-                selection_range: to_lsp_range(symbol.location.range),
+                range: to_lsp_range(symbol.location.range, &source_text, encoding),
+                selection_range: to_lsp_range(symbol.location.range, &source_text, encoding),
                 children: None,
             })
             .collect();
@@ -506,11 +735,12 @@ impl LanguageServer for Backend {
         params: WorkspaceSymbolParams,
     ) -> jsonrpc::Result<Option<WorkspaceSymbolResponse>> {
         let snapshot = self.snapshot().await?;
+        let encoding = self.position_encoding().await;
         let overlays = self.inner.overlays.read().await;
         let symbols = snapshot
             .workspace_symbols(&params.query, &overlays)
             .into_iter()
-            .map(symbol_information)
+            .map(|symbol| symbol_information(symbol, &overlays, encoding))
             .collect::<Result<Vec<_>, _>>()
             .map_err(rpc_error)?;
         Ok(Some(WorkspaceSymbolResponse::Flat(symbols)))
@@ -524,7 +754,20 @@ impl LanguageServer for Backend {
         match params.command.as_str() {
             "bg3.reload" => {
                 let config = self.config().await.map_err(rpc_error)?;
-                let started = self.inner.coordinator.rebuild(config, &self.client).await;
+                let supports_progress = self
+                    .inner
+                    .client_supports_work_done_progress
+                    .load(Ordering::Acquire);
+                let started = self
+                    .inner
+                    .coordinator
+                    .rebuild_with_progress(
+                        config,
+                        &self.client,
+                        supports_progress,
+                        params.work_done_progress_params.work_done_token,
+                    )
+                    .await;
                 Ok(Some(serde_json::json!({ "started": started })))
             }
             "bg3.indexInfo" => match self.inner.coordinator.state() {
@@ -560,28 +803,121 @@ fn path_to_uri(path: &Path) -> Result<Uri, Error> {
         .map_err(|error| Error::Protocol(format!("generated URI is invalid: {error}")))
 }
 
+/// Selects the first position encoding supported by both the client and server.
+fn select_position_encoding(capabilities: &ClientCapabilities) -> Option<PositionEncoding> {
+    let offered = capabilities
+        .general
+        .as_ref()
+        .and_then(|general| general.position_encodings.as_deref());
+    match offered {
+        None => Some(PositionEncoding::Utf16),
+        Some(encodings) => encodings
+            .iter()
+            .find_map(|encoding| match encoding.as_str() {
+                "utf-8" => Some(PositionEncoding::Utf8),
+                "utf-16" => Some(PositionEncoding::Utf16),
+                _ => None,
+            }),
+    }
+}
+
+/// Returns one source line and its byte offset, preserving carriage returns.
+fn source_line(source: &str, line: u32) -> &str {
+    for (index, value) in source.split('\n').enumerate() {
+        if index == line as usize {
+            return value;
+        }
+    }
+    source.rsplit('\n').next().unwrap_or(source)
+}
+
 /// Converts one internal location to the LSP representation.
-fn location(path: &Path, range: TextRange) -> Result<Location, Error> {
+fn location(
+    path: &Path,
+    range: TextRange,
+    overlays: &OverlaySet,
+    encoding: PositionEncoding,
+) -> Result<Location, Error> {
+    let source_text = Backend::source_text(path, overlays)?;
     Ok(Location {
         uri: path_to_uri(path)?,
-        range: to_lsp_range(range),
+        range: to_lsp_range(range, &source_text, encoding),
     })
 }
 
 /// Converts an internal UTF-8 range to an LSP range.
-fn to_lsp_range(range: TextRange) -> Range {
+fn to_lsp_range(range: TextRange, source: &str, encoding: PositionEncoding) -> Range {
     Range {
-        start: Position::new(range.start.line, range.start.character),
-        end: Position::new(range.end.line, range.end.character),
+        start: to_lsp_position(range.start, source, encoding),
+        end: to_lsp_position(range.end, source, encoding),
     }
 }
 
-/// Converts an LSP position to the editor-neutral UTF-8 type.
-fn to_bg3_position(position: Position) -> Bg3Position {
+/// Converts one internal UTF-8 position into the negotiated LSP encoding.
+fn to_lsp_position(position: Bg3Position, source: &str, encoding: PositionEncoding) -> Position {
+    let line = source_line(source, position.line);
+    let byte_character = usize::try_from(position.character)
+        .unwrap_or(usize::MAX)
+        .min(line.len());
+    let byte_character = line
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(line.len()))
+        .take_while(|index| *index <= byte_character)
+        .last()
+        .unwrap_or(0);
+    let character = match encoding {
+        PositionEncoding::Utf8 => byte_character,
+        PositionEncoding::Utf16 => line[..byte_character].encode_utf16().count(),
+    };
+    Position::new(
+        position
+            .line
+            .min(source_line_count(source).saturating_sub(1)),
+        u32::try_from(character).unwrap_or(u32::MAX),
+    )
+}
+
+/// Converts an LSP position in the negotiated encoding to UTF-8 bytes.
+fn to_bg3_position(position: Position, source: &str, encoding: PositionEncoding) -> Bg3Position {
+    let line_number = position
+        .line
+        .min(source_line_count(source).saturating_sub(1));
+    let line = source_line(source, line_number);
+    let requested = usize::try_from(position.character).unwrap_or(usize::MAX);
+    let byte_character = match encoding {
+        PositionEncoding::Utf8 => {
+            let requested = requested.min(line.len());
+            line.char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(line.len()))
+                .take_while(|index| *index <= requested)
+                .last()
+                .unwrap_or(0)
+        }
+        PositionEncoding::Utf16 => {
+            let mut units = 0;
+            let mut byte = 0;
+            for (index, character) in line.char_indices() {
+                let width = character.len_utf16();
+                if units + width > requested {
+                    break;
+                }
+                units += width;
+                byte = index + character.len_utf8();
+            }
+            byte
+        }
+    };
     Bg3Position {
-        line: position.line,
-        character: position.character,
+        line: line_number,
+        character: u32::try_from(byte_character).unwrap_or(u32::MAX),
     }
+}
+
+/// Counts source lines, including a final empty line after a newline.
+fn source_line_count(source: &str) -> u32 {
+    u32::try_from(source.split('\n').count()).unwrap_or(u32::MAX)
 }
 
 /// Maps BG3 top-level declarations to standard LSP symbol kinds.
@@ -598,19 +934,32 @@ fn symbol_kind(kind: &str) -> SymbolKind {
 
 /// Converts an editor-neutral workspace symbol to the legacy LSP result shape.
 #[allow(deprecated)]
-fn symbol_information(symbol: Symbol) -> Result<SymbolInformation, Error> {
+fn symbol_information(
+    symbol: Symbol,
+    overlays: &OverlaySet,
+    encoding: PositionEncoding,
+) -> Result<SymbolInformation, Error> {
     Ok(SymbolInformation {
         name: symbol.name,
         kind: symbol_kind(&symbol.kind),
         tags: None,
         deprecated: None,
-        location: location(&symbol.location.path, symbol.location.range)?,
+        location: location(
+            &symbol.location.path,
+            symbol.location.range,
+            overlays,
+            encoding,
+        )?,
         container_name: Some(symbol.module),
     })
 }
 
 /// Converts one internal completion edit to a standard LSP completion item.
-fn completion_item(item: Bg3CompletionItem) -> CompletionItem {
+fn completion_item(
+    item: Bg3CompletionItem,
+    source: &str,
+    encoding: PositionEncoding,
+) -> CompletionItem {
     CompletionItem {
         label: item.label,
         kind: Some(match item.kind {
@@ -624,7 +973,7 @@ fn completion_item(item: Bg3CompletionItem) -> CompletionItem {
         documentation: item.documentation.map(Documentation::String),
         sort_text: item.sort_text,
         text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-            range: to_lsp_range(item.range),
+            range: to_lsp_range(item.range, source, encoding),
             new_text: item.new_text,
         })),
         insert_text_format: item.snippet.then_some(InsertTextFormat::SNIPPET),
@@ -645,7 +994,15 @@ fn diagnostic_severity(value: &str) -> Option<Bg3DiagnosticSeverity> {
 
 /// Converts typed server failures to JSON-RPC request errors.
 fn rpc_error(error: Error) -> jsonrpc::Error {
-    jsonrpc::Error::invalid_params(error.to_string())
+    let message = error.to_string();
+    match error {
+        Error::Config(_) | Error::Protocol(_) | Error::Conversion(_) => {
+            jsonrpc::Error::invalid_params(message)
+        }
+        Error::Index(_) | Error::IndexData(_) | Error::Io(_) | Error::Notify(_) => {
+            jsonrpc::Error::internal_error()
+        }
+    }
 }
 
 #[allow(dead_code)]

@@ -31,6 +31,12 @@ for legacy Stats syntax, embedded value expressions, Thoth helpers, and Osiris
 goals. It streams XML with `quick-xml`; it does not require a Neovim XML
 parser.
 
+The LSP transport negotiates UTF-8 or UTF-16 positions with the client and
+uses UTF-16 when the client does not advertise an encoding. It uses full-text
+open, change, close, and save synchronization. Work-done progress is emitted
+only for clients that advertise support, and command progress uses the token
+provided by the client.
+
 ## Requirements
 
 - Neovim nightly or Neovim 0.12+
