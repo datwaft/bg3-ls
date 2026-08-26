@@ -96,6 +96,13 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+Version 0.25.0 tracks rule-local Osiris variables across hover, go to
+definition, and references. Proven event, database, and documented query
+outputs provide bindings; unknown call directions, negated conditions, and
+user-query arguments remain unresolved to avoid false positives. Variables
+remain scoped to one rule, procedure, or query, and no configuration migration
+is required. The Osiris facts cache rebuilds once after this release.
+
 Version 0.24.2 fixes packaged Osiris indexing in LSP workspaces, restores
 configured base-module precedence for packaged callable hover and signature
 help, and avoids incorrect alias diagnostics when an engine event repeats a
