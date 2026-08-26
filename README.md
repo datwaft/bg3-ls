@@ -592,7 +592,9 @@ help therefore work for calls such as `GetActionResourceValuePersonal` and
 files. A small reviewed set of official descriptions is shown for documented
 callables; other catalogued callables still show their verified signature
 without invented prose. Variable hover shows the proven type only; use go to
-definition or references for binding locations.
+definition or references for binding locations. Hover formats long engine
+signatures with one parameter per line. Signature help refreshes after commas
+and selects the parameter at the cursor throughout the call.
 
 Procedures and queries declared in installed base-module goals are indexed
 the same way as packaged Thoth helpers. Hover, signature help, and completion
