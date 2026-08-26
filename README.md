@@ -41,7 +41,7 @@ provided by the client.
 
 - Neovim nightly or Neovim 0.12+
 - the `bg3_stats`, `bg3_lsx`, `bg3_localization`, `bg3_thoth`, and
-  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.5.2
+  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.5.3
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
@@ -61,7 +61,7 @@ CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
 git clone https://github.com/datwaft/bg3-ls
-git clone --branch v0.5.2 https://github.com/datwaft/tree-sitter-bg3
+git clone --branch v0.5.3 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```
@@ -94,6 +94,15 @@ written. A failed conversion does not change an existing destination.
 
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
+
+Version 0.24.2 fixes packaged Osiris indexing in LSP workspaces, restores
+configured base-module precedence for packaged callable hover and signature
+help, and avoids incorrect alias diagnostics when an engine event repeats a
+variable with conflicting aliases. Packaged Osiris discovery now accepts only
+direct goal files under `Goals/`, consistent with loose-source discovery. The
+Osiris facts cache rebuilds once after this release because its curated event
+catalog and inference behavior changed. Existing configuration remains
+compatible, and no migration is required.
 
 Version 0.24.1 aligns source builds with `tree-sitter-bg3` 0.5.3, which
 improves localization markup highlighting in Neovim. The pinned parsers are
