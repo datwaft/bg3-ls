@@ -12,6 +12,7 @@ lz4_flex.workspace = true
 postcard.workspace = true
 quick-xml.workspace = true
 rayon.workspace = true
+sha2.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tree-sitter.workspace = true

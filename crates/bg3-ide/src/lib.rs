@@ -513,7 +513,7 @@ impl WorkspaceSnapshot {
         overlays: &OverlaySet,
     ) -> Option<String> {
         if let Some(variable) = self.osiris_variable_at(path, position, overlays) {
-            return Some(self.osiris_variable_hover(path, variable));
+            return Some(self.osiris_variable_hover(variable));
         }
         let target = self.target_at(path, position, overlays)?;
         if let SymbolTarget::Named {
@@ -1310,22 +1310,8 @@ impl WorkspaceSnapshot {
     }
 
     /// Renders one rule-local Osiris variable without claiming a declaration.
-    fn osiris_variable_hover(&self, path: &Path, variable: &OsirisVariableFact) -> String {
+    fn osiris_variable_hover(&self, variable: &OsirisVariableFact) -> String {
         let mut markdown = HoverMarkup::new("Osiris variable", &variable.name);
-        if let Some(binding) = variable.binding_range {
-            let location = format!(
-                "{} (line {}, column {})",
-                display_path(path),
-                binding.start.line.saturating_add(1),
-                binding.start.character.saturating_add(1),
-            );
-            markdown = markdown.fact("Bound by", &location);
-        } else {
-            markdown = markdown.fact(
-                "Binding",
-                "unknown; this rule has no syntax-proven value origin",
-            );
-        }
         if let Some(evidence) = &variable.evidence {
             markdown = markdown
                 .fact("Type", &evidence.type_name)
@@ -1708,7 +1694,7 @@ fn display_path(path: &Path) -> String {
 fn osiris_evidence_origin(origin: OsirisEvidenceOrigin) -> &'static str {
     match origin {
         OsirisEvidenceOrigin::Explicit => "explicit source cast",
-        OsirisEvidenceOrigin::Engine => "curated engine event signature",
+        OsirisEvidenceOrigin::Engine => "generated engine contract",
     }
 }
 

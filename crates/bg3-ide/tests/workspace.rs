@@ -993,7 +993,8 @@ fn tracks_osiris_variables_by_rule_and_replaces_them_in_overlays() {
     let binding = source_position_nth(text, "_Caster", 0);
     let hover = workspace.hover(&path, bound_use, &overlays).unwrap();
     assert!(hover.contains("**Osiris variable** `_Caster`"), "{hover}");
-    assert!(hover.contains("Bound by:"), "{hover}");
+    assert!(!hover.contains("Bound by:"), "{hover}");
+    assert!(!hover.contains("Binding:"), "{hover}");
     assert!(hover.contains("Type: `CHARACTER`"), "{hover}");
     assert!(
         hover.contains("Evidence: `explicit source cast`"),
@@ -1051,9 +1052,8 @@ fn tracks_osiris_variables_by_rule_and_replaces_them_in_overlays() {
     );
     let unknown = source_position_nth(text, "_Unknown", 0);
     let unknown_hover = workspace.hover(&path, unknown, &overlays).unwrap();
-    assert!(
-        unknown_hover.contains("Binding: `unknown; this rule has no syntax-proven value origin`")
-    );
+    assert!(!unknown_hover.contains("Bound by:"));
+    assert!(!unknown_hover.contains("Binding:"));
     assert!(
         workspace
             .definition_locations_at(&path, unknown, &overlays)

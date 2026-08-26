@@ -1451,7 +1451,7 @@ fn tracks_rule_local_osiris_variable_occurrences_and_proven_bindings() {
         "INITSECTION\n",
         "KBSECTION\n",
         "IF\n",
-        "UnknownEvent((CHARACTER)_Caster)\n",
+        "Died((CHARACTER)_Caster)\n",
         "AND\n",
         "DB_Characters(_FromDb)\n",
         "AND\n",
@@ -1495,7 +1495,7 @@ fn tracks_rule_local_osiris_variable_occurrences_and_proven_bindings() {
     assert_eq!(caster[0].binding_range, Some(caster[0].occurrences[0]));
     assert_eq!(caster[0].evidence.as_ref().unwrap().type_name, "CHARACTER");
     assert_eq!(caster[1].occurrences.len(), 2);
-    assert_eq!(caster[1].binding_range, Some(caster[1].occurrences[0]));
+    assert_eq!(caster[1].binding_range, None);
 
     let from_db = variables
         .iter()

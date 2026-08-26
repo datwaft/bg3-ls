@@ -96,6 +96,28 @@ written. A failed conversion does not change an existing destination.
 Native LSF output is currently uncompressed. It remains valid BG3 data, but a
 converted resource can be larger than its compressed source.
 
+## Osiris catalog maintenance
+
+Maintainers can generate or verify the versioned Osiris engine contract catalog
+from a game installation and its `story_header.div`:
+
+```sh
+bg3-ls catalog generate \
+  --input "/path/to/story_header.div" \
+  --game-root "/path/to/Baldurs Gate 3" \
+  --output crates/bg3-index/src/osiris_catalog/generated_osiris_catalog.rs
+
+bg3-ls catalog check \
+  --input "/path/to/story_header.div" \
+  --game-root "/path/to/Baldurs Gate 3" \
+  --output crates/bg3-index/src/osiris_catalog/generated_osiris_catalog.rs
+```
+
+Generation records the exact game build metadata and the input header hash in
+the generated artifact. The normal language server uses only the checked-in
+catalog; it does not require an installed game or a mod-local
+`story_header.div`. Do not commit installed game files or extracted game data.
+
 Version 0.25.0 tracks rule-local Osiris variables across hover, go to
 definition, and references. Proven event, database, and documented query
 outputs provide bindings; unknown call directions, negated conditions, and
@@ -533,12 +555,12 @@ Osiris goals receive the stable `osiris-database-alias-mismatch` error when a
 user database column receives two different aliases across the visible loose
 goals of the workspace. A column established as `CHARACTER` by a cast or an
 engine event signature rejects a later plain `GUIDSTRING` argument, matching
-the story compiler. Uncast variables inherit an alias from the curated engine
-event catalog, which covers every installed engine event transcribed from a
-machine-generated community reference; unknown events and unknown columns
-stay silent. The server never checks engine call arguments, so a specific
-`CHARACTER` value remains valid for an engine parameter that accepts generic
-`GUIDSTRING`.
+the story compiler. Uncast variables inherit aliases from the versioned
+generated engine contract catalog, which covers installed events, calls, and
+queries; unknown contracts and unknown columns stay silent. The server uses
+callable parameters as type evidence but does not diagnose engine call
+arguments, so a specific `CHARACTER` value remains valid for an engine
+parameter that accepts generic `GUIDSTRING`.
 
 Rule-local Osiris variables provide definition, reference, and hover navigation
 when their bindings are proven by a rule head or a positive user-database
@@ -769,8 +791,10 @@ diagnostics remain out of scope. Typed member features require explicit,
 unambiguous annotations and stay silent for unknown receivers or fields.
 
 Osiris support does not execute or compile Story, provide control-flow
-analysis, load a complete engine API catalog, or infer aliases from
-`story_header.div`. Variable tracking remains rule-local and conservative: it
+analysis, or infer aliases from a mod-local `story_header.div`. Runtime engine
+contracts come from the checked-in generated catalog; regenerating that catalog
+is a maintainer operation that requires the game installation. Variable
+tracking remains rule-local and conservative: it
 does not infer bindings through unknown callable directions, negation, or
 uncertain control flow. Database alias compatibility is diagnosed only when
 the visible source or curated event signatures prove the relevant aliases.

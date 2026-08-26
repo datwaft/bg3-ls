@@ -236,3 +236,31 @@ the documented cold regression boundary. The increase is accepted deliberately:
 issue #83 requests this source family, and the finished catalog persists in
 its own content-addressed cache entry, so later builds reuse it and warm
 indexing improves.
+
+## Issue #144 Osiris variable contract verification
+
+Issue #144 adds generated, versioned contracts for Osiris engine calls and
+queries. The comparison used five cold and five warm trials on the same
+machine, data revision, configured modules, project, and source composition.
+Both builds used `tree-sitter-bg3` 0.5.3 with parser ABI 15. The index
+contained 3,451 documents and 89,133 definitions.
+
+| Metric | Main p50 | Main p95 | Issue #144 p50 | Issue #144 p95 | p95 change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold indexing | 4,639 ms | 4,645 ms | 4,778 ms | 4,833 ms | +4.0% |
+| Warm indexing | 900 ms | 915 ms | 907 ms | 922 ms | +0.8% |
+| Navigation | 1,291 ns | 1,292 ns | 1,209 ns | 1,250 ns | -3.3% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100% for both builds
+- Main unrestricted-run RSS: 2,110,537,728 bytes
+- Issue #144 unrestricted-run RSS: 2,123,726,848 bytes (+0.6%)
+- Main cache: 167,641,265 bytes in 3,463 files
+- Issue #144 cache: 168,318,479 bytes in 3,463 files (+0.4%)
+
+Both builds used schema revision
+`ab8dfe38b6547cba2bbf3897774f5437919193d4237892e4cc3c5306bb46177d`.
+The cold p95 increase remains below the 20% limit, and the warm p95 increase
+remains below the 15% limit. Navigation also improves, so the issue passes the
+repository regression thresholds.
