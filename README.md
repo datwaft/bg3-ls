@@ -43,7 +43,7 @@ provided by the client.
 
 - Neovim nightly or Neovim 0.12+
 - the `bg3_stats`, `bg3_lsx`, `bg3_localization`, `bg3_thoth`, and
-  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.5.3
+  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.6.0
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
@@ -63,7 +63,7 @@ CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
 git clone https://github.com/datwaft/bg3-ls
-git clone --branch v0.5.3 https://github.com/datwaft/tree-sitter-bg3
+git clone --branch v0.6.0 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```

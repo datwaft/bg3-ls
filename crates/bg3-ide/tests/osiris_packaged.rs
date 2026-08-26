@@ -172,7 +172,7 @@ fn generated_engine_contracts_provide_callable_hover_and_signature_help() {
     );
     assert!(
         hover.contains(
-            "```osiris\nGetActionResourceValuePersonal(\n    [in] CHARACTER _Player,\n    [in] STRING _ResourceName,\n    [in] INTEGER _ResourceLevel,\n    [out] REAL _Amount\n)\n```"
+            "```bg3_osiris\nGetActionResourceValuePersonal(\n    [in] CHARACTER _Player,\n    [in] STRING _ResourceName,\n    [in] INTEGER _ResourceLevel,\n    [out] REAL _Amount\n)\n```"
         ),
         "{hover}"
     );
@@ -204,6 +204,55 @@ fn generated_engine_contracts_provide_callable_hover_and_signature_help() {
     );
 }
 
+#[test]
+fn signature_help_survives_osiris_type_cast_before_later_arguments() {
+    let (workspace, caller_path) = workspace_with(None);
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "UsingSpell((CHARACTER)_Caster, \"Target_MainHandAttack\", -, -, _StoryActionID)\n",
+        "THEN\n",
+        "DB_Noop(_Caster);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n"
+    );
+    let overlays = osiris_overlay(&workspace, &caller_path, text);
+    let line = text.lines().nth(5).expect("UsingSpell line");
+
+    for (suffix, expected_parameter) in [
+        (", ", 1),
+        (", \"Target_MainHandAttack\", ", 2),
+        (", -, ", 3),
+        (", -, _StoryActionID", 4),
+    ] {
+        let prefix = if expected_parameter == 1 {
+            "UsingSpell((CHARACTER)_Caster"
+        } else {
+            "UsingSpell((CHARACTER)_Caster, \"Target_MainHandAttack\", -,"
+        };
+        let character = if expected_parameter == 1 {
+            line.find(prefix).expect("casted first argument") + prefix.len() + suffix.len()
+        } else {
+            line.find(suffix).expect("later argument") + suffix.len()
+        };
+        let signature = workspace
+            .signature_help(
+                &caller_path,
+                Position {
+                    line: 5,
+                    character: u32::try_from(character).expect("position fits"),
+                },
+                &overlays,
+            )
+            .expect("UsingSpell signature help");
+        assert_eq!(signature.active_parameter, expected_parameter);
+        assert!(signature.label.starts_with("UsingSpell("));
+    }
+}
+
 const GENERATED_SHORT_CALLER: &str = concat!(
     "Version 1\n",
     "SubGoalCombiner SGC_AND\n",
@@ -229,9 +278,14 @@ fn generated_engine_callable_hover_uses_compact_code_for_short_signatures() {
             &overlays,
         )
         .expect("generated short engine hover");
-    assert!(hover.contains("```osiris\nExists([in] GUIDSTRING _Object, [out] INTEGER _Bool)\n```"));
+    assert!(
+        hover.contains("```bg3_osiris\nExists([in] GUIDSTRING _Object, [out] INTEGER _Bool)\n```")
+    );
     assert!(!hover.contains("Signature:"), "{hover}");
-    assert!(hover.contains("Catalog: BG3 build"), "{hover}");
+    assert!(
+        hover.contains("**Catalog:** BG3 build `4.1.1.7398727`"),
+        "{hover}"
+    );
 }
 
 #[test]

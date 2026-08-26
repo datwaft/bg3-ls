@@ -1964,6 +1964,20 @@ struct CallContext {
     first_argument: Option<String>,
 }
 
+/// One parenthesis pair while scanning an incomplete call.
+///
+/// Osiris casts use grouping parentheses, such as `(CHARACTER)_Caster`, so
+/// the scanner must keep them separate from callable parentheses.  Otherwise
+/// the cast's closing parenthesis can close the surrounding call.
+enum CallParen {
+    Call {
+        function: String,
+        argument: usize,
+        arguments_start: usize,
+    },
+    Group,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct OsirisCompletionContext<'a> {
     prefix: &'a str,
@@ -2375,7 +2389,7 @@ fn xml_attribute_start<'a>(element: &'a str, name: &str) -> Option<&'a str> {
 /// Finds the innermost incomplete function call and active argument.
 fn call_context(value: &str) -> Option<CallContext> {
     let bytes = value.as_bytes();
-    let mut stack = Vec::<(String, usize, usize)>::new();
+    let mut stack = Vec::<CallParen>::new();
     let mut quote = None;
     let mut cursor = 0;
     while cursor < bytes.len() {
@@ -2401,11 +2415,17 @@ fn call_context(value: &str) -> Option<CallContext> {
                     start -= 1;
                 }
                 if start < end {
-                    stack.push((value[start..end].to_owned(), 0, cursor + 1));
+                    stack.push(CallParen::Call {
+                        function: value[start..end].to_owned(),
+                        argument: 0,
+                        arguments_start: cursor + 1,
+                    });
+                } else {
+                    stack.push(CallParen::Group);
                 }
             }
             b',' => {
-                if let Some((_, argument, _)) = stack.last_mut() {
+                if let Some(CallParen::Call { argument, .. }) = stack.last_mut() {
                     *argument += 1;
                 }
             }
@@ -2416,13 +2436,18 @@ fn call_context(value: &str) -> Option<CallContext> {
         }
         cursor += 1;
     }
-    stack
-        .pop()
-        .map(|(function, argument, arguments_start)| CallContext {
+    stack.into_iter().rev().find_map(|frame| match frame {
+        CallParen::Call {
+            function,
+            argument,
+            arguments_start,
+        } => Some(CallContext {
             function,
             argument,
             first_argument: first_call_argument(&value[arguments_start..]),
-        })
+        }),
+        CallParen::Group => None,
+    })
 }
 
 /// Extracts the first top-level argument from an incomplete call.

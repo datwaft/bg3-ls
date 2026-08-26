@@ -1110,5 +1110,10 @@ data "Boosts" "UnlockSpell(Target_Test)"
             hover_plaintext(markdown),
             "Field *literal* `inline`\n\nnew entry \"PREVIEW\"\ndata \"Boosts\" \"UnlockSpell(Target_Test)\""
         );
+
+        assert_eq!(
+            hover_plaintext("**Catalog:** BG3 build `4.1.1.7398727`"),
+            "Catalog: BG3 build 4.1.1.7398727"
+        );
     }
 }

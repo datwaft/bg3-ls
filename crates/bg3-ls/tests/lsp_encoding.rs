@@ -767,7 +767,7 @@ fn provides_osiris_signature_help_for_later_arguments() {
         "INITSECTION\n",
         "KBSECTION\n",
         "IF\n",
-        "UsingSpell(_Caster, \"Target_MainHandAttack\", -, -, _StoryActionID)\n",
+        "UsingSpell((CHARACTER)_Caster, \"Target_MainHandAttack\", -, -, _StoryActionID)\n",
         "AND\n",
         "GetActionResourceValuePersonal(_Caster, \"BonusActionPoint\", 0, _BonusActionPoints)\n",
         "THEN\n",
@@ -789,6 +789,29 @@ fn provides_osiris_signature_help_for_later_arguments() {
             }),
         )
         .expect("open Osiris document");
+
+    let using_spell_line = text.lines().nth(5).expect("UsingSpell line");
+    let first_comma = using_spell_line.find(',').expect("first argument comma");
+    let signature = client
+        .request_result(
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": 5,
+                    "character": u32::try_from(first_comma + 2).expect("position fits")
+                }
+            }),
+        )
+        .expect("signature help after casted first argument");
+    assert_eq!(signature["activeParameter"], json!(1));
+    assert_eq!(
+        signature["signatures"][0]["label"]
+            .as_str()
+            .and_then(|label| label.split_once('('))
+            .map(|(name, _)| name),
+        Some("UsingSpell")
+    );
 
     for (line_number, function, expected_parameters) in [
         (5, "UsingSpell", &[1_u32, 2, 3, 4][..]),
