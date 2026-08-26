@@ -24,10 +24,11 @@ use crate::{Error, ModuleSpec};
 
 const CACHE_MAGIC: &[u8; 8] = b"BG3LSIDX";
 const CACHE_VERSION: u32 = 4;
-const EXTRACTOR_VERSION: &str = "bg3-ls-index-v6";
+const EXTRACTOR_VERSION: &str = "bg3-ls-index-v7";
 const LOCALIZATION_EXTRACTOR_VERSION: &str = "bg3-ls-localization-v1";
 const TOOLTIP_EXTRACTOR_VERSION: &str = "bg3-ls-tooltips-v1";
 const THOTH_EXTRACTOR_VERSION: &str = "bg3-ls-thoth-v3";
+const OSIRIS_CATALOG_EXTRACTOR_VERSION: &str = "bg3-ls-osiris-catalog-v1";
 const STATS_EXTRACTOR_VERSION: &str = "bg3-ls-stats-v1";
 const ABANDONED_OBJECT_AGE: Duration = Duration::from_hours(720);
 
@@ -55,6 +56,7 @@ impl CacheStore {
             "localizations",
             "tooltips",
             "thoth",
+            "osiris",
             "stats",
         ] {
             fs::create_dir_all(root.join(child))?;
@@ -239,6 +241,50 @@ impl CacheStore {
     where
         F: FnOnce() -> Result<PackagedThothCatalog, Error>,
     {
+        self.load_packaged_catalog(
+            base_modules,
+            package_candidates,
+            "thoth",
+            THOTH_EXTRACTOR_VERSION,
+            load,
+        )
+    }
+
+    /// Loads the configured packaged Osiris catalog and reuses its decoded form.
+    ///
+    /// Osiris and Thoth catalogs use the same source representation, but they
+    /// must have separate cache identities. Their package candidates overlap,
+    /// and sharing a cache path can return a Thoth catalog where Osiris facts
+    /// are expected.
+    pub fn load_packaged_osiris<F>(
+        &self,
+        base_modules: &[String],
+        package_candidates: &[PathBuf],
+        load: F,
+    ) -> Result<(PackagedThothCatalog, bool), Error>
+    where
+        F: FnOnce() -> Result<PackagedThothCatalog, Error>,
+    {
+        self.load_packaged_catalog(
+            base_modules,
+            package_candidates,
+            "osiris",
+            OSIRIS_CATALOG_EXTRACTOR_VERSION,
+            load,
+        )
+    }
+
+    fn load_packaged_catalog<F>(
+        &self,
+        base_modules: &[String],
+        package_candidates: &[PathBuf],
+        cache_namespace: &str,
+        extractor_version: &str,
+        load: F,
+    ) -> Result<(PackagedThothCatalog, bool), Error>
+    where
+        F: FnOnce() -> Result<PackagedThothCatalog, Error>,
+    {
         let mut modules = base_modules.to_vec();
         modules.sort();
         modules.dedup();
@@ -265,7 +311,7 @@ impl CacheStore {
         packages.dedup_by(|left, right| left.path == right.path);
 
         let mut identity = blake3::Hasher::new();
-        identity.update(THOTH_EXTRACTOR_VERSION.as_bytes());
+        identity.update(extractor_version.as_bytes());
         for module in &modules {
             identity.update(module.as_bytes());
             identity.update(&[0]);
@@ -276,13 +322,13 @@ impl CacheStore {
         }
         let cache_path = self
             .root
-            .join("thoth")
+            .join(cache_namespace)
             .join(format!("{}.cache", identity.finalize().to_hex()));
 
-        if let Ok(cached) = self.read_envelope::<CachedPackagedThoth>(&cache_path)
+        if let Ok(cached) = self.read_envelope::<CachedPackagedCatalog>(&cache_path)
             && cached.modules == modules
             && cached.packages == packages
-            && cached.extractor_version == THOTH_EXTRACTOR_VERSION
+            && cached.extractor_version == extractor_version
         {
             return Ok((cached.catalog, true));
         }
@@ -290,10 +336,10 @@ impl CacheStore {
         let catalog = load()?;
         self.write_envelope(
             &cache_path,
-            &CachedPackagedThoth {
+            &CachedPackagedCatalog {
                 modules,
                 packages,
-                extractor_version: THOTH_EXTRACTOR_VERSION.into(),
+                extractor_version: extractor_version.into(),
                 catalog: catalog.clone(),
             },
         )?;
@@ -516,6 +562,7 @@ impl CacheStore {
             "localizations",
             "tooltips",
             "thoth",
+            "osiris",
             "stats",
         ] {
             fs::create_dir_all(self.root.join(child))?;
@@ -698,7 +745,7 @@ struct PackageManifest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct CachedPackagedThoth {
+struct CachedPackagedCatalog {
     modules: Vec<String>,
     packages: Vec<PackageManifest>,
     extractor_version: String,
@@ -819,6 +866,59 @@ mod tests {
             })
             .expect("changed load");
         assert!(!hit);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn packaged_osiris_cache_is_distinct_from_thoth_cache() {
+        let directory = tempdir().expect("temporary directory");
+        let package = directory.path().join("base.pak");
+        fs::write(&package, package_marker(1)).expect("write package marker");
+        let cache = CacheStore::new(directory.path().join("cache")).expect("cache");
+        let modules = vec!["Example".to_owned()];
+        let candidates = vec![package];
+        let calls = Cell::new(0);
+
+        let (thoth, hit) = cache
+            .load_packaged_thoth(&modules, &candidates, || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("thoth"))
+            })
+            .expect("Thoth catalog load");
+        assert!(!hit);
+        assert_eq!(
+            thoth.sources().next().expect("Thoth source").text(),
+            "thoth"
+        );
+
+        let (osiris, hit) = cache
+            .load_packaged_osiris(&modules, &candidates, || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("osiris"))
+            })
+            .expect("Osiris catalog load");
+        assert!(!hit);
+        assert_eq!(
+            osiris.sources().next().expect("Osiris source").text(),
+            "osiris"
+        );
+        assert_eq!(calls.get(), 2);
+
+        let (cached, hit) = cache
+            .load_packaged_osiris(&modules, &candidates, || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("unexpected"))
+            })
+            .expect("cached Osiris catalog load");
+        assert!(hit);
+        assert_eq!(
+            cached
+                .sources()
+                .next()
+                .expect("cached Osiris source")
+                .text(),
+            "osiris"
+        );
         assert_eq!(calls.get(), 2);
     }
 
