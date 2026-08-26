@@ -118,6 +118,14 @@ the generated artifact. The normal language server uses only the checked-in
 catalog; it does not require an installed game or a mod-local
 `story_header.div`. Do not commit installed game files or extracted game data.
 
+Version 0.26.0 adds a checked-in, generated Osiris engine contract catalog and
+Rust maintenance commands to regenerate or verify it from `story_header.div`
+and the installed game's build metadata. The catalog supplies conservative
+types and input/output directions for engine calls, events, and queries without
+requiring game files at runtime. It also improves rule-local Osiris variable
+tracking across hover, go to definition, and references. Existing configuration
+remains compatible, and no migration is required.
+
 Version 0.25.0 tracks rule-local Osiris variables across hover, go to
 definition, and references. Proven event, database, and documented query
 outputs provide bindings; unknown call directions, negated conditions, and
