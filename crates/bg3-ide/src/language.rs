@@ -1832,6 +1832,7 @@ impl WorkspaceSnapshot {
         for layer in self
             .layers
             .iter()
+            .rev()
             .filter(|layer| layer.spec.role == ModuleRole::Base)
         {
             let Some(arity) = self
