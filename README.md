@@ -119,6 +119,12 @@ the generated artifact. The normal language server uses only the checked-in
 catalog; it does not require an installed game or a mod-local
 `story_header.div`. Do not commit installed game files or extracted game data.
 
+Version 0.27.1 improves generated Osiris callable help. Long signatures render
+with one parameter per line, and signature help refreshes after the opening
+parenthesis and each comma throughout a call. Variable hover reports only the
+proven type. Existing configuration remains compatible, and no migration is
+required.
+
 Version 0.27.0 adds generated Osiris callable help. Hover and signature help now
 show verified engine callable signatures, parameter directions, and available
 descriptions from the checked-in catalog without requiring game files at
