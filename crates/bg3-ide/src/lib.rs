@@ -657,7 +657,7 @@ impl WorkspaceSnapshot {
             markdown = markdown.prose(description);
         }
         markdown = markdown.markdown(&format!(
-            "Catalog: BG3 build {}",
+            "**Catalog:** BG3 build `{}`",
             bg3_index::OSIRIS_CATALOG_SOURCE_VERSION
         ));
         Some(markdown.finish())
@@ -1615,7 +1615,7 @@ fn osiris_contract_signature_markdown(
         expanded.push(')');
         expanded
     };
-    format!("```osiris\n{signature}\n```")
+    format!("```bg3_osiris\n{signature}\n```")
 }
 
 fn osiris_parameter_direction(direction: OsirisParameterDirection) -> &'static str {
