@@ -1311,6 +1311,32 @@ fn diagnoses_proven_osiris_database_alias_conflicts() {
 }
 
 #[test]
+fn ignores_osiris_database_reads_when_checking_aliases() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let source = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        // This read precedes the first write and must not establish the
+        // database column as GUIDSTRING.
+        "IF\nDB_ReadBinding((GUIDSTRING)_Other)\nTHEN\nGoalCompleted;\n",
+        "IF\nDied((CHARACTER)_Caster)\nTHEN\nDB_ReadBinding(_Caster);\n",
+        // The DB condition binds _Caster from the matching row. The later
+        // HasPassive input must not make this read appear to supply GUIDSTRING.
+        "IF\nDB_ReadBinding(_Caster)\nAND\nHasPassive(_Caster, \"SomePassive\", 0)\nTHEN\nDB_ReadResult(_Caster);\n",
+        // A read after the write with an explicit, incompatible cast also
+        // does not conflict with the existing database column.
+        "IF\nDB_ReadBinding((GUIDSTRING)_Other)\nTHEN\nGoalCompleted;\n",
+        "EXITSECTION\nENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, source);
+
+    assert!(workspace.diagnostics(&path, &overlays, None).is_empty());
+}
+
+#[test]
 fn toggles_osiris_alias_diagnostics_through_cross_goal_overlays() {
     let (workspace, _) = fixture_workspace(200);
     let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/SecondaryGoal.txt");
