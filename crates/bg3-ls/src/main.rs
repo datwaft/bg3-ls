@@ -7,6 +7,7 @@ mod server;
 use std::collections::{BTreeSet, HashSet};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
 use std::str::FromStr;
@@ -57,6 +58,34 @@ enum Command {
     Inventory(InventoryOptions),
     /// Converts one loose BG3 resource between binary LSF and textual LSX.
     Convert(conversion::Options),
+    /// Generates or validates the checked-in Osiris engine contract catalog.
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommand,
+    },
+}
+
+/// Operations on the generated Osiris engine contract catalog.
+#[derive(Debug, Subcommand)]
+enum CatalogCommand {
+    /// Generates catalog Rust source from a game story header.
+    Generate(CatalogOptions),
+    /// Checks a generated catalog against the current game story header.
+    Check(CatalogOptions),
+}
+
+/// Inputs shared by catalog generation and validation.
+#[derive(Clone, Debug, clap::Args)]
+struct CatalogOptions {
+    /// Path to the source story_header.div declaration file.
+    #[arg(long)]
+    input: PathBuf,
+    /// Path to the BG3 installation used to read its exact build version.
+    #[arg(long)]
+    game_root: PathBuf,
+    /// Destination for generated Rust source.
+    #[arg(long)]
+    output: PathBuf,
 }
 
 /// Inputs for one standalone diagnostic pass.
@@ -259,7 +288,40 @@ fn run_command(command: Command, cache_dir: Option<PathBuf>) -> Result<ExitCode,
             conversion::convert(&options)?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Catalog { command } => run_catalog(command),
     }
+}
+
+fn run_catalog(command: CatalogCommand) -> Result<ExitCode, Error> {
+    let (options, check) = match command {
+        CatalogCommand::Generate(options) => (options, false),
+        CatalogCommand::Check(options) => (options, true),
+    };
+    let source = fs::read_to_string(&options.input)?;
+    let version = bg3_index::detect_game_build_version(&options.game_root)
+        .map_err(|error| Error::Index(error.to_string()))?
+        .version;
+    let rendered = bg3_index::generate_osiris_catalog(&source, &version)
+        .map_err(|error| Error::Index(error.to_string()))?;
+    if check {
+        let existing = fs::read_to_string(&options.output)?;
+        if existing != rendered {
+            return Err(Error::Config(format!(
+                "catalog is out of date: {}",
+                options.output.display()
+            )));
+        }
+        println!("catalog is up to date: {}", options.output.display());
+    } else {
+        let parent = options.output.parent().unwrap_or_else(|| Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(rendered.as_bytes())?;
+        temporary
+            .persist(&options.output)
+            .map_err(|error| Error::Io(error.error))?;
+        println!("wrote catalog: {}", options.output.display());
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Opens the explicit cache override or the normal XDG cache.

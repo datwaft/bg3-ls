@@ -5,9 +5,11 @@ mod cache;
 mod catalog;
 mod discovery;
 mod domain;
+mod game_version;
 mod localization;
 mod module;
 mod osiris_api;
+mod osiris_catalog;
 mod package;
 mod packaged_stats;
 mod parser;
@@ -51,6 +53,9 @@ pub use domain::{
     ThothMemberAccessKind, ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId,
     ThothStatementId, ThothUnaryOperator,
 };
+pub use game_version::{
+    GameBuildVersion, GameBuildVersionError, GameBuildVersionSource, detect_game_build_version,
+};
 pub use localization::{
     LocalizationCatalog, LocalizedText, read_base_localization_package, read_localization_package,
     valid_language,
@@ -59,6 +64,13 @@ pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
 pub use osiris_api::{
     OSIRIS_FACTS_EXTRACTOR_VERSION, PackagedOsirisCallable, PackagedOsirisCandidate,
     PackagedOsirisIndex, PackagedOsirisResolution, parse_osiris_goal_source,
+};
+pub use osiris_catalog::{
+    GENERATED_OSIRIS_CATALOG_GENERATOR_VERSION, OSIRIS_CATALOG_GENERATOR_VERSION,
+    OSIRIS_CATALOG_SOURCE_HASH, OSIRIS_CATALOG_SOURCE_VERSION, OSIRIS_CONTRACTS, OsirisCatalog,
+    OsirisCatalogMetadata, OsirisContract, OsirisContractKind, OsirisContractSpec, OsirisParameter,
+    OsirisParameterDirection, OsirisParameterSpec, generate_osiris_catalog, osiris_contract,
+    osiris_event_contract, parse_story_header, render_osiris_catalog,
 };
 pub use package::{PackageEntry, PackageHeader, PackageReader};
 pub use packaged_stats::{

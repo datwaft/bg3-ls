@@ -576,7 +576,8 @@ fn tracks_osiris_head_variables_through_lsp_navigation() {
         "{hover_value}"
     );
     assert!(hover_value.contains("Type: CHARACTER"), "{hover_value}");
-    assert!(hover_value.contains("Bound by:"), "{hover_value}");
+    assert!(!hover_value.contains("Bound by:"), "{hover_value}");
+    assert!(!hover_value.contains("Binding:"), "{hover_value}");
     assert_eq!(
         hover["range"],
         json!({
@@ -647,7 +648,7 @@ fn tracks_osiris_head_variables_through_lsp_navigation() {
         Some(2)
     );
 
-    let unknown_hover = client
+    let bonus_hover = client
         .request_result(
             "textDocument/hover",
             json!({
@@ -655,19 +656,18 @@ fn tracks_osiris_head_variables_through_lsp_navigation() {
                 "position": { "line": 7, "character": 70 }
             }),
         )
-        .expect("unknown Osiris variable hover");
-    let unknown_value = unknown_hover["contents"]["value"]
+        .expect("Osiris query output variable hover");
+    let bonus_value = bonus_hover["contents"]["value"]
         .as_str()
-        .expect("unknown hover markdown");
+        .expect("Osiris query output hover markdown");
     assert!(
-        unknown_value.contains("Osiris variable _BonusActionPoints"),
-        "{unknown_value}"
+        bonus_value.contains("Osiris variable _BonusActionPoints"),
+        "{bonus_value}"
     );
-    assert!(
-        unknown_value.contains("Binding: unknown"),
-        "{unknown_value}"
-    );
-    let unknown_definition = client
+    assert!(bonus_value.contains("Type: REAL"), "{bonus_value}");
+    assert!(!bonus_value.contains("Bound by:"), "{bonus_value}");
+    assert!(!bonus_value.contains("Binding:"), "{bonus_value}");
+    let bonus_definition = client
         .request_result(
             "textDocument/definition",
             json!({
@@ -675,8 +675,17 @@ fn tracks_osiris_head_variables_through_lsp_navigation() {
                 "position": { "line": 7, "character": 70 }
             }),
         )
-        .expect("unknown Osiris variable definition");
-    assert_eq!(unknown_definition, Value::Null);
+        .expect("Osiris query output variable definition");
+    assert_eq!(
+        bonus_definition,
+        json!([{
+            "uri": uri,
+            "range": {
+                "start": { "line": 7, "character": 63 },
+                "end": { "line": 7, "character": 81 }
+            }
+        }])
+    );
 
     client.shutdown().expect("shutdown");
     assert_eq!(client.exit().expect("exit"), Some(0));
