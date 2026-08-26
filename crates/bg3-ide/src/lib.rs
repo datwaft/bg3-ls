@@ -11,13 +11,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bg3_index::{
-    Definition, LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND,
-    OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
-    OsirisEvidenceOrigin, OsirisVariableFact, PackagedOsirisIndex, PackagedOsirisResolution,
-    PackagedStatsCatalog, PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts,
-    ParsedFile, Position, Reference, SchemaCatalog, SourceKind, SymbolTarget,
-    THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile,
-    TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
+    Definition, LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_CONTRACTS,
+    OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND,
+    OsirisCallRole, OsirisContractKind, OsirisParameterDirection, OsirisVariableFact,
+    PackagedOsirisIndex, PackagedOsirisResolution, PackagedStatsCatalog, PackagedThothApiIndex,
+    PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position, Reference, SchemaCatalog,
+    SourceKind, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange,
+    ThothExpressionKind, ThothFile, TooltipCatalog, canonical_kind, osiris_contract,
+    parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -540,6 +541,9 @@ impl WorkspaceSnapshot {
             if let Some(hover) = self.packaged_osiris_callable_hover(name, *arity) {
                 return Some(hover);
             }
+            if let Some(hover) = self.generated_osiris_callable_hover(name, *arity) {
+                return Some(hover);
+            }
             return Some(
                 HoverMarkup::new("Osiris callable", &format!("{name}/{arity}"))
                     .fact("Arity", &arity.to_string())
@@ -637,6 +641,34 @@ impl WorkspaceSnapshot {
         }
         if let Some(preview) = self.tooltip_preview(&definitions, overlays) {
             markdown = markdown.markdown(preview.trim_start());
+        }
+        Some(markdown.finish())
+    }
+
+    /// Renders a callable from the versioned engine contract catalog.
+    fn generated_osiris_callable_hover(&self, name: &str, arity: u16) -> Option<String> {
+        let contract = osiris_contract(OSIRIS_CONTRACTS, name, arity)?;
+        let parameters = contract
+            .parameters
+            .iter()
+            .map(|parameter| {
+                format!(
+                    "{} {} {}",
+                    osiris_parameter_direction(parameter.direction),
+                    parameter.type_name,
+                    parameter.name
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut markdown = HoverMarkup::new(
+            osiris_contract_kind_label(contract.kind),
+            &format!("{name}/{arity}"),
+        )
+        .fact("Signature", &format!("{name}({parameters})"))
+        .fact("Game build", bg3_index::OSIRIS_CATALOG_SOURCE_VERSION);
+        if let Some(description) = bg3_index::osiris_callable_description(name, arity) {
+            markdown = markdown.prose(description);
         }
         Some(markdown.finish())
     }
@@ -1313,9 +1345,7 @@ impl WorkspaceSnapshot {
     fn osiris_variable_hover(&self, variable: &OsirisVariableFact) -> String {
         let mut markdown = HoverMarkup::new("Osiris variable", &variable.name);
         if let Some(evidence) = &variable.evidence {
-            markdown = markdown
-                .fact("Type", &evidence.type_name)
-                .fact("Evidence", osiris_evidence_origin(evidence.origin));
+            markdown = markdown.fact("Type", &evidence.type_name);
         }
         markdown.finish()
     }
@@ -1553,6 +1583,24 @@ fn escape_markdown_text(source: &str) -> String {
     markdown
 }
 
+fn osiris_contract_kind_label(kind: OsirisContractKind) -> &'static str {
+    match kind {
+        OsirisContractKind::Call => "Osiris engine call",
+        OsirisContractKind::Event => "Osiris engine event",
+        OsirisContractKind::Query => "Osiris engine query",
+        OsirisContractKind::Syscall => "Osiris engine syscall",
+        OsirisContractKind::Sysquery => "Osiris engine sysquery",
+    }
+}
+
+fn osiris_parameter_direction(direction: OsirisParameterDirection) -> &'static str {
+    match direction {
+        OsirisParameterDirection::In => "[in]",
+        OsirisParameterDirection::InOut => "[inout]",
+        OsirisParameterDirection::Out => "[out]",
+    }
+}
+
 /// Escapes external text and bounds its contribution to one hover.
 fn bounded_markdown_text(source: &str) -> String {
     let total = source.chars().count();
@@ -1689,13 +1737,6 @@ fn clamp_stats_value(value: &str) -> String {
 /// paths stay readable. Navigation targets keep full paths.
 fn display_path(path: &Path) -> String {
     abbreviate_home(path, std::env::home_dir().as_deref())
-}
-
-fn osiris_evidence_origin(origin: OsirisEvidenceOrigin) -> &'static str {
-    match origin {
-        OsirisEvidenceOrigin::Explicit => "explicit source cast",
-        OsirisEvidenceOrigin::Engine => "generated engine contract",
-    }
 }
 
 /// Returns the identifier-like token under a UTF-8 source position.

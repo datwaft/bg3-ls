@@ -19,7 +19,8 @@ The server provides:
   Osiris variables;
 - references, document symbols, and workspace symbols;
 - schema-aware completion with snippet support;
-- verified signature help for curated Stats functions and declared Thoth helpers;
+- verified signature help for Stats functions, Osiris engine callables, and
+  declared Thoth helpers;
 - conservative Thoth API evidence from configured loose and packaged sources;
 - high-confidence syntax, schema, value, and typed-reference diagnostics;
 - full-document overlays for unsaved files;
@@ -576,6 +577,15 @@ condition. Hover shows an exact type only when a cast or a curated rule-head
 signature proves it. Unknown callable directions, negated conditions, and
 uncertain control flow remain silent; the server does not guess which call
 arguments bind or assign a variable.
+
+Engine Osiris callables use the checked-in, generated contract catalog for
+signatures, parameter directions, and parameter types. Hover and signature
+help therefore work for calls such as `GetActionResourceValuePersonal` and
+`CastedSpell` even when their declarations are packed or unavailable as loose
+files. A small reviewed set of official descriptions is shown for documented
+callables; other catalogued callables still show their verified signature
+without invented prose. Variable hover shows the proven type only; use go to
+definition or references for binding locations.
 
 Procedures and queries declared in installed base-module goals are indexed
 the same way as packaged Thoth helpers. Hover, signature help, and completion

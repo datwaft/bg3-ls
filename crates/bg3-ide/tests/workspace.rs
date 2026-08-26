@@ -996,10 +996,7 @@ fn tracks_osiris_variables_by_rule_and_replaces_them_in_overlays() {
     assert!(!hover.contains("Bound by:"), "{hover}");
     assert!(!hover.contains("Binding:"), "{hover}");
     assert!(hover.contains("Type: `CHARACTER`"), "{hover}");
-    assert!(
-        hover.contains("Evidence: `explicit source cast`"),
-        "{hover}"
-    );
+    assert!(!hover.contains("Evidence:"), "{hover}");
     assert_eq!(
         hover.range,
         Some(bg3_index::TextRange {
