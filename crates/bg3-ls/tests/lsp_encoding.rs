@@ -416,6 +416,22 @@ fn defaults_to_utf16_when_the_client_omits_position_encodings() {
 }
 
 #[test]
+fn advertises_comma_as_a_signature_help_retrigger_character() {
+    let (workspace, mut client, initialize) = initialized_client(Some(&["utf-16"]));
+    assert_eq!(
+        initialize["capabilities"]["signatureHelpProvider"]["triggerCharacters"],
+        json!(["(", ","])
+    );
+    assert_eq!(
+        initialize["capabilities"]["signatureHelpProvider"]["retriggerCharacters"],
+        json!([","])
+    );
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+    drop(workspace);
+}
+
+#[test]
 fn converts_utf16_input_for_definition_after_an_emoji() {
     let (workspace, mut client, _) = initialized_client(Some(&["utf-16"]));
     let definition_text = concat!(
@@ -688,7 +704,7 @@ fn tracks_osiris_head_variables_through_lsp_navigation() {
     );
     assert!(
         callable_value.contains(
-            "Signature: GetActionResourceValuePersonal([in] CHARACTER _Player, [in] STRING _ResourceName, [in] INTEGER _ResourceLevel, [out] REAL _Amount)"
+            "GetActionResourceValuePersonal(\n    [in] CHARACTER _Player,\n    [in] STRING _ResourceName,\n    [in] INTEGER _ResourceLevel,\n    [out] REAL _Amount\n)"
         ),
         "{callable_value}"
     );
@@ -739,4 +755,97 @@ fn tracks_osiris_head_variables_through_lsp_navigation() {
     client.shutdown().expect("shutdown");
     assert_eq!(client.exit().expect("exit"), Some(0));
     drop(path);
+}
+
+#[test]
+fn provides_osiris_signature_help_for_later_arguments() {
+    let (workspace, mut client, _) = initialized_client(Some(&["utf-16"]));
+    let (_path, uri) = osiris_uri(&workspace);
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "UsingSpell(_Caster, \"Target_MainHandAttack\", -, -, _StoryActionID)\n",
+        "AND\n",
+        "GetActionResourceValuePersonal(_Caster, \"BonusActionPoint\", 0, _BonusActionPoints)\n",
+        "THEN\n",
+        "DB_Use(_Caster);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    wait_for_index(&mut client);
+    client
+        .notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "bg3_osiris",
+                    "version": 1,
+                    "text": text
+                }
+            }),
+        )
+        .expect("open Osiris document");
+
+    for (line_number, function, expected_parameters) in [
+        (5, "UsingSpell", &[1_u32, 2, 3, 4][..]),
+        (7, "GetActionResourceValuePersonal", &[1_u32, 2, 3][..]),
+    ] {
+        let line = text.lines().nth(line_number).expect("signature line");
+        let mut comma_count = 0;
+        for (index, character) in line.char_indices() {
+            if character != ',' {
+                continue;
+            }
+            comma_count += 1;
+            let argument_start = line[index + 1..]
+                .char_indices()
+                .find(|(_, character)| !character.is_whitespace())
+                .map(|(offset, _)| index + 1 + offset)
+                .expect("argument after comma");
+            let argument_end = line[argument_start..]
+                .bytes()
+                .position(|byte| byte == b',' || byte == b')')
+                .map_or(line.len(), |offset| argument_start + offset);
+            // Put the cursor inside the argument when it has enough content;
+            // short literals such as `-` and `0` use their end position.
+            let character = (argument_start + 3).min(argument_end);
+            assert!(character > argument_start, "cursor must be inside argument");
+            let signature = client
+                .request_result(
+                    "textDocument/signatureHelp",
+                    json!({
+                        "textDocument": { "uri": uri },
+                        "position": {
+                            "line": line_number,
+                            "character": u32::try_from(character).expect("position fits")
+                        }
+                    }),
+                )
+                .expect("Osiris signature help");
+            assert_eq!(
+                signature["activeParameter"],
+                json!(expected_parameters[comma_count - 1])
+            );
+            assert_eq!(
+                signature["signatures"][0]["label"]
+                    .as_str()
+                    .and_then(|label| label.split_once('('))
+                    .map(|(name, _)| name),
+                Some(function)
+            );
+        }
+        assert_eq!(
+            comma_count,
+            expected_parameters.len(),
+            "{function} should have the expected number of separators"
+        );
+    }
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+    drop(workspace);
 }
