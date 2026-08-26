@@ -6,14 +6,14 @@ use crate::{
     range_contains,
 };
 use bg3_index::{
-    Definition, FUNCTIONS, ModuleRole, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
+    Definition, FUNCTIONS, ModuleRole, OSIRIS_CONTRACTS, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
     OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedOsirisResolution, PackagedThothApiResolution,
     PackagedThothApiSymbol, PackagedThothApiSymbolKind, PackagedThothCatalog, Position,
     SchemaDefinition, SchemaField, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
     ThothAnnotations, ThothFunctionContract, context_member, context_members, context_properties,
     context_property, context_side, enum_value, field_documentation, field_kind, function_spec,
     functor_prefix, functor_prefixes, is_lsx_value_field, is_structural_stats_value,
-    member_enumeration,
+    member_enumeration, osiris_contract,
 };
 /// The semantic category of one completion result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1794,7 +1794,12 @@ impl WorkspaceSnapshot {
             if database {
                 return None;
             }
-            return self.packaged_osiris_signature_help(&context.function, context.argument);
+            if let Some(signature) =
+                self.packaged_osiris_signature_help(&context.function, context.argument)
+            {
+                return Some(signature);
+            }
+            return self.generated_osiris_signature_help(&context.function, context.argument);
         };
         candidates.retain(|(_, definition)| definition.arity == Some(arity));
         let parameters = if database {
@@ -1871,6 +1876,50 @@ impl WorkspaceSnapshot {
             }
         }
         None
+    }
+
+    /// Returns signature help from the versioned engine contract catalog.
+    fn generated_osiris_signature_help(
+        &self,
+        name: &str,
+        argument: usize,
+    ) -> Option<SignatureHelp> {
+        let needed = u16::try_from(argument + 1).ok()?;
+        let arity = OSIRIS_CONTRACTS
+            .iter()
+            .filter(|contract| {
+                contract.name == name
+                    && (contract.parameters.is_empty()
+                        || contract.parameters.len() >= usize::from(needed))
+            })
+            .map(|contract| contract.parameters.len())
+            .min()?;
+        let contract = osiris_contract(OSIRIS_CONTRACTS, name, u16::try_from(arity).ok()?)?;
+        let parameters = contract
+            .parameters
+            .iter()
+            .map(|parameter| {
+                format!(
+                    "{} {} {}",
+                    crate::osiris_parameter_direction(parameter.direction),
+                    parameter.type_name,
+                    parameter.name
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut documentation = format!(
+            "Verified against the generated BG3 engine contract catalog (build `{}`).",
+            bg3_index::OSIRIS_CATALOG_SOURCE_VERSION
+        );
+        if let Some(description) = bg3_index::osiris_callable_description(name, arity as u16) {
+            documentation = format!("{description}\n\n{documentation}");
+        }
+        Some(SignatureHelp {
+            label: format!("{name}({})", parameters.join(", ")),
+            documentation,
+            parameters,
+            active_parameter: argument,
+        })
     }
 
     /// Completes localization handles with their known version suffix.

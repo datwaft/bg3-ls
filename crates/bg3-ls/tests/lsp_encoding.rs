@@ -578,6 +578,7 @@ fn tracks_osiris_head_variables_through_lsp_navigation() {
     assert!(hover_value.contains("Type: CHARACTER"), "{hover_value}");
     assert!(!hover_value.contains("Bound by:"), "{hover_value}");
     assert!(!hover_value.contains("Binding:"), "{hover_value}");
+    assert!(!hover_value.contains("Evidence:"), "{hover_value}");
     assert_eq!(
         hover["range"],
         json!({
@@ -667,6 +668,54 @@ fn tracks_osiris_head_variables_through_lsp_navigation() {
     assert!(bonus_value.contains("Type: REAL"), "{bonus_value}");
     assert!(!bonus_value.contains("Bound by:"), "{bonus_value}");
     assert!(!bonus_value.contains("Binding:"), "{bonus_value}");
+    assert!(!bonus_value.contains("Evidence:"), "{bonus_value}");
+
+    let callable_hover = client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 7, "character": 10 }
+            }),
+        )
+        .expect("Osiris engine callable hover");
+    let callable_value = callable_hover["contents"]["value"]
+        .as_str()
+        .expect("Osiris engine callable hover markdown");
+    assert!(
+        callable_value.contains("Osiris engine query GetActionResourceValuePersonal/4"),
+        "{callable_value}"
+    );
+    assert!(
+        callable_value.contains(
+            "Signature: GetActionResourceValuePersonal([in] CHARACTER _Player, [in] STRING _ResourceName, [in] INTEGER _ResourceLevel, [out] REAL _Amount)"
+        ),
+        "{callable_value}"
+    );
+
+    let query_line = text.lines().nth(7).expect("Osiris query line");
+    let first_argument_end = query_line.find(',').expect("Osiris query comma") + 1;
+    let signature = client
+        .request_result(
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 7, "character": first_argument_end }
+            }),
+        )
+        .expect("Osiris engine signature help");
+    assert_eq!(
+        signature["signatures"][0]["label"],
+        json!(
+            "GetActionResourceValuePersonal([in] CHARACTER _Player, [in] STRING _ResourceName, [in] INTEGER _ResourceLevel, [out] REAL _Amount)"
+        )
+    );
+    assert_eq!(signature["activeParameter"], json!(1));
+    assert!(
+        signature["signatures"][0]["documentation"]["value"]
+            .as_str()
+            .is_some_and(|documentation| documentation.contains("Returns a character's value"))
+    );
     let bonus_definition = client
         .request_result(
             "textDocument/definition",

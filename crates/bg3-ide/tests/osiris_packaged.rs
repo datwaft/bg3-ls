@@ -139,6 +139,95 @@ const CALLER: &str = concat!(
     "ENDEXITSECTION\n"
 );
 
+const GENERATED_ENGINE_CALLER: &str = concat!(
+    "Version 1\n",
+    "SubGoalCombiner SGC_AND\n",
+    "INITSECTION\n",
+    "KBSECTION\n",
+    "IF\n",
+    "CastedSpell(_Caster, \"Spell\", \"SpellType\", \"Fire\", 1)\n",
+    "AND\n",
+    "GetActionResourceValuePersonal(_Caster, \"BonusActionPoint\", 0, _Amount)\n",
+    "THEN\n",
+    "DB_Noop(_Amount);\n",
+    "EXITSECTION\n",
+    "ENDEXITSECTION\n"
+);
+
+#[test]
+fn generated_engine_contracts_provide_callable_hover_and_signature_help() {
+    let (workspace, caller_path) = workspace_with(None);
+    let overlays = osiris_overlay(&workspace, &caller_path, GENERATED_ENGINE_CALLER);
+
+    let hover = workspace
+        .hover(
+            &caller_path,
+            source_position(GENERATED_ENGINE_CALLER, "GetActionResourceValuePersonal"),
+            &overlays,
+        )
+        .expect("generated engine hover");
+    assert!(
+        hover.contains("**Osiris engine query** `GetActionResourceValuePersonal/4`"),
+        "{hover}"
+    );
+    assert!(
+        hover.contains(
+            "Signature: `GetActionResourceValuePersonal([in] CHARACTER _Player, [in] STRING _ResourceName, [in] INTEGER _ResourceLevel, [out] REAL _Amount)`"
+        ),
+        "{hover}"
+    );
+    assert!(
+        hover.contains("Returns a character's value for the named action resource"),
+        "{hover}"
+    );
+
+    let (line, column) = call_position(GENERATED_ENGINE_CALLER, "GetActionResourceValuePersonal");
+    let signature = workspace
+        .signature_help(
+            &caller_path,
+            Position {
+                line,
+                character: column,
+            },
+            &overlays,
+        )
+        .expect("generated engine signature help");
+    assert_eq!(
+        signature.label,
+        "GetActionResourceValuePersonal([in] CHARACTER _Player, [in] STRING _ResourceName, [in] INTEGER _ResourceLevel, [out] REAL _Amount)"
+    );
+    assert_eq!(signature.active_parameter, 1);
+    assert!(
+        signature
+            .documentation
+            .contains("Returns a character's value for the named action resource")
+    );
+}
+
+#[test]
+fn generated_engine_event_contracts_provide_typed_hover() {
+    let (workspace, caller_path) = workspace_with(None);
+    let overlays = osiris_overlay(&workspace, &caller_path, GENERATED_ENGINE_CALLER);
+
+    let hover = workspace
+        .hover(
+            &caller_path,
+            source_position(GENERATED_ENGINE_CALLER, "CastedSpell"),
+            &overlays,
+        )
+        .expect("generated engine event hover");
+    assert!(
+        hover.contains("**Osiris engine event** `CastedSpell/5`"),
+        "{hover}"
+    );
+    assert!(hover.contains("[in] GUIDSTRING _Caster"), "{hover}");
+    assert!(hover.contains("[in] INTEGER _StoryActionID"), "{hover}");
+    assert!(
+        hover.contains("Event raised after a spell is cast"),
+        "{hover}"
+    );
+}
+
 fn installed_catalog() -> Arc<PackagedThothCatalog> {
     Arc::new(
         PackagedThothCatalog::from_sources([osiris_source(

@@ -10,6 +10,7 @@ mod localization;
 mod module;
 mod osiris_api;
 mod osiris_catalog;
+mod osiris_descriptions;
 mod package;
 mod packaged_stats;
 mod parser;
@@ -72,6 +73,7 @@ pub use osiris_catalog::{
     OsirisParameterDirection, OsirisParameterSpec, generate_osiris_catalog, osiris_contract,
     osiris_event_contract, parse_story_header, render_osiris_catalog,
 };
+pub use osiris_descriptions::osiris_callable_description;
 pub use package::{PackageEntry, PackageHeader, PackageReader};
 pub use packaged_stats::{
     PackagedStatsCatalog, PackagedStatsDefinition, PackagedStatsResolution, PackagedStatsSource,
