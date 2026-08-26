@@ -655,11 +655,18 @@ pub fn osiris_module_from_entry(entry: &str) -> Option<&str> {
         return None;
     }
     let file = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
     (!file.is_empty()
+        && file.len() > ".txt".len()
         && entry.ends_with(".txt")
         && file != "."
         && file != ".."
-        && !file.contains('\\'))
+        && !file.contains('\\')
+        && !file.chars().any(char::is_control)
+        && !module.contains('\\')
+        && !module.chars().any(char::is_control))
     .then_some(module)
 }
 
@@ -827,6 +834,23 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn osiris_entries_require_one_direct_goal_file() {
+        assert_eq!(
+            osiris_module_from_entry("Mods/Example/Story/RawFiles/Goals/Main.txt"),
+            Some("Example")
+        );
+        for entry in [
+            "Mods/Example/Story/RawFiles/Goals/nested/Main.txt",
+            "Mods/Example/Story/RawFiles/Goals/Main.txt/extra.txt",
+            "Mods/Example/Story/RawFiles/Goals/Main.txt\\extra.txt",
+            "Mods/Example/Story/RawFiles/Goals/.txt",
+            "Mods/Example/Story/RawFiles/Goals/Main\u{0000}.txt",
+        ] {
+            assert_eq!(osiris_module_from_entry(entry), None, "{entry:?}");
+        }
     }
 
     #[test]

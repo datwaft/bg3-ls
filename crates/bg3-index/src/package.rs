@@ -180,9 +180,14 @@ impl PackageReader {
             .entries
             .iter()
             .filter(|entry| {
-                entry.name.starts_with(&prefix)
-                    && entry.name.ends_with(".txt")
-                    && entry.name.len() > prefix.len() + ".txt".len()
+                let Some(file) = entry.name.strip_prefix(&prefix) else {
+                    return false;
+                };
+                file.ends_with(".txt")
+                    && file.len() > ".txt".len()
+                    && !file.contains('/')
+                    && !file.contains('\\')
+                    && !file.chars().any(char::is_control)
             })
             .collect())
     }
@@ -775,6 +780,52 @@ mod tests {
                 "Mods/Configured/Scripts/thoth/helpers/Second.khn",
                 "Mods/Configured/Scripts/thoth/helpers/First.khn",
             ]
+        );
+    }
+
+    #[test]
+    fn osiris_goal_entries_require_one_direct_txt_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("goals.pak");
+        fs::write(
+            &path,
+            synthetic_package(
+                &[
+                    (
+                        "Mods/Configured/Story/RawFiles/Goals/Valid.txt",
+                        b"valid",
+                        0,
+                    ),
+                    (
+                        "Mods/Configured/Story/RawFiles/Goals/nested/Invalid.txt",
+                        b"nested",
+                        0,
+                    ),
+                    (
+                        "Mods/Configured/Story/RawFiles/Goals/.txt",
+                        b"missing name",
+                        0,
+                    ),
+                    (
+                        "Mods/Configured/Story/RawFiles/Goals/NoExtension",
+                        b"plain",
+                        0,
+                    ),
+                ],
+                0,
+            ),
+        )
+        .unwrap();
+
+        let reader = PackageReader::open(&path).unwrap();
+        assert_eq!(
+            reader
+                .osiris_goal_entries("Configured")
+                .unwrap()
+                .iter()
+                .map(|entry| entry.name())
+                .collect::<Vec<_>>(),
+            vec!["Mods/Configured/Story/RawFiles/Goals/Valid.txt"]
         );
     }
 
