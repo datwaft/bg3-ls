@@ -2037,7 +2037,7 @@ fn osiris_engine_variable_types(
     let Some(signature) = osiris_signature(name, arity) else {
         return Ok(HashMap::new());
     };
-    let mut derived = HashMap::new();
+    let mut candidates = HashMap::<String, Option<OsirisTypeEvidence>>::new();
     let mut cursor = arguments.walk();
     for (index, argument) in arguments.named_children(&mut cursor).enumerate() {
         let Some(alias) = signature.get(index) else {
@@ -2049,17 +2049,29 @@ fn osiris_engine_variable_types(
         if let Some(value) = field(argument, "value")
             && value.kind() == "local_variable"
         {
-            derived.insert(
-                value.utf8_text(text.as_bytes())?.to_owned(),
-                OsirisTypeEvidence {
-                    type_name: (*alias).to_owned(),
-                    source_range: node_range(value),
-                    origin: OsirisEvidenceOrigin::Engine,
-                },
-            );
+            let name = value.utf8_text(text.as_bytes())?.to_owned();
+            let evidence = OsirisTypeEvidence {
+                type_name: (*alias).to_owned(),
+                source_range: node_range(value),
+                origin: OsirisEvidenceOrigin::Engine,
+            };
+            candidates
+                .entry(name)
+                .and_modify(|current| {
+                    if current
+                        .as_ref()
+                        .is_some_and(|current| current.type_name != evidence.type_name)
+                    {
+                        *current = None;
+                    }
+                })
+                .or_insert(Some(evidence));
         }
     }
-    Ok(derived)
+    Ok(candidates
+        .into_iter()
+        .filter_map(|(name, evidence)| evidence.map(|evidence| (name, evidence)))
+        .collect())
 }
 
 /// Parses legacy plain-text Stats with the generated Tree-sitter grammar.
