@@ -172,7 +172,7 @@ fn generated_engine_contracts_provide_callable_hover_and_signature_help() {
     );
     assert!(
         hover.contains(
-            "Signature: `GetActionResourceValuePersonal([in] CHARACTER _Player, [in] STRING _ResourceName, [in] INTEGER _ResourceLevel, [out] REAL _Amount)`"
+            "```osiris\nGetActionResourceValuePersonal(\n    [in] CHARACTER _Player,\n    [in] STRING _ResourceName,\n    [in] INTEGER _ResourceLevel,\n    [out] REAL _Amount\n)\n```"
         ),
         "{hover}"
     );
@@ -202,6 +202,36 @@ fn generated_engine_contracts_provide_callable_hover_and_signature_help() {
             .documentation
             .contains("Returns a character's value for the named action resource")
     );
+}
+
+const GENERATED_SHORT_CALLER: &str = concat!(
+    "Version 1\n",
+    "SubGoalCombiner SGC_AND\n",
+    "INITSECTION\n",
+    "KBSECTION\n",
+    "IF\n",
+    "Exists(_Object, _Bool)\n",
+    "THEN\n",
+    "DB_Noop(_Bool);\n",
+    "EXITSECTION\n",
+    "ENDEXITSECTION\n"
+);
+
+#[test]
+fn generated_engine_callable_hover_uses_compact_code_for_short_signatures() {
+    let (workspace, caller_path) = workspace_with(None);
+    let overlays = osiris_overlay(&workspace, &caller_path, GENERATED_SHORT_CALLER);
+
+    let hover = workspace
+        .hover(
+            &caller_path,
+            source_position(GENERATED_SHORT_CALLER, "Exists"),
+            &overlays,
+        )
+        .expect("generated short engine hover");
+    assert!(hover.contains("```osiris\nExists([in] GUIDSTRING _Object, [out] INTEGER _Bool)\n```"));
+    assert!(!hover.contains("Signature:"), "{hover}");
+    assert!(hover.contains("Catalog: BG3 build"), "{hover}");
 }
 
 #[test]

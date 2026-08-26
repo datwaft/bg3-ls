@@ -385,7 +385,11 @@ impl LanguageServer for Backend {
                 }),
                 signature_help_provider: Some(SignatureHelpOptions {
                     trigger_characters: Some(["(", ","].into_iter().map(str::to_owned).collect()),
-                    retrigger_characters: None,
+                    // A comma advances to the next Osiris argument while an
+                    // existing signature-help popup is open. Advertise it
+                    // separately so clients retrigger instead of only
+                    // invoking signature help for the opening parenthesis.
+                    retrigger_characters: Some([","].into_iter().map(str::to_owned).collect()),
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 }),
                 execute_command_provider: Some(ExecuteCommandOptions {

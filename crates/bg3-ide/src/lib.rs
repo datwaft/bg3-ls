@@ -648,28 +648,18 @@ impl WorkspaceSnapshot {
     /// Renders a callable from the versioned engine contract catalog.
     fn generated_osiris_callable_hover(&self, name: &str, arity: u16) -> Option<String> {
         let contract = osiris_contract(OSIRIS_CONTRACTS, name, arity)?;
-        let parameters = contract
-            .parameters
-            .iter()
-            .map(|parameter| {
-                format!(
-                    "{} {} {}",
-                    osiris_parameter_direction(parameter.direction),
-                    parameter.type_name,
-                    parameter.name
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
         let mut markdown = HoverMarkup::new(
             osiris_contract_kind_label(contract.kind),
             &format!("{name}/{arity}"),
         )
-        .fact("Signature", &format!("{name}({parameters})"))
-        .fact("Game build", bg3_index::OSIRIS_CATALOG_SOURCE_VERSION);
+        .markdown(&osiris_contract_signature_markdown(name, contract));
         if let Some(description) = bg3_index::osiris_callable_description(name, arity) {
             markdown = markdown.prose(description);
         }
+        markdown = markdown.markdown(&format!(
+            "Catalog: BG3 build {}",
+            bg3_index::OSIRIS_CATALOG_SOURCE_VERSION
+        ));
         Some(markdown.finish())
     }
 
@@ -1591,6 +1581,41 @@ fn osiris_contract_kind_label(kind: OsirisContractKind) -> &'static str {
         OsirisContractKind::Syscall => "Osiris engine syscall",
         OsirisContractKind::Sysquery => "Osiris engine sysquery",
     }
+}
+
+fn osiris_contract_signature_markdown(
+    name: &str,
+    contract: &bg3_index::OsirisContractSpec,
+) -> String {
+    let parameters = contract
+        .parameters
+        .iter()
+        .map(|parameter| {
+            format!(
+                "{} {} {}",
+                osiris_parameter_direction(parameter.direction),
+                parameter.type_name,
+                parameter.name
+            )
+        })
+        .collect::<Vec<_>>();
+    let compact = format!("{name}({})", parameters.join(", "));
+    let signature = if compact.chars().count() <= 80 {
+        compact
+    } else {
+        let mut expanded = format!("{name}(\n");
+        for (index, parameter) in parameters.iter().enumerate() {
+            let comma = if index + 1 == parameters.len() {
+                ""
+            } else {
+                ","
+            };
+            expanded.push_str(&format!("    {parameter}{comma}\n"));
+        }
+        expanded.push(')');
+        expanded
+    };
+    format!("```osiris\n{signature}\n```")
 }
 
 fn osiris_parameter_direction(direction: OsirisParameterDirection) -> &'static str {
