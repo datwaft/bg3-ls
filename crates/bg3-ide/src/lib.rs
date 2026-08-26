@@ -13,10 +13,11 @@ use std::sync::Arc;
 use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND,
     OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
-    PackagedOsirisIndex, PackagedOsirisResolution, PackagedStatsCatalog, PackagedThothApiIndex,
-    PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position, Reference, SchemaCatalog,
-    SourceKind, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange,
-    ThothExpressionKind, ThothFile, TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
+    OsirisEvidenceOrigin, OsirisVariableFact, PackagedOsirisIndex, PackagedOsirisResolution,
+    PackagedStatsCatalog, PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts,
+    ParsedFile, Position, Reference, SchemaCatalog, SourceKind, SymbolTarget,
+    THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile,
+    TooltipCatalog, canonical_kind, parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -454,6 +455,16 @@ impl WorkspaceSnapshot {
         position: Position,
         overlays: &OverlaySet,
     ) -> Vec<SourceLocation> {
+        if let Some(variable) = self.osiris_variable_at(path, position, overlays) {
+            return variable
+                .binding_range
+                .into_iter()
+                .map(|range| SourceLocation {
+                    path: path.to_owned(),
+                    range,
+                })
+                .collect();
+        }
         if let Some(locations) = self.thoth_member_definition_locations(path, position, overlays) {
             return locations;
         }
@@ -501,6 +512,9 @@ impl WorkspaceSnapshot {
         position: Position,
         overlays: &OverlaySet,
     ) -> Option<String> {
+        if let Some(variable) = self.osiris_variable_at(path, position, overlays) {
+            return Some(self.osiris_variable_hover(path, variable));
+        }
         let target = self.target_at(path, position, overlays)?;
         if let SymbolTarget::Named {
             kind: Some(kind),
@@ -689,6 +703,14 @@ impl WorkspaceSnapshot {
                     .variables
                     .iter()
                     .map(|variable| variable.target_range),
+            );
+        }
+        if let Some(osiris) = &file.osiris {
+            candidates.extend(
+                osiris
+                    .variables
+                    .iter()
+                    .flat_map(|variable| variable.occurrences.iter().copied()),
             );
         }
         let semantic = candidates
@@ -1127,6 +1149,17 @@ impl WorkspaceSnapshot {
         include_declaration: bool,
         overlays: &OverlaySet,
     ) -> Vec<SourceLocation> {
+        if let Some(variable) = self.osiris_variable_at(path, position, overlays) {
+            return variable
+                .occurrences
+                .iter()
+                .filter(|range| include_declaration || Some(**range) != variable.binding_range)
+                .map(|range| SourceLocation {
+                    path: path.to_owned(),
+                    range: *range,
+                })
+                .collect();
+        }
         let Some(target) = self.target_at(path, position, overlays) else {
             return Vec::new();
         };
@@ -1256,6 +1289,49 @@ impl WorkspaceSnapshot {
             .iter()
             .find(|definition| range_contains(definition.selection_range, position))
             .map(definition_target)
+    }
+
+    /// Returns the rule-local Osiris variable fact under one source position.
+    fn osiris_variable_at<'a>(
+        &'a self,
+        path: &Path,
+        position: Position,
+        overlays: &'a OverlaySet,
+    ) -> Option<&'a OsirisVariableFact> {
+        let (_, file) = self.file(path, overlays)?;
+        let osiris = file.osiris.as_ref()?;
+        osiris.variables.iter().find(|variable| {
+            variable
+                .occurrences
+                .iter()
+                .copied()
+                .any(|range| range_contains(range, position))
+        })
+    }
+
+    /// Renders one rule-local Osiris variable without claiming a declaration.
+    fn osiris_variable_hover(&self, path: &Path, variable: &OsirisVariableFact) -> String {
+        let mut markdown = HoverMarkup::new("Osiris variable", &variable.name);
+        if let Some(binding) = variable.binding_range {
+            let location = format!(
+                "{} (line {}, column {})",
+                display_path(path),
+                binding.start.line.saturating_add(1),
+                binding.start.character.saturating_add(1),
+            );
+            markdown = markdown.fact("Bound by", &location);
+        } else {
+            markdown = markdown.fact(
+                "Binding",
+                "unknown; this rule has no syntax-proven value origin",
+            );
+        }
+        if let Some(evidence) = &variable.evidence {
+            markdown = markdown
+                .fact("Type", &evidence.type_name)
+                .fact("Evidence", osiris_evidence_origin(evidence.origin));
+        }
+        markdown.finish()
     }
 
     /// Returns schema field documentation when the position is on a field name.
@@ -1627,6 +1703,13 @@ fn clamp_stats_value(value: &str) -> String {
 /// paths stay readable. Navigation targets keep full paths.
 fn display_path(path: &Path) -> String {
     abbreviate_home(path, std::env::home_dir().as_deref())
+}
+
+fn osiris_evidence_origin(origin: OsirisEvidenceOrigin) -> &'static str {
+    match origin {
+        OsirisEvidenceOrigin::Explicit => "explicit source cast",
+        OsirisEvidenceOrigin::Engine => "curated engine event signature",
+    }
 }
 
 /// Returns the identifier-like token under a UTF-8 source position.

@@ -1443,6 +1443,81 @@ fn leaves_repeated_engine_variables_unknown_when_aliases_conflict() {
     assert_eq!(evidence.origin, OsirisEvidenceOrigin::Engine);
 }
 
+#[test]
+fn tracks_rule_local_osiris_variable_occurrences_and_proven_bindings() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "UnknownEvent((CHARACTER)_Caster)\n",
+        "AND\n",
+        "DB_Characters(_FromDb)\n",
+        "AND\n",
+        "UnknownQuery(_Unknown)\n",
+        "AND\n",
+        "_Receiver.DB_Method(_FromDb)\n",
+        "THEN\n",
+        "DB_Result(_Caster, _FromDb, _Unknown);\n",
+        "(CHARACTER)_Caster.ApplyExample(_FromDb);\n",
+        "IF\n",
+        "AnotherEvent(_Caster)\n",
+        "THEN\n",
+        "DB_Other(_Caster);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Variables.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty());
+    let variables = &parsed.osiris.as_ref().unwrap().variables;
+
+    let caster: Vec<_> = variables
+        .iter()
+        .filter(|fact| fact.name == "_Caster")
+        .collect();
+    assert_eq!(
+        caster.len(),
+        2,
+        "same names in separate rules must stay separate"
+    );
+    assert_ne!(caster[0].rule_range, caster[1].rule_range);
+    assert_eq!(caster[0].occurrences.len(), 3);
+    assert_eq!(caster[0].binding_range, Some(caster[0].occurrences[0]));
+    assert_eq!(caster[0].evidence.as_ref().unwrap().type_name, "CHARACTER");
+    assert_eq!(caster[1].occurrences.len(), 2);
+    assert_eq!(caster[1].binding_range, Some(caster[1].occurrences[0]));
+
+    let from_db = variables
+        .iter()
+        .find(|fact| fact.name == "_FromDb")
+        .unwrap();
+    assert_eq!(from_db.occurrences.len(), 4);
+    assert_eq!(from_db.binding_range, Some(from_db.occurrences[0]));
+
+    let unknown = variables
+        .iter()
+        .find(|fact| fact.name == "_Unknown")
+        .unwrap();
+    assert_eq!(unknown.occurrences.len(), 2);
+    assert_eq!(unknown.binding_range, None);
+
+    let receiver = variables
+        .iter()
+        .find(|fact| fact.name == "_Receiver")
+        .unwrap();
+    assert_eq!(receiver.binding_range, None);
+}
+
 fn osiris_occurrence<'a>(
     occurrences: &'a [bg3_index::OsirisDatabaseOccurrence],
     name: &str,
