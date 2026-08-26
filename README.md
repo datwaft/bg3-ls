@@ -119,6 +119,12 @@ the generated artifact. The normal language server uses only the checked-in
 catalog; it does not require an installed game or a mod-local
 `story_header.div`. Do not commit installed game files or extracted game data.
 
+Version 0.27.3 fixes a false `osiris-database-alias-mismatch` diagnostic when a
+database fact is read to match an existing row. Database aliases are now
+derived from writes only; relational reads use the established database schema
+without requiring an explicit cast. Existing configuration remains compatible,
+and no migration is required.
+
 Version 0.27.2 fixes Osiris signature context when typed casts use grouping
 parentheses, and uses the released `bg3_osiris` grammar contract for generated
 hover markup. The catalog provenance label is rendered as a heading. Existing
