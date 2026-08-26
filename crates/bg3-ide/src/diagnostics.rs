@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bg3_index::{
-    Definition, OsirisFile, SchemaDefinition, SchemaField, SourceKind, SymbolTarget, TextRange,
-    ThothBinaryOperator, ThothExpressionKind, ThothUnaryOperator, TypeExpression,
-    is_schema_discriminator,
+    Definition, OsirisCallRole, OsirisFile, SchemaDefinition, SchemaField, SourceKind,
+    SymbolTarget, TextRange, ThothBinaryOperator, ThothExpressionKind, ThothUnaryOperator,
+    TypeExpression, is_schema_discriminator,
 };
 use uuid::Uuid;
 
@@ -176,9 +176,12 @@ struct OsirisColumnAliases {
 
 /// Diagnoses user database columns whose occurrences disagree on one alias.
 ///
-/// Establishment aggregates every visible loose goal across module layers and
-/// overlays, mirroring `osiris_database_hover`. Only the diagnosed document's
-/// arguments are reported, because protocol diagnostics are per document.
+/// Establishment aggregates every visible database write across module layers
+/// and overlays, mirroring `osiris_database_hover`. Only the diagnosed
+/// document's arguments are reported, because protocol diagnostics are per
+/// document. Positive database conditions are relational reads: an unbound
+/// variable receives a value from the matching row, and a bound variable only
+/// filters that row. Neither case supplies a stored alias to the database.
 /// Unknown evidence never conflicts, so unavailable engine signatures stay
 /// silent.
 fn add_osiris_database_diagnostics(
@@ -231,11 +234,14 @@ fn add_osiris_database_diagnostics(
     }
 }
 
-/// Folds one goal's database occurrences into per-column alias state.
+/// Folds one goal's database writes into per-column alias state.
 ///
-/// The first observed alias establishes the column; later distinct aliases
-/// become conflicts. Both reads and writes participate because the compiler
-/// checks every use against the established column type.
+/// The first observed write establishes the column; later distinct writes
+/// become conflicts. Database reads are intentionally excluded: a positive
+/// condition can bind an unbound variable from an existing row, and a bound
+/// variable only matches an existing value. Treating either as a stored alias
+/// would confuse relational matching with a database write and can also leak
+/// a later engine input's expected type into the read.
 fn collect_osiris_alias_evidence(
     osiris: Option<&OsirisFile>,
     path: &Path,
@@ -245,6 +251,9 @@ fn collect_osiris_alias_evidence(
         return;
     };
     for occurrence in &osiris.occurrences {
+        if occurrence.role != OsirisCallRole::Write {
+            continue;
+        }
         let columns = databases
             .entry((occurrence.name.clone(), occurrence.arity))
             .or_insert_with(|| {
