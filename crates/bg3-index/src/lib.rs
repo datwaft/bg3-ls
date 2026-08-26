@@ -43,8 +43,8 @@ pub use discovery::{
 pub use domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
-    OsirisEvidenceOrigin, OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference,
-    SourceFile, SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    OsirisEvidenceOrigin, OsirisFile, OsirisTypeEvidence, OsirisVariableFact, ParsedFile, Position,
+    Reference, SourceFile, SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
     ThothAssignment, ThothBinaryOperator, ThothCall, ThothControlFlowFact, ThothDeclaration,
     ThothDeclarationOwner, ThothExpression, ThothExpressionFact, ThothExpressionKind, ThothFile,
     ThothIfBranch, ThothIfBranchKind, ThothLexicalScope, ThothLiteralKind, ThothMemberAccess,

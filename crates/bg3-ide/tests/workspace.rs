@@ -126,6 +126,18 @@ fn source_position(text: &str, needle: &str) -> Position {
         .unwrap()
 }
 
+fn source_position_nth(text: &str, needle: &str, occurrence: usize) -> Position {
+    text.lines()
+        .enumerate()
+        .filter_map(|(line, source)| source.find(needle).map(|character| (line, character)))
+        .nth(occurrence)
+        .map(|(line, character)| Position {
+            line: u32::try_from(line).unwrap(),
+            character: u32::try_from(character).unwrap(),
+        })
+        .unwrap()
+}
+
 #[test]
 fn packaged_thoth_catalogs_remain_immutable_across_snapshot_replacement() {
     let schema = Arc::new(SchemaCatalog::default());
@@ -943,6 +955,136 @@ fn thoth_overlays_replace_and_restore_disk_declarations() {
         ["Item and Spell Bug Fixes", "Shared"]
     );
     assert_eq!(workspace.resolve(&target, &OverlaySet::default()).len(), 3);
+}
+
+#[test]
+fn tracks_osiris_variables_by_rule_and_replaces_them_in_overlays() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "UsingSpell((CHARACTER)_Caster, \"Spell\", \"Context\", \"Arg\", 1)\n",
+        "AND\n",
+        "GetActionResourceValuePersonal(_Caster, \"BonusActionPoint\", 0, _BonusActionPoints)\n",
+        "THEN\n",
+        "DB_Tracked(_Caster, _BonusActionPoints);\n",
+        "IF\n",
+        "UnknownEvent(1)\n",
+        "AND\n",
+        "_Caster >= 1\n",
+        "THEN\n",
+        "DB_Isolated(_Caster);\n",
+        "IF\n",
+        "UnknownEvent(1)\n",
+        "AND\n",
+        "_Unknown >= 1\n",
+        "THEN\n",
+        "DB_Unknown(_Unknown);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, text);
+
+    let bound_use = source_position_nth(text, "_Caster", 1);
+    let binding = source_position_nth(text, "_Caster", 0);
+    let hover = workspace.hover(&path, bound_use, &overlays).unwrap();
+    assert!(hover.contains("**Osiris variable** `_Caster`"), "{hover}");
+    assert!(hover.contains("Bound by:"), "{hover}");
+    assert!(hover.contains("Type: `CHARACTER`"), "{hover}");
+    assert!(
+        hover.contains("Evidence: `explicit source cast`"),
+        "{hover}"
+    );
+    assert_eq!(
+        hover.range,
+        Some(bg3_index::TextRange {
+            start: bound_use,
+            end: Position {
+                line: bound_use.line,
+                character: bound_use.character + 7,
+            },
+        })
+    );
+
+    assert_eq!(
+        workspace.definition_locations_at(&path, bound_use, &overlays),
+        vec![bg3_ide::SourceLocation {
+            path: path.clone(),
+            range: bg3_index::TextRange {
+                start: binding,
+                end: Position {
+                    line: binding.line,
+                    character: binding.character + 7,
+                },
+            },
+        }]
+    );
+    let references = workspace.references_at(&path, bound_use, false, &overlays);
+    assert!(
+        !references
+            .iter()
+            .any(|location| location.range.start == binding)
+    );
+    let references_with_binding = workspace.references_at(&path, bound_use, true, &overlays);
+    assert!(
+        references_with_binding
+            .iter()
+            .any(|location| location.range.start == binding)
+    );
+
+    let isolated_use = source_position_nth(text, "_Caster", 3);
+    let isolated_references = workspace.references_at(&path, isolated_use, false, &overlays);
+    assert!(!isolated_references.is_empty());
+    assert!(
+        isolated_references
+            .iter()
+            .all(|location| location.range.start.line >= isolated_use.line)
+    );
+    assert!(
+        workspace
+            .definition_locations_at(&path, isolated_use, &overlays)
+            .is_empty()
+    );
+    let unknown = source_position_nth(text, "_Unknown", 0);
+    let unknown_hover = workspace.hover(&path, unknown, &overlays).unwrap();
+    assert!(
+        unknown_hover.contains("Binding: `unknown; this rule has no syntax-proven value origin`")
+    );
+    assert!(
+        workspace
+            .definition_locations_at(&path, unknown, &overlays)
+            .is_empty()
+    );
+
+    let overlay_text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "UsingSpell((CHARACTER)_OverlayCaster, \"Spell\", \"Context\", \"Arg\", 1)\n",
+        "THEN\n",
+        "DB_Overlay(_OverlayCaster);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let overlay_set = overlay(&workspace, &path, overlay_text);
+    let overlay_use = source_position(overlay_text, "_OverlayCaster");
+    let overlay_hover = workspace.hover(&path, overlay_use, &overlay_set).unwrap();
+    assert!(
+        overlay_hover.contains("`_OverlayCaster`"),
+        "{overlay_hover}"
+    );
+    assert!(
+        workspace
+            .definition_locations_at(&path, overlay_use, &overlay_set)
+            .iter()
+            .all(|location| location.range.start.line == overlay_use.line)
+    );
 }
 
 #[test]

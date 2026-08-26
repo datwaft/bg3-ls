@@ -17,8 +17,8 @@ use crate::catalog::{field_kind, function_spec, is_lsx_value_field, osiris_signa
 use crate::domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseOccurrence,
-    OsirisEvidenceOrigin, OsirisFile, OsirisTypeEvidence, ParsedFile, Position, Reference,
-    SourceFile, SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    OsirisEvidenceOrigin, OsirisFile, OsirisTypeEvidence, OsirisVariableFact, ParsedFile, Position,
+    Reference, SourceFile, SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
     ThothAssignment, ThothBinaryOperator, ThothCall, ThothControlFlowFact, ThothDeclaration,
     ThothDeclarationOwner, ThothExpression, ThothExpressionFact, ThothExpressionKind, ThothFile,
     ThothIfBranch, ThothIfBranchKind, ThothLexicalScope, ThothLiteralKind, ThothMemberAccess,
@@ -1620,6 +1620,7 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
     }];
     let mut references = Vec::new();
     let mut occurrences = Vec::new();
+    let mut variables = Vec::new();
     let mut cursor = root.walk();
     for node in root.named_children(&mut cursor) {
         match node.kind() {
@@ -1651,6 +1652,7 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
                             &mut definitions,
                             &mut references,
                             &mut occurrences,
+                            &mut variables,
                         )?;
                     }
                 }
@@ -1676,7 +1678,11 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         references,
         observed_functions: Vec::new(),
         issues,
-        osiris: Some(OsirisFile { goal, occurrences }),
+        osiris: Some(OsirisFile {
+            goal,
+            occurrences,
+            variables,
+        }),
         thoth: None,
     })
 }
@@ -1689,6 +1695,7 @@ fn parse_osiris_rule(
     definitions: &mut Vec<Definition>,
     references: &mut Vec<Reference>,
     occurrences: &mut Vec<OsirisDatabaseOccurrence>,
+    variables: &mut Vec<OsirisVariableFact>,
 ) -> Result<(), Error> {
     let mut variable_types = osiris_rule_variable_types(rule, text)?;
     let Some(head) = field(rule, "head") else {
@@ -1746,6 +1753,8 @@ fn parse_osiris_rule(
         }
     }
 
+    variables.extend(collect_osiris_variable_facts(rule, text, &variable_types)?);
+
     let mut cursor = rule.walk();
     for child in rule.named_children(&mut cursor) {
         match child.kind() {
@@ -1777,6 +1786,83 @@ fn parse_osiris_rule(
         }
     }
     Ok(())
+}
+
+/// Groups source-ordered local variables by name within one rule.
+///
+/// Osiris does not declare variables separately. A head variable is an
+/// incoming trigger or subroutine parameter, and a variable first seen in a
+/// positive DB condition is assigned by that database match. Other first
+/// uses are retained as occurrences but do not receive a proven binding.
+fn collect_osiris_variable_facts(
+    rule: Node<'_>,
+    text: &str,
+    variable_types: &HashMap<String, OsirisTypeEvidence>,
+) -> Result<Vec<OsirisVariableFact>, Error> {
+    let head = field(rule, "head");
+    let mut database_condition_arguments = Vec::new();
+    let mut cursor = rule.walk();
+    for child in rule.named_children(&mut cursor) {
+        if child.kind() != "condition" || field(child, "negation").is_some() {
+            continue;
+        }
+        let Some(call) = direct_child(child, "call_expression") else {
+            continue;
+        };
+        let Some(name) = field(call, "name") else {
+            continue;
+        };
+        if name
+            .utf8_text(text.as_bytes())
+            .is_ok_and(|name| name.starts_with("DB_"))
+            && let Some(arguments) = field(call, "arguments")
+        {
+            database_condition_arguments.push(arguments);
+        }
+    }
+
+    let mut variables = Vec::new();
+    let mut pending = vec![rule];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "local_variable" {
+            variables.push(node);
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    variables.sort_by_key(|node| node.start_byte());
+
+    let mut facts = Vec::new();
+    for variable in variables {
+        let name = variable.utf8_text(text.as_bytes())?.to_owned();
+        let range = node_range(variable);
+        let binding_candidate = head.is_some_and(|head| contains_node(head, variable))
+            || database_condition_arguments
+                .iter()
+                .any(|arguments| contains_node(*arguments, variable));
+        if let Some(fact) = facts
+            .iter_mut()
+            .find(|fact: &&mut OsirisVariableFact| fact.name == name)
+        {
+            fact.occurrences.push(range);
+            if binding_candidate && fact.binding_range.is_none() {
+                fact.binding_range = Some(range);
+            }
+        } else {
+            facts.push(OsirisVariableFact {
+                rule_range: node_range(rule),
+                name: name.clone(),
+                occurrences: vec![range],
+                binding_range: binding_candidate.then_some(range),
+                evidence: variable_types.get(&name).cloned(),
+            });
+        }
+    }
+    Ok(facts)
+}
+
+fn contains_node(container: Node<'_>, node: Node<'_>) -> bool {
+    container.start_byte() <= node.start_byte() && node.end_byte() <= container.end_byte()
 }
 
 /// Adds one call reference and retains structured evidence for user databases.

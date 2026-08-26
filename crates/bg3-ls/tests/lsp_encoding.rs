@@ -7,6 +7,7 @@
 
 mod support;
 
+use std::fs;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -85,6 +86,18 @@ fn document_uri(workspace: &TestWorkspace) -> String {
     )
     .expect("document URI")
     .to_string()
+}
+
+fn osiris_uri(workspace: &TestWorkspace) -> (std::path::PathBuf, String) {
+    let path = workspace
+        .root()
+        .join("Mods/MyMod/Story/RawFiles/Goals/Tracking.txt");
+    fs::create_dir_all(path.parent().expect("Osiris parent")).expect("create Osiris parent");
+    fs::write(&path, "Version 1\n").expect("create Osiris document");
+    let uri = Url::from_file_path(path.canonicalize().expect("canonical Osiris document"))
+        .expect("Osiris URI")
+        .to_string();
+    (path, uri)
 }
 
 fn utf16_column(line: &str, needle: &str) -> u32 {
@@ -513,4 +526,159 @@ fn converts_utf8_diagnostic_ranges_to_utf16_after_an_emoji() {
     client.shutdown().expect("shutdown");
     assert_eq!(client.exit().expect("exit"), Some(0));
     drop(workspace);
+}
+
+#[test]
+fn tracks_osiris_head_variables_through_lsp_navigation() {
+    let (workspace, mut client, _) = initialized_client(Some(&["utf-16"]));
+    let (path, uri) = osiris_uri(&workspace);
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "Died(_Caster)\n",
+        "AND\n",
+        "GetActionResourceValuePersonal(_Caster, \"BonusActionPoint\", 0, _BonusActionPoints)\n",
+        "THEN\n",
+        "DB_Use(_Caster);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    wait_for_index(&mut client);
+    client
+        .notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "bg3_osiris",
+                    "version": 1,
+                    "text": text
+                }
+            }),
+        )
+        .expect("open Osiris document");
+
+    let hover = client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 7, "character": 33 }
+            }),
+        )
+        .expect("Osiris variable hover");
+    let hover_value = hover["contents"]["value"].as_str().expect("hover markdown");
+    assert!(
+        hover_value.contains("Osiris variable _Caster"),
+        "{hover_value}"
+    );
+    assert!(hover_value.contains("Type: CHARACTER"), "{hover_value}");
+    assert!(hover_value.contains("Bound by:"), "{hover_value}");
+    assert_eq!(
+        hover["range"],
+        json!({
+            "start": { "line": 7, "character": 31 },
+            "end": { "line": 7, "character": 38 }
+        })
+    );
+
+    let definition = client
+        .request_result(
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 7, "character": 33 }
+            }),
+        )
+        .expect("Osiris variable definition");
+    assert_eq!(
+        definition,
+        json!([{
+            "uri": uri,
+            "range": {
+                "start": { "line": 5, "character": 5 },
+                "end": { "line": 5, "character": 12 }
+            }
+        }])
+    );
+
+    let references = client
+        .request_result(
+            "textDocument/references",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 7, "character": 33 },
+                "context": { "includeDeclaration": true }
+            }),
+        )
+        .expect("Osiris variable references");
+    assert_eq!(references.as_array().map(Vec::len), Some(3));
+    for (line, start, end) in [(5, 5, 12), (7, 31, 38), (9, 7, 14)] {
+        assert!(
+            references
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| {
+                    item["uri"] == uri
+                        && item["range"]
+                            == json!({
+                                "start": { "line": line, "character": start },
+                                "end": { "line": line, "character": end }
+                            })
+                })),
+            "missing Osiris reference at line {line}: {references}"
+        );
+    }
+
+    let references_without_declaration = client
+        .request_result(
+            "textDocument/references",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 7, "character": 33 },
+                "context": { "includeDeclaration": false }
+            }),
+        )
+        .expect("Osiris references without declaration");
+    assert_eq!(
+        references_without_declaration.as_array().map(Vec::len),
+        Some(2)
+    );
+
+    let unknown_hover = client
+        .request_result(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 7, "character": 70 }
+            }),
+        )
+        .expect("unknown Osiris variable hover");
+    let unknown_value = unknown_hover["contents"]["value"]
+        .as_str()
+        .expect("unknown hover markdown");
+    assert!(
+        unknown_value.contains("Osiris variable _BonusActionPoints"),
+        "{unknown_value}"
+    );
+    assert!(
+        unknown_value.contains("Binding: unknown"),
+        "{unknown_value}"
+    );
+    let unknown_definition = client
+        .request_result(
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 7, "character": 70 }
+            }),
+        )
+        .expect("unknown Osiris variable definition");
+    assert_eq!(unknown_definition, Value::Null);
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+    drop(path);
 }

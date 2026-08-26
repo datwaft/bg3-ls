@@ -129,11 +129,27 @@ pub struct OsirisDatabaseOccurrence {
     pub arguments: Vec<OsirisArgument>,
 }
 
+/// One rule-local Osiris variable grouped by name.
+///
+/// The rule range keeps equal variable names in different rules separate.
+/// `binding_range` is populated only when syntax and the known Osiris rule
+/// shape prove that one occurrence introduces the value.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OsirisVariableFact {
+    pub rule_range: TextRange,
+    pub name: String,
+    pub occurrences: Vec<TextRange>,
+    pub binding_range: Option<TextRange>,
+    pub evidence: Option<OsirisTypeEvidence>,
+}
+
 /// Osiris-specific facts retained with one cacheable goal record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct OsirisFile {
     pub goal: String,
     pub occurrences: Vec<OsirisDatabaseOccurrence>,
+    #[serde(default)]
+    pub variables: Vec<OsirisVariableFact>,
 }
 
 /// Cacheable semantic facts extracted from one Thoth source file.

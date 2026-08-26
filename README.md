@@ -15,7 +15,8 @@ The server provides:
 - ordered Go to Definition results for complete override chains;
 - hover information for declarations, schema fields, Stats property names,
   enum values, functions, built-in Stats context properties, functor execution
-  prefixes, resources, localization, and static game-text previews;
+  prefixes, resources, localization, static game-text previews, and rule-local
+  Osiris variables;
 - references, document symbols, and workspace symbols;
 - schema-aware completion with snippet support;
 - verified signature help for curated Stats functions and declared Thoth helpers;
@@ -532,6 +533,13 @@ stay silent. The server never checks engine call arguments, so a specific
 `CHARACTER` value remains valid for an engine parameter that accepts generic
 `GUIDSTRING`.
 
+Rule-local Osiris variables provide definition, reference, and hover navigation
+when their bindings are proven by a rule head or a positive user-database
+condition. Hover shows an exact type only when a cast or a curated rule-head
+signature proves it. Unknown callable directions, negated conditions, and
+uncertain control flow remain silent; the server does not guess which call
+arguments bind or assign a variable.
+
 Procedures and queries declared in installed base-module goals are indexed
 the same way as packaged Thoth helpers. Hover, signature help, and completion
 show their authored parameter aliases with module provenance and no file
@@ -755,10 +763,10 @@ unambiguous annotations and stay silent for unknown receivers or fields.
 
 Osiris support does not execute or compile Story, provide control-flow
 analysis, load a complete engine API catalog, or infer aliases from
-`story_header.div`. It does not diagnose database alias compatibility. A
-[follow-up issue](https://github.com/datwaft/bg3-ls/issues/37) tracks that
-check for configurations where installed or curated signatures prove the
-types.
+`story_header.div`. Variable tracking remains rule-local and conservative: it
+does not infer bindings through unknown callable directions, negation, or
+uncertain control flow. Database alias compatibility is diagnosed only when
+the visible source or curated event signatures prove the relevant aliases.
 
 ## License
 
