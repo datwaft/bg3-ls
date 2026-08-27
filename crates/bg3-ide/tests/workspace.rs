@@ -230,15 +230,7 @@ fn osiris_database_schema_uses_goal_order_not_module_precedence() {
         .expect("database signature help");
     assert_eq!(signature.label, "DB_StoryOrder(CHARACTER)");
     let diagnostics = workspace.diagnostics(&paths[0], &overlays, None);
-    assert_eq!(diagnostics.len(), 1);
-    assert!(
-        diagnostics[0]
-            .message
-            .contains("established as `CHARACTER`"),
-        "{}",
-        diagnostics[0].message
-    );
-    assert!(diagnostics[0].message.contains("supplies `GUIDSTRING`"));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
 #[test]
@@ -266,7 +258,7 @@ fn osiris_duplicate_goal_names_are_equal_order_and_ambiguous() {
         "DB_EqualOrder((CHARACTER)CHARACTERGUID_First_11111111-1111-1111-1111-111111111111);",
     );
     let guid = synthetic_osiris_goal(
-        "DB_EqualOrder((GUIDSTRING)GUIDSTRING_Second_22222222-2222-2222-2222-222222222222);",
+        "DB_EqualOrder((ITEM)ITEMGUID_Second_22222222-2222-2222-2222-222222222222);",
     );
     let (workspace, paths) = synthetic_osiris_workspace(&[
         (
@@ -307,9 +299,10 @@ fn osiris_database_schema_overlays_replace_story_order_inputs() {
         ("LateModule", "Z_Late", ModuleRole::Project, &guid),
     ]);
     let disk_overlays = OverlaySet::default();
-    assert_eq!(
-        workspace.diagnostics(&paths[1], &disk_overlays, None).len(),
-        1
+    assert!(
+        workspace
+            .diagnostics(&paths[1], &disk_overlays, None)
+            .is_empty()
     );
 
     let replacement = synthetic_osiris_goal(
@@ -334,7 +327,7 @@ fn osiris_database_schema_overlays_replace_story_order_inputs() {
 fn osiris_database_schema_preserves_occurrence_order_within_goal() {
     let source = synthetic_osiris_goal(concat!(
         "DB_WithinGoal((CHARACTER)CHARACTERGUID_First_11111111-1111-1111-1111-111111111111);\n",
-        "DB_WithinGoal((GUIDSTRING)GUIDSTRING_Second_22222222-2222-2222-2222-222222222222);",
+        "DB_WithinGoal((ITEM)ITEMGUID_Second_22222222-2222-2222-2222-222222222222);",
     ));
     let (workspace, paths) =
         synthetic_osiris_workspace(&[("OnlyModule", "WithinGoal", ModuleRole::Project, &source)]);
@@ -346,7 +339,7 @@ fn osiris_database_schema_preserves_occurrence_order_within_goal() {
             .message
             .contains("established as `CHARACTER`")
     );
-    assert!(diagnostics[0].message.contains("supplies `GUIDSTRING`"));
+    assert!(diagnostics[0].message.contains("supplies `ITEM`"));
 }
 
 #[test]
@@ -537,7 +530,7 @@ fn database_propagation_keeps_unrooted_cycles_unknown_and_retracts_overlays() {
     let opposing = synthetic_osiris_goal_with_kb(
         concat!(
             "DB_OpposingA((CHARACTER)CHARACTERGUID_Character_44444444-4444-4444-4444-444444444444);\n",
-            "DB_OpposingB((GUIDSTRING)GUIDSTRING_Guid_55555555-5555-5555-5555-555555555555);",
+            "DB_OpposingB((ITEM)ITEMGUID_Guid_55555555-5555-5555-5555-555555555555);",
         ),
         concat!(
             "IF\nDB_OpposingA(_A)\nTHEN\nDB_OpposingB(_A);\n",
@@ -605,7 +598,7 @@ fn database_propagation_blocks_conflicting_and_ambiguous_sources() {
     let conflicting = synthetic_osiris_goal_with_kb(
         concat!(
             "DB_ConflictSource((CHARACTER)CHARACTERGUID_Character_11111111-1111-1111-1111-111111111111);\n",
-            "DB_ConflictSource((GUIDSTRING)GUIDSTRING_Guid_22222222-2222-2222-2222-222222222222);",
+            "DB_ConflictSource((ITEM)ITEMGUID_Guid_22222222-2222-2222-2222-222222222222);",
         ),
         concat!(
             "IF\nDB_ConflictSource(_Value)\nTHEN\nDB_ConflictTarget(_Value);\n",
@@ -645,7 +638,7 @@ fn database_propagation_blocks_conflicting_and_ambiguous_sources() {
         "DB_AmbiguousSource((CHARACTER)CHARACTERGUID_Character_33333333-3333-3333-3333-333333333333);",
     );
     let guid = synthetic_osiris_goal(
-        "DB_AmbiguousSource((GUIDSTRING)GUIDSTRING_Guid_44444444-4444-4444-4444-444444444444);",
+        "DB_AmbiguousSource((ITEM)ITEMGUID_Guid_44444444-4444-4444-4444-444444444444);",
     );
     let target = synthetic_osiris_goal_with_kb(
         "",
@@ -677,7 +670,7 @@ fn propagated_database_evidence_keeps_conflict_diagnostics_at_the_later_write() 
     );
     let explicit = synthetic_osiris_goal_with_kb(
         "",
-        "IF\nUnknownEvent(_Who)\nTHEN\nDB_ProvenTarget((GUIDSTRING)GUIDSTRING_Later_22222222-2222-2222-2222-222222222222);\n",
+        "IF\nUnknownEvent(_Who)\nTHEN\nDB_ProvenTarget((ITEM)ITEMGUID_Later_22222222-2222-2222-2222-222222222222);\n",
     );
     let root = synthetic_osiris_goal(
         "DB_ProvenSource((CHARACTER)CHARACTERGUID_Root_11111111-1111-1111-1111-111111111111);",
@@ -694,7 +687,7 @@ fn propagated_database_evidence_keeps_conflict_diagnostics_at_the_later_write() 
     assert_eq!(diagnostic.code, "osiris-database-alias-mismatch");
     assert_eq!(
         diagnostic.message,
-        "Column 1 of `DB_ProvenTarget/1` is established as `CHARACTER`. This argument supplies `GUIDSTRING`. Add an explicit `(CHARACTER)` cast."
+        "Column 1 of `DB_ProvenTarget/1` is established as `CHARACTER`. This argument supplies `ITEM`. Add an explicit `(CHARACTER)` cast."
     );
     let explicit_line = explicit
         .lines()
@@ -707,7 +700,7 @@ fn propagated_database_evidence_keeps_conflict_diagnostics_at_the_later_write() 
     );
     assert_eq!(
         diagnostic.range.start.character,
-        u32::try_from(explicit_line.1.find("(GUIDSTRING)").unwrap()).unwrap()
+        u32::try_from(explicit_line.1.find("(ITEM)").unwrap()).unwrap()
     );
 
     let target_hover = workspace
@@ -1813,9 +1806,9 @@ fn database_bound_variable_hover_is_conservative_and_overlay_aware() {
         "THEN\n",
         "DB_Conflicting((CHARACTER)_Writer);\n",
         "IF\n",
-        "Died((CHARACTER)_OtherWriter)\n",
+        "Equipped((ITEM)_OtherWriter, _Writer)\n",
         "THEN\n",
-        "DB_Conflicting((GUIDSTRING)_OtherWriter);\n",
+        "DB_Conflicting((ITEM)_OtherWriter);\n",
         "IF\n",
         "DB_Conflicting(_ConflictingRead)\n",
         "AND\n",
@@ -2231,7 +2224,7 @@ fn diagnoses_proven_osiris_database_alias_conflicts() {
         "INITSECTION\n",
         "KBSECTION\n",
         "IF\nDied(_Char)\nTHEN\nDB_Conflict(_Char);\n",
-        "IF\nAddedTo(_Item, _Holder, _How)\nTHEN\nDB_Conflict(_Item);\n",
+        "IF\nEquipped(_Item, _Char)\nTHEN\nDB_Conflict(_Item);\n",
         "EXITSECTION\nENDEXITSECTION\n",
     );
     let overlays = overlay(&workspace, &path, conflicting);
@@ -2249,7 +2242,7 @@ fn diagnoses_proven_osiris_database_alias_conflicts() {
         diagnostic.message
     );
     assert!(
-        diagnostic.message.contains("supplies `GUIDSTRING`"),
+        diagnostic.message.contains("supplies `ITEM`"),
         "{}",
         diagnostic.message
     );
@@ -2292,6 +2285,172 @@ fn diagnoses_proven_osiris_database_alias_conflicts() {
 }
 
 #[test]
+fn accepts_guid_family_matches_and_silences_unknown_aliases() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let source = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "DB_Generic(GUIDSTRING_Generic_11111111-1111-1111-1111-111111111111);\n",
+        "DB_Generic((CHARACTER)CHARACTERGUID_Specialized_22222222-2222-2222-2222-222222222222);\n",
+        "DB_Unknown((CHARACTER)CHARACTERGUID_Known_33333333-3333-3333-3333-333333333333);\n",
+        "DB_Unknown((CHARACTERGUID)CHARACTERGUID_Unverified_44444444-4444-4444-4444-444444444444);\n",
+        "KBSECTION\n",
+        "IF\nDied(_Caster)\nTHEN\nDB_Event(_Caster);\n",
+        "IF\nAddedTo(_Item, _Holder, _How)\nTHEN\nDB_Event(_Item);\n",
+        "IF\nDB_Event(_Read)\nTHEN\nDB_ReadTarget(_Read);\n",
+        "EXITSECTION\nENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, source);
+
+    assert!(workspace.diagnostics(&path, &overlays, None).is_empty());
+
+    let generic_hover = workspace
+        .hover(&path, source_position(source, "DB_Generic"), &overlays)
+        .expect("generic GUID database hover");
+    assert!(
+        generic_hover.contains("Signature: `DB_Generic(GUIDSTRING)`"),
+        "{generic_hover}"
+    );
+
+    let target_hover = workspace
+        .hover(&path, source_position(source, "DB_ReadTarget"), &overlays)
+        .expect("database-derived target hover");
+    assert!(
+        target_hover.contains("Signature: `DB_ReadTarget(CHARACTER)`"),
+        "{target_hover}"
+    );
+}
+
+#[test]
+fn osiris_guid_family_conflicts_are_pairwise_in_any_story_order() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let permutations = [
+        ["GUIDSTRING", "CHARACTER", "ITEM"],
+        ["GUIDSTRING", "ITEM", "CHARACTER"],
+        ["CHARACTER", "GUIDSTRING", "ITEM"],
+        ["CHARACTER", "ITEM", "GUIDSTRING"],
+        ["ITEM", "GUIDSTRING", "CHARACTER"],
+        ["ITEM", "CHARACTER", "GUIDSTRING"],
+    ];
+
+    for (index, permutation) in permutations.into_iter().enumerate() {
+        let body = permutation
+            .iter()
+            .enumerate()
+            .map(|(entry, type_name)| {
+                format!(
+                    "DB_Pairwise(({type_name}){type_name}_Value_{index}_{entry}_11111111-1111-1111-1111-111111111111);"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = synthetic_osiris_goal(&body);
+        let overlays = overlay(&workspace, &path, &source);
+
+        let diagnostics = workspace.diagnostics(&path, &overlays, None);
+        assert_eq!(diagnostics.len(), 1, "{permutation:?}: {diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "osiris-database-alias-mismatch");
+    }
+}
+
+#[test]
+fn osiris_guid_family_conflict_blocks_downstream_propagation() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let source = synthetic_osiris_goal_with_kb(
+        concat!(
+            "DB_Pairwise((GUIDSTRING)GUIDSTRING_Generic_11111111-1111-1111-1111-111111111111);\n",
+            "DB_Pairwise((CHARACTER)CHARACTERGUID_Character_22222222-2222-2222-2222-222222222222);\n",
+            "DB_Pairwise((ITEM)ITEMGUID_Item_33333333-3333-3333-3333-333333333333);",
+        ),
+        "IF\nDB_Pairwise(_Value)\nTHEN\nDB_Downstream(_Value);\n",
+    );
+    let overlays = overlay(&workspace, &path, &source);
+
+    let hover = workspace
+        .hover(&path, source_position(&source, "DB_Downstream"), &overlays)
+        .expect("downstream database hover");
+    assert!(
+        hover.contains("Signature: `DB_Downstream(unknown)`"),
+        "{hover}"
+    );
+
+    let line = source
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("DB_Downstream"))
+        .expect("downstream database line");
+    let signature = workspace
+        .signature_help(
+            &path,
+            Position {
+                line: u32::try_from(line.0).unwrap(),
+                character: u32::try_from(line.1.find(')').unwrap()).unwrap(),
+            },
+            &overlays,
+        )
+        .expect("downstream database signature");
+    assert_eq!(signature.label, "DB_Downstream(unknown)");
+}
+
+#[test]
+fn osiris_guid_family_conflict_in_duplicate_goals_is_ambiguous() {
+    let sources = [
+        (
+            "GenericModule",
+            "SameGoal",
+            ModuleRole::Dependency,
+            synthetic_osiris_goal(
+                "DB_Pairwise((GUIDSTRING)GUIDSTRING_Generic_11111111-1111-1111-1111-111111111111);",
+            ),
+        ),
+        (
+            "CharacterModule",
+            "SameGoal",
+            ModuleRole::Dependency,
+            synthetic_osiris_goal(
+                "DB_Pairwise((CHARACTER)CHARACTERGUID_Character_22222222-2222-2222-2222-222222222222);",
+            ),
+        ),
+        (
+            "ItemModule",
+            "SameGoal",
+            ModuleRole::Project,
+            synthetic_osiris_goal(
+                "DB_Pairwise((ITEM)ITEMGUID_Item_33333333-3333-3333-3333-333333333333);",
+            ),
+        ),
+    ];
+    let source_refs = sources
+        .iter()
+        .map(|(module, goal, role, source)| (*module, *goal, *role, source.as_str()))
+        .collect::<Vec<_>>();
+    let (workspace, paths) = synthetic_osiris_workspace(&source_refs);
+
+    for (path, source) in paths.iter().zip(sources.iter()) {
+        let hover = workspace
+            .hover(
+                path,
+                source_position(&source.3, "DB_Pairwise"),
+                &OverlaySet::default(),
+            )
+            .expect("duplicate-goal database hover");
+        assert!(
+            hover.contains("Signature: `DB_Pairwise(conflicting)`"),
+            "{hover}"
+        );
+        assert!(
+            workspace
+                .diagnostics(path, &OverlaySet::default(), None)
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn uses_proven_osiris_database_read_types_in_story_order() {
     let (workspace, _) = fixture_workspace(200);
     let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
@@ -2301,26 +2460,22 @@ fn uses_proven_osiris_database_read_types_in_story_order() {
         "INITSECTION\n",
         "KBSECTION\n",
         // This read establishes the database column because it carries a
-        // proven GUIDSTRING argument.
-        "IF\nDB_ReadBinding((GUIDSTRING)_Other)\nTHEN\nGoalCompleted;\n",
+        // proven ITEM argument.
+        "IF\nDB_ReadBinding((ITEM)_Other)\nTHEN\nGoalCompleted;\n",
         "IF\nDied((CHARACTER)_Caster)\nTHEN\nDB_ReadBinding(_Caster);\n",
         // The DB condition binds _Caster from the matching row. The later
         // HasPassive input must not make this read appear to supply GUIDSTRING.
         "IF\nDB_ReadBinding(_Caster)\nAND\nHasPassive(_Caster, \"SomePassive\", 0)\nTHEN\nDB_ReadResult(_Caster);\n",
         // A later read with an explicit, incompatible cast is a real schema
         // conflict, even though the runtime operation is only a match.
-        "IF\nDB_ReadBinding((GUIDSTRING)_Other)\nTHEN\nGoalCompleted;\n",
+        "IF\nDB_ReadBinding((ITEM)_Other)\nTHEN\nGoalCompleted;\n",
         "EXITSECTION\nENDEXITSECTION\n",
     );
     let overlays = overlay(&workspace, &path, source);
 
     let diagnostics = workspace.diagnostics(&path, &overlays, None);
     assert_eq!(diagnostics.len(), 1);
-    assert!(
-        diagnostics[0]
-            .message
-            .contains("established as `GUIDSTRING`")
-    );
+    assert!(diagnostics[0].message.contains("established as `ITEM`"));
 }
 
 #[test]
@@ -2329,8 +2484,9 @@ fn toggles_osiris_alias_diagnostics_through_cross_goal_overlays() {
     let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/SecondaryGoal.txt");
     // MainGoal on disk establishes DB_Tracked column 1 as CHARACTER through an
     // explicit cast. The overlay supplies a generic GUIDSTRING from a curated
-    // event signature in another goal of the same workspace.
-    let conflicting = concat!(
+    // event signature in another goal of the same workspace; the verified
+    // generic/specialized GUID family is compatible.
+    let compatible = concat!(
         "Version 1\n",
         "SubGoalCombiner SGC_AND\n",
         "INITSECTION\n",
@@ -2338,11 +2494,9 @@ fn toggles_osiris_alias_diagnostics_through_cross_goal_overlays() {
         "IF\nAddedTo(_Item, _Holder, _How)\nTHEN\nDB_Tracked(_Item, 3);\n",
         "EXITSECTION\nENDEXITSECTION\n",
     );
-    let mut overlays = overlay(&workspace, &path, conflicting);
+    let mut overlays = overlay(&workspace, &path, compatible);
     let diagnostics = workspace.diagnostics(&path, &overlays, None);
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].code, "osiris-database-alias-mismatch");
-    assert!(diagnostics[0].message.contains("`DB_Tracked/2`"));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
     let original = fs::read_to_string(&path).unwrap();
     let mut restored = overlay(&workspace, &path, &original)
