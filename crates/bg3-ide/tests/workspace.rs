@@ -1085,6 +1085,201 @@ fn tracks_osiris_variables_by_rule_and_replaces_them_in_overlays() {
 }
 
 #[test]
+fn database_help_uses_write_types_when_reads_have_input_evidence() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "UsingSpell((CHARACTER)_Caster, \"Spell\", \"Context\", \"Arg\", 1)\n",
+        "THEN\n",
+        "DB_ReadContaminated(_Caster);\n",
+        "IF\n",
+        "DB_ReadContaminated(_Caster)\n",
+        "AND\n",
+        "HasPassive(_Caster, \"SomePassive\", 0)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "EXITSECTION\n",
+        "NOT DB_ReadContaminated((GUIDSTRING)11111111-1111-1111-1111-111111111111);\n",
+        "ENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, text);
+
+    let database = workspace
+        .hover(
+            &path,
+            source_position(text, "DB_ReadContaminated"),
+            &overlays,
+        )
+        .expect("database hover");
+    assert!(
+        database.contains("Signature: `DB_ReadContaminated(CHARACTER)`"),
+        "{database}"
+    );
+    assert!(database.contains("Writes: `1`"), "{database}");
+    assert!(database.contains("Reads: `1`"), "{database}");
+    assert!(!database.contains("conflicting"), "{database}");
+
+    let database_bound_variable = workspace
+        .hover(&path, source_position_nth(text, "_Caster", 2), &overlays)
+        .expect("database-bound variable hover");
+    assert!(
+        database_bound_variable.contains("Type: `CHARACTER`"),
+        "{database_bound_variable}"
+    );
+
+    let read_line = text
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("DB_ReadContaminated(_Caster)"))
+        .expect("database read");
+    let signature = workspace
+        .signature_help(
+            &path,
+            Position {
+                line: u32::try_from(read_line.0).unwrap(),
+                character: u32::try_from(read_line.1.find(')').unwrap()).unwrap(),
+            },
+            &overlays,
+        )
+        .expect("database signature help");
+    assert_eq!(signature.label, "DB_ReadContaminated(CHARACTER)");
+}
+
+#[test]
+fn database_bound_variable_hover_is_conservative_and_overlay_aware() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let source = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "Died((CHARACTER)_Writer)\n",
+        "THEN\n",
+        "DB_Conflicting((CHARACTER)_Writer);\n",
+        "IF\n",
+        "Died((CHARACTER)_OtherWriter)\n",
+        "THEN\n",
+        "DB_Conflicting((GUIDSTRING)_OtherWriter);\n",
+        "IF\n",
+        "DB_Conflicting(_ConflictingRead)\n",
+        "AND\n",
+        "HasPassive(_ConflictingRead, \"SomePassive\", 0)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "IF\n",
+        "DB_NoWrite(_ReadOnly)\n",
+        "AND\n",
+        "HasPassive(_ReadOnly, \"SomePassive\", 0)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "IF\n",
+        "UsingSpell((CHARACTER)_EventCaster, \"Spell\", \"Type\", \"Element\", 1)\n",
+        "AND\n",
+        "DB_NoWrite(_EventCaster)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "IF\n",
+        "UnknownEvent(_Negated)\n",
+        "AND\n",
+        "NOT DB_Conflicting(_Negated)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, source);
+
+    let hover_at = |name: &str, occurrence: usize| {
+        workspace
+            .hover(
+                &path,
+                source_position_nth(source, name, occurrence),
+                &overlays,
+            )
+            .unwrap_or_else(|| panic!("no hover for {name}"))
+    };
+    let conflicting = hover_at("_ConflictingRead", 0);
+    assert!(!conflicting.contains("Type:"), "{conflicting}");
+    let read_only = hover_at("_ReadOnly", 0);
+    assert!(!read_only.contains("Type:"), "{read_only}");
+    let event_bound = hover_at("_EventCaster", 0);
+    assert!(event_bound.contains("Type: `CHARACTER`"), "{event_bound}");
+    let negated = hover_at("_Negated", 0);
+    assert!(!negated.contains("Type:"), "{negated}");
+
+    let character_source = concat!(
+        "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\n",
+        "IF\nDied((CHARACTER)_Writer)\nTHEN\nDB_Overlay((CHARACTER)_Writer);\n",
+        "IF\nDB_Overlay(_Read)\nTHEN\nGoalCompleted;\n",
+        "EXITSECTION\nENDEXITSECTION\n",
+    );
+    let character_overlays = overlay(&workspace, &path, character_source);
+    let character = workspace
+        .hover(
+            &path,
+            source_position_nth(character_source, "_Read", 0),
+            &character_overlays,
+        )
+        .unwrap();
+    assert!(character.contains("Type: `CHARACTER`"), "{character}");
+
+    let guid_source = character_source.replace("(CHARACTER)_Writer", "(GUIDSTRING)_Writer");
+    let guid_overlays = overlay(&workspace, &path, &guid_source);
+    let guid = workspace
+        .hover(
+            &path,
+            source_position_nth(&guid_source, "_Read", 0),
+            &guid_overlays,
+        )
+        .unwrap();
+    assert!(guid.contains("Type: `GUIDSTRING`"), "{guid}");
+}
+
+#[test]
+fn database_binding_type_survives_later_engine_input_use() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let source = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "Died((CHARACTER)_SourceWriter)\n",
+        "THEN\n",
+        "DB_Source((CHARACTER)_SourceWriter);\n",
+        "IF\n",
+        "DB_Source(_Caster)\n",
+        "AND\n",
+        "HasPassive(_Caster, \"SomePassive\", 0)\n",
+        "THEN\n",
+        "DB_Target(_Caster);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, source);
+
+    let caster = workspace
+        .hover(&path, source_position_nth(source, "_Caster", 0), &overlays)
+        .expect("database-bound caster hover");
+    assert!(caster.contains("Type: `CHARACTER`"), "{caster}");
+    assert!(!caster.contains("GUIDSTRING"), "{caster}");
+
+    let target = workspace
+        .hover(&path, source_position(source, "DB_Target"), &overlays)
+        .expect("target database hover");
+    assert!(!target.contains("GUIDSTRING"), "{target}");
+    assert!(!target.contains("conflicting"), "{target}");
+}
+
+#[test]
 fn supports_source_backed_osiris_navigation_signatures_and_overlays() {
     let (workspace, _) = fixture_workspace(200);
     let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");

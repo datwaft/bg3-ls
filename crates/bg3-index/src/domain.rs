@@ -92,6 +92,8 @@ pub struct Reference {
 pub enum OsirisCallRole {
     Read,
     Write,
+    /// A database fact removal (`NOT DB_...`) in INIT/EXIT or THEN.
+    Remove,
 }
 
 /// The provenance of one Osiris argument type observation.
@@ -118,7 +120,7 @@ pub struct OsirisArgument {
     pub evidence: Option<OsirisTypeEvidence>,
 }
 
-/// One read or write of an implicit Osiris user database.
+/// One read, write, or removal of an implicit Osiris user database.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct OsirisDatabaseOccurrence {
     pub name: String,
@@ -127,6 +129,19 @@ pub struct OsirisDatabaseOccurrence {
     pub selection_range: TextRange,
     pub role: OsirisCallRole,
     pub arguments: Vec<OsirisArgument>,
+}
+
+/// The database column that introduced an Osiris variable in a positive
+/// database condition.
+///
+/// The column is zero-based to match the parser's argument indexing. This is
+/// source metadata only; the effective column type is resolved from visible
+/// database writes by the IDE.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OsirisDatabaseBinding {
+    pub name: String,
+    pub arity: u16,
+    pub column: u16,
 }
 
 /// One rule-local Osiris variable grouped by name.
@@ -140,6 +155,9 @@ pub struct OsirisVariableFact {
     pub name: String,
     pub occurrences: Vec<TextRange>,
     pub binding_range: Option<TextRange>,
+    /// The positive DB condition that introduced this variable, when known.
+    #[serde(default)]
+    pub database_binding: Option<OsirisDatabaseBinding>,
     pub evidence: Option<OsirisTypeEvidence>,
 }
 
