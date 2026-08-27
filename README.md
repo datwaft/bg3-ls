@@ -821,6 +821,14 @@ make test-lsp
 Tests use synthetic fixtures only. Do not add installed game or mod data to this
 repository.
 
+Maintainers create an annotated `vX.Y.Z` tag on `main` to start a release. The
+release workflow accepts only numeric version components without leading
+zeroes, then checks main ancestry and Cargo versions,
+reruns CI at the tagged commit, builds the macOS ARM and Linux archives, checks
+their checksums, and publishes them after every matrix job succeeds. Tags are
+not released when the tagged commit is not on `main` or the package versions do
+not match the tag.
+
 ## Limitations
 
 `bg3-ls` supports one active project per server process. It does not implement
