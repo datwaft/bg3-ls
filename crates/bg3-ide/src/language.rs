@@ -7,13 +7,13 @@ use crate::{
 };
 use bg3_index::{
     Definition, FUNCTIONS, ModuleRole, OSIRIS_CONTRACTS, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
-    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, PackagedOsirisResolution,
-    PackagedThothApiResolution, PackagedThothApiSymbol, PackagedThothApiSymbolKind,
-    PackagedThothCatalog, Position, SchemaDefinition, SchemaField, SourceKind, SymbolTarget,
-    THOTH_FUNCTION_KIND, TextRange, ThothAnnotations, ThothFunctionContract, context_member,
-    context_members, context_properties, context_property, context_side, enum_value,
-    field_documentation, field_kind, function_spec, functor_prefix, functor_prefixes,
-    is_lsx_value_field, is_structural_stats_value, member_enumeration, osiris_contract,
+    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedOsirisResolution, PackagedThothApiResolution,
+    PackagedThothApiSymbol, PackagedThothApiSymbolKind, PackagedThothCatalog, Position,
+    SchemaDefinition, SchemaField, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
+    ThothAnnotations, ThothFunctionContract, context_member, context_members, context_properties,
+    context_property, context_side, enum_value, field_documentation, field_kind, function_spec,
+    functor_prefix, functor_prefixes, is_lsx_value_field, is_structural_stats_value,
+    member_enumeration, osiris_contract,
 };
 /// The semantic category of one completion result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1767,6 +1767,7 @@ impl WorkspaceSnapshot {
     fn osiris_signature_help(&self, before: &str, overlays: &OverlaySet) -> Option<SignatureHelp> {
         let context = call_context(before)?;
         let database = context.function.starts_with("DB_");
+        let database_schemas = database.then(|| self.osiris_database_schemas(overlays));
         let mut candidates = Vec::<(usize, Definition)>::new();
         for (rank, layer) in self.layers.iter().enumerate() {
             for (_, overlay) in overlays.for_module(&layer.spec.name) {
@@ -1784,11 +1785,24 @@ impl WorkspaceSnapshot {
                 }
             }
         }
-        let arity = candidates
-            .iter()
-            .filter_map(|(_, definition)| definition.arity)
-            .filter(|arity| *arity == 0 || usize::from(*arity) > context.argument)
-            .min();
+        let arity = if database {
+            database_schemas.as_ref().and_then(|schemas| {
+                schemas
+                    .keys()
+                    .filter(|(name, arity)| {
+                        name == &context.function
+                            && (*arity == 0 || usize::from(*arity) > context.argument)
+                    })
+                    .map(|(_, arity)| *arity)
+                    .min()
+            })
+        } else {
+            candidates
+                .iter()
+                .filter_map(|(_, definition)| definition.arity)
+                .filter(|arity| *arity == 0 || usize::from(*arity) > context.argument)
+                .min()
+        };
         // A visible loose declaration always outranks installed evidence.
         let Some(arity) = arity else {
             if database {
@@ -1803,10 +1817,11 @@ impl WorkspaceSnapshot {
         };
         candidates.retain(|(_, definition)| definition.arity == Some(arity));
         let parameters = if database {
-            merge_osiris_database_parameters(
-                self.osiris_database_write_parameter_lists(&context.function, arity, overlays),
-                arity,
-            )
+            database_schemas
+                .as_ref()
+                .and_then(|schemas| schemas.get(&(context.function.clone(), arity)))
+                .map(crate::osiris_database_parameter_types)
+                .unwrap_or_else(|| positional_parameters(arity))
         } else {
             osiris_declared_parameters(&candidates, arity)
         };
@@ -1822,37 +1837,6 @@ impl WorkspaceSnapshot {
             parameters,
             active_parameter: context.argument,
         })
-    }
-
-    /// Returns type observations from visible writes to one user database.
-    ///
-    /// Database reads are relational matches. Their argument values can be
-    /// outputs or filters, so they must not contribute to the stored column
-    /// signature used by signature help.
-    fn osiris_database_write_parameter_lists(
-        &self,
-        name: &str,
-        arity: u16,
-        overlays: &OverlaySet,
-    ) -> Vec<Vec<String>> {
-        let mut parameter_lists = Vec::new();
-        for layer in &self.layers {
-            for (_, overlay) in overlays.for_module(&layer.spec.name) {
-                collect_osiris_database_write_parameters(
-                    &overlay.parsed,
-                    name,
-                    arity,
-                    &mut parameter_lists,
-                );
-            }
-            for (path, file) in &layer.files {
-                if overlays.contains(path) {
-                    continue;
-                }
-                collect_osiris_database_write_parameters(file, name, arity, &mut parameter_lists);
-            }
-        }
-        parameter_lists
     }
 
     /// Renders installed procedure and query declarations for signature help.
@@ -2216,67 +2200,6 @@ fn osiris_declared_parameters(candidates: &[(usize, Definition)], arity: u16) ->
 fn positional_parameters(count: u16) -> Vec<String> {
     (0..usize::from(count))
         .map(|index| format!("value{}", index + 1))
-        .collect()
-}
-
-/// Collects one parameter list from each visible database write.
-fn collect_osiris_database_write_parameters(
-    file: &bg3_index::ParsedFile,
-    name: &str,
-    arity: u16,
-    parameter_lists: &mut Vec<Vec<String>>,
-) {
-    let Some(osiris) = &file.osiris else {
-        return;
-    };
-    for occurrence in &osiris.occurrences {
-        if occurrence.name != name
-            || occurrence.arity != arity
-            || occurrence.role != OsirisCallRole::Write
-        {
-            continue;
-        }
-        parameter_lists.push(
-            occurrence
-                .arguments
-                .iter()
-                .map(|argument| {
-                    argument
-                        .evidence
-                        .as_ref()
-                        .map_or_else(|| "unknown".into(), |evidence| evidence.type_name.clone())
-                })
-                .collect(),
-        );
-    }
-}
-
-/// Merges database column evidence without selecting among incompatible aliases.
-fn merge_osiris_database_parameters(
-    parameter_lists: impl IntoIterator<Item = Vec<String>>,
-    arity: u16,
-) -> Vec<String> {
-    let mut columns = vec![BTreeSet::new(); usize::from(arity)];
-    for parameters in parameter_lists {
-        for (index, parameter) in parameters.into_iter().enumerate() {
-            if parameter != "unknown"
-                && let Some(column) = columns.get_mut(index)
-            {
-                column.insert(parameter);
-            }
-        }
-    }
-    columns
-        .into_iter()
-        .map(|types| {
-            if types.len() == 1 {
-                types.into_iter().next().unwrap_or_else(|| "unknown".into())
-            } else if types.len() > 1 {
-                "conflicting".into()
-            } else {
-                "unknown".into()
-            }
-        })
         .collect()
 }
 

@@ -1,10 +1,9 @@
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use bg3_index::{
-    Definition, OsirisCallRole, OsirisFile, SchemaDefinition, SchemaField, SourceKind,
-    SymbolTarget, TextRange, ThothBinaryOperator, ThothExpressionKind, ThothUnaryOperator,
-    TypeExpression, is_schema_discriminator,
+    Definition, SchemaDefinition, SchemaField, SourceKind, SymbolTarget, TextRange,
+    ThothBinaryOperator, ThothExpressionKind, ThothUnaryOperator, TypeExpression,
+    is_schema_discriminator,
 };
 use uuid::Uuid;
 
@@ -161,58 +160,26 @@ impl WorkspaceSnapshot {
     }
 }
 
-/// One alias observation for one Osiris database column.
-struct OsirisAliasObservation {
-    path: PathBuf,
-    range: TextRange,
-    type_name: String,
-}
-
-/// Per-column alias state for one user database.
-struct OsirisColumnAliases {
-    established: Option<OsirisAliasObservation>,
-    conflicts: Vec<OsirisAliasObservation>,
-}
-
 /// Diagnoses user database columns whose occurrences disagree on one alias.
 ///
-/// Establishment aggregates every visible database write across module layers
-/// and overlays, mirroring `osiris_database_hover`. Only the diagnosed
-/// document's arguments are reported, because protocol diagnostics are per
-/// document. Positive database conditions are relational reads: an unbound
-/// variable receives a value from the matching row, and a bound variable only
-/// filters that row. Neither case supplies a stored alias to the database.
-/// Unknown evidence never conflicts, so unavailable engine signatures stay
-/// silent.
+/// Establishment follows the global Story goal order, not module precedence.
+/// Compile-time evidence may come from any proven database occurrence, while
+/// unknown evidence stays silent and runtime role counts remain separate.
 fn add_osiris_database_diagnostics(
     workspace: &WorkspaceSnapshot,
     path: &Path,
     overlays: &OverlaySet,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let mut databases = BTreeMap::<(String, u16), Vec<OsirisColumnAliases>>::new();
-    for layer in workspace.layers.iter() {
-        for (overlay_path, overlay) in overlays.for_module(&layer.spec.name) {
-            collect_osiris_alias_evidence(
-                overlay.parsed.osiris.as_ref(),
-                overlay_path,
-                &mut databases,
-            );
-        }
-        for (file_path, file) in &layer.files {
-            if overlays.contains(file_path) {
-                continue;
-            }
-            collect_osiris_alias_evidence(file.osiris.as_ref(), file_path, &mut databases);
-        }
-    }
-
-    for ((name, arity), columns) in databases {
-        for (index, column) in columns.into_iter().enumerate() {
+    for schema in workspace.osiris_database_schemas(overlays).into_values() {
+        for (index, column) in schema.columns.into_iter().enumerate() {
             // A column without an established alias has nothing to violate.
             let Some(established) = column.established else {
                 continue;
             };
+            if column.ambiguous {
+                continue;
+            }
             for conflict in column.conflicts {
                 if conflict.path != path {
                     continue;
@@ -222,69 +189,15 @@ fn add_osiris_database_diagnostics(
                     severity: DiagnosticSeverity::Error,
                     code: "osiris-database-alias-mismatch".into(),
                     message: format!(
-                        "Column {} of `{name}/{arity}` is established as `{}`. This argument supplies `{}`. Add an explicit `({})` cast.",
+                        "Column {} of `{}/{}` is established as `{}`. This argument supplies `{}`. Add an explicit `({})` cast.",
                         index + 1,
+                        schema.name,
+                        schema.arity,
                         established.type_name,
                         conflict.type_name,
                         established.type_name,
                     ),
                 });
-            }
-        }
-    }
-}
-
-/// Folds one goal's database writes into per-column alias state.
-///
-/// The first observed write establishes the column; later distinct writes
-/// become conflicts. Database reads are intentionally excluded: a positive
-/// condition can bind an unbound variable from an existing row, and a bound
-/// variable only matches an existing value. Treating either as a stored alias
-/// would confuse relational matching with a database write and can also leak
-/// a later engine input's expected type into the read.
-fn collect_osiris_alias_evidence(
-    osiris: Option<&OsirisFile>,
-    path: &Path,
-    databases: &mut BTreeMap<(String, u16), Vec<OsirisColumnAliases>>,
-) {
-    let Some(osiris) = osiris else {
-        return;
-    };
-    for occurrence in &osiris.occurrences {
-        if occurrence.role != OsirisCallRole::Write {
-            continue;
-        }
-        let columns = databases
-            .entry((occurrence.name.clone(), occurrence.arity))
-            .or_insert_with(|| {
-                (0..usize::from(occurrence.arity))
-                    .map(|_| OsirisColumnAliases {
-                        established: None,
-                        conflicts: Vec::new(),
-                    })
-                    .collect::<Vec<_>>()
-            });
-        for (column, argument) in columns.iter_mut().zip(&occurrence.arguments) {
-            let Some(evidence) = argument.evidence.as_ref() else {
-                continue;
-            };
-            match &column.established {
-                None => {
-                    column.established = Some(OsirisAliasObservation {
-                        path: path.to_owned(),
-                        range: argument.range,
-                        type_name: evidence.type_name.clone(),
-                    });
-                }
-                Some(established) => {
-                    if established.type_name != evidence.type_name {
-                        column.conflicts.push(OsirisAliasObservation {
-                            path: path.to_owned(),
-                            range: argument.range,
-                            type_name: evidence.type_name.clone(),
-                        });
-                    }
-                }
             }
         }
     }
