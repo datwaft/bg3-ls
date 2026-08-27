@@ -14,11 +14,11 @@ use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_CONTRACTS,
     OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND,
     OsirisCallRole, OsirisContractKind, OsirisDatabaseBinding, OsirisParameterDirection,
-    OsirisVariableFact, PackagedOsirisIndex, PackagedOsirisResolution, PackagedStatsCatalog,
-    PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position,
-    Reference, SchemaCatalog, SourceKind, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION,
-    THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile, TooltipCatalog, canonical_kind,
-    osiris_contract, parse_packaged_thoth_facts,
+    OsirisVariableFact, OsirisVariableOccurrence, PackagedOsirisIndex, PackagedOsirisResolution,
+    PackagedStatsCatalog, PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts,
+    ParsedFile, Position, Reference, SchemaCatalog, SourceKind, SymbolTarget,
+    THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile,
+    TooltipCatalog, canonical_kind, osiris_contract, parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -33,6 +33,41 @@ pub use thoth::{
 pub struct HoverResult {
     pub markdown: String,
     pub range: Option<TextRange>,
+}
+
+struct OsirisVariableMatch<'a> {
+    variable: &'a OsirisVariableFact,
+    occurrence_range: TextRange,
+}
+
+impl OsirisVariableMatch<'_> {
+    fn occurrence(&self) -> Option<&OsirisVariableOccurrence> {
+        self.variable
+            .occurrence_facts
+            .iter()
+            .find(|occurrence| occurrence.range == self.occurrence_range)
+    }
+
+    fn binding_range(&self) -> Option<TextRange> {
+        match self.occurrence() {
+            Some(occurrence) => occurrence.binding_range,
+            None => self.variable.binding_range,
+        }
+    }
+
+    fn database_binding(&self) -> Option<&OsirisDatabaseBinding> {
+        match self.occurrence() {
+            Some(occurrence) => occurrence.database_binding.as_ref(),
+            None => self.variable.database_binding.as_ref(),
+        }
+    }
+
+    fn evidence(&self) -> Option<&bg3_index::OsirisTypeEvidence> {
+        match self.occurrence() {
+            Some(occurrence) => occurrence.evidence.as_ref(),
+            None => self.variable.evidence.as_ref(),
+        }
+    }
 }
 
 impl std::ops::Deref for HoverResult {
@@ -458,7 +493,7 @@ impl WorkspaceSnapshot {
     ) -> Vec<SourceLocation> {
         if let Some(variable) = self.osiris_variable_at(path, position, overlays) {
             return variable
-                .binding_range
+                .binding_range()
                 .into_iter()
                 .map(|range| SourceLocation {
                     path: path.to_owned(),
@@ -1173,9 +1208,12 @@ impl WorkspaceSnapshot {
     ) -> Vec<SourceLocation> {
         if let Some(variable) = self.osiris_variable_at(path, position, overlays) {
             return variable
+                .variable
                 .occurrences
                 .iter()
-                .filter(|range| include_declaration || Some(**range) != variable.binding_range)
+                .filter(|range| {
+                    include_declaration || Some(**range) != variable.variable.binding_range
+                })
                 .map(|range| SourceLocation {
                     path: path.to_owned(),
                     range: *range,
@@ -1319,32 +1357,55 @@ impl WorkspaceSnapshot {
         path: &Path,
         position: Position,
         overlays: &'a OverlaySet,
-    ) -> Option<&'a OsirisVariableFact> {
+    ) -> Option<OsirisVariableMatch<'a>> {
         let (_, file) = self.file(path, overlays)?;
         let osiris = file.osiris.as_ref()?;
-        osiris.variables.iter().find(|variable| {
+        osiris.variables.iter().find_map(|variable| {
             variable
-                .occurrences
+                .occurrence_facts
                 .iter()
-                .copied()
-                .any(|range| range_contains(range, position))
+                .find(|occurrence| range_contains(occurrence.range, position))
+                .map_or_else(
+                    || {
+                        variable
+                            .occurrences
+                            .iter()
+                            .copied()
+                            .find(|range| range_contains(*range, position))
+                            .map(|occurrence_range| OsirisVariableMatch {
+                                variable,
+                                occurrence_range,
+                            })
+                    },
+                    |occurrence| {
+                        Some(OsirisVariableMatch {
+                            variable,
+                            occurrence_range: occurrence.range,
+                        })
+                    },
+                )
         })
     }
 
     /// Renders one rule-local Osiris variable without claiming a declaration.
     fn osiris_variable_hover(
         &self,
-        variable: &OsirisVariableFact,
+        variable: OsirisVariableMatch<'_>,
         overlays: &OverlaySet,
     ) -> String {
-        let mut markdown = HoverMarkup::new("Osiris variable", &variable.name);
-        let type_name = match &variable.database_binding {
-            Some(binding) => self.osiris_database_binding_type(binding, overlays),
-            None => variable
-                .evidence
-                .as_ref()
-                .map(|evidence| evidence.type_name.clone()),
-        };
+        let mut markdown = HoverMarkup::new("Osiris variable", &variable.variable.name);
+        // A cast at this occurrence is stronger than the inferred type of a
+        // database column. Use the DB type only when no occurrence evidence
+        // is available for this bound variable.
+        let type_name = variable
+            .evidence()
+            .as_ref()
+            .map(|evidence| evidence.type_name.clone())
+            .or_else(|| {
+                variable
+                    .database_binding()
+                    .and_then(|binding| self.osiris_database_binding_type(binding, overlays))
+            });
         if let Some(type_name) = type_name {
             markdown = markdown.fact("Type", &type_name);
         }

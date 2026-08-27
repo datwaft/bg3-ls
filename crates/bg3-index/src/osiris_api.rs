@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Invalidates cached packaged Osiris goal facts when their shape changes.
-pub const OSIRIS_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-osiris-facts-v5";
+pub const OSIRIS_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-osiris-facts-v6";
 
 /// Parses one packaged Osiris goal source into cacheable file facts.
 ///

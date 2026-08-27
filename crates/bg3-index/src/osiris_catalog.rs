@@ -24,6 +24,9 @@ pub const OSIRIS_CATALOG_GENERATOR_VERSION: &str = "bg3-ls-osiris-catalog-v1";
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum OsirisParameterDirection {
     In,
+    /// Project-level compatibility for synthetic contracts. Canonical BG3
+    /// headers expose only `[in]` and `[out]`; parser binding remains
+    /// conservative when no generated contract attests this direction.
     InOut,
     Out,
 }
