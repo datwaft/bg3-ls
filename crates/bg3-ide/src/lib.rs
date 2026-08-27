@@ -81,10 +81,21 @@ struct VisibleOsirisSource<'a> {
     file: &'a ParsedFile,
 }
 
+#[derive(Clone)]
 struct OrderedDatabaseOccurrence {
+    name: String,
+    arity: u16,
     goal: String,
+    module: String,
+    rank: usize,
+    path: PathBuf,
+    role: OsirisCallRole,
+    argument_ranges: Vec<TextRange>,
     arguments: Vec<Option<OsirisDatabaseTypeObservation>>,
+    propagation_sources: Vec<Option<OsirisDatabaseColumnKey>>,
 }
+
+type OsirisDatabaseColumnKey = (String, u16, usize);
 
 impl OsirisVariableMatch<'_> {
     fn occurrence(&self) -> Option<&OsirisVariableOccurrence> {
@@ -1411,12 +1422,14 @@ impl WorkspaceSnapshot {
         markdown.finish()
     }
 
-    /// Resolves one DB-bound variable type from visible writes only.
+    /// Resolves one DB-bound variable type from the shared database schema.
     ///
     /// A positive DB read can introduce a variable from a matching row. Its
     /// later engine-query uses are constraints, not type-producing evidence.
     /// Missing or conflicting writes therefore remain unknown rather than
-    /// falling back to an input contract's expected type.
+    /// falling back to an input contract's expected type. The propagation
+    /// pass separately restricts DB-derived roots to writes; reads and
+    /// removals can still provide the established schema shown here.
     fn osiris_database_binding_type(
         &self,
         binding: &OsirisDatabaseBinding,
@@ -1536,114 +1549,426 @@ impl WorkspaceSnapshot {
             }
         }
 
-        let mut schemas = BTreeMap::<(String, u16), OsirisDatabaseSchema>::new();
-        let mut occurrences = BTreeMap::<(String, u16), Vec<OrderedDatabaseOccurrence>>::new();
-        for source in &sources {
-            let Some(osiris) = &source.file.osiris else {
-                continue;
-            };
-            for occurrence in &osiris.occurrences {
-                let key = (occurrence.name.clone(), occurrence.arity);
-                let schema = schemas
-                    .entry(key.clone())
-                    .or_insert_with(|| OsirisDatabaseSchema {
-                        name: occurrence.name.clone(),
-                        arity: occurrence.arity,
-                        columns: (0..usize::from(occurrence.arity))
-                            .map(|_| OsirisDatabaseColumnSchema::default())
-                            .collect(),
-                        reads: 0,
-                        writes: 0,
-                        removals: 0,
-                        contributors: BTreeSet::new(),
-                    });
-                match occurrence.role {
-                    OsirisCallRole::Read => schema.reads += 1,
-                    OsirisCallRole::Write => schema.writes += 1,
-                    OsirisCallRole::Remove => schema.removals += 1,
-                }
-                schema.contributors.insert((
-                    source.rank,
-                    source.module.to_owned(),
-                    osiris.goal.clone(),
-                    source.path.clone(),
-                ));
-                occurrences
-                    .entry(key)
-                    .or_default()
-                    .push(OrderedDatabaseOccurrence {
-                        goal: osiris.goal.clone(),
-                        arguments: occurrence
-                            .arguments
-                            .iter()
-                            .map(|argument| {
-                                argument.evidence.as_ref().map(|evidence| {
-                                    OsirisDatabaseTypeObservation {
-                                        path: source.path.clone(),
-                                        range: argument.range,
-                                        type_name: evidence.type_name.clone(),
-                                    }
-                                })
-                            })
-                            .collect(),
-                    });
-            }
-        }
-
-        for (key, records) in occurrences {
-            let Some(schema) = schemas.get_mut(&key) else {
-                continue;
-            };
-            let mut start = 0;
-            while start < records.len() {
-                let goal = &records[start].goal;
-                let mut end = start + 1;
-                while end < records.len() && records[end].goal == *goal {
-                    end += 1;
-                }
-                if goal_source_counts.get(goal).copied().unwrap_or_default() > 1 {
-                    // Equal-name goals have no language-defined ordering. A
-                    // disagreement in the group is therefore ambiguous.
-                    for column in 0..usize::from(schema.arity) {
-                        let mut known = BTreeMap::<String, OsirisDatabaseTypeObservation>::new();
-                        for record in &records[start..end] {
-                            if let Some(Some(observation)) = record.arguments.get(column) {
-                                known
-                                    .entry(observation.type_name.clone())
-                                    .or_insert_with(|| observation.clone());
-                            }
-                        }
-                        let Some(column_schema) = schema.columns.get_mut(column) else {
-                            continue;
-                        };
-                        if known.len() > 1 {
-                            column_schema.established = None;
-                            column_schema.conflicts.clear();
-                            column_schema.ambiguous = true;
-                        } else if !column_schema.ambiguous
-                            && let Some((_, observation)) = known.into_iter().next()
-                        {
-                            fold_osiris_database_type(column_schema, observation);
-                        }
-                    }
-                } else {
-                    for record in &records[start..end] {
-                        // Every proven argument can contribute compile-time
-                        // signature evidence, including reads and removals.
-                        for (column, observation) in record.arguments.iter().enumerate() {
-                            if let Some(observation) = observation
-                                && let Some(column_schema) = schema.columns.get_mut(column)
-                            {
-                                fold_osiris_database_type(column_schema, observation.clone());
-                            }
-                        }
-                    }
-                }
-                start = end;
-            }
-        }
-        schemas
+        // Build the immutable dependency graph once. A graph/SCC pass keeps
+        // conflicts from oscillating between known and unknown states and
+        // recomputes the complete closure when overlays change the source
+        // set. Runtime bindings remain source-ordered parser facts; this pass
+        // only supplies compile-time types to already-valid DB writes.
+        let base_occurrences = ordered_osiris_database_occurrences(&sources);
+        let available = propagatable_osiris_database_types(&base_occurrences, &goal_source_counts);
+        let occurrences = apply_osiris_database_propagation(&base_occurrences, &available);
+        fold_osiris_database_schemas(&occurrences, &goal_source_counts)
     }
+}
+
+/// Builds database occurrences from the effective source set in global Story
+/// order. Only write arguments without intrinsic evidence receive a derived
+/// type from a rule-local variable.
+fn ordered_osiris_database_occurrences(
+    sources: &[VisibleOsirisSource<'_>],
+) -> Vec<OrderedDatabaseOccurrence> {
+    let mut records = Vec::new();
+    for source in sources {
+        let Some(osiris) = &source.file.osiris else {
+            continue;
+        };
+        for occurrence in &osiris.occurrences {
+            let mut arguments = Vec::with_capacity(occurrence.arguments.len());
+            let mut propagation_sources = Vec::with_capacity(occurrence.arguments.len());
+            let argument_ranges = occurrence
+                .arguments
+                .iter()
+                .map(|argument| argument.range)
+                .collect::<Vec<_>>();
+            for argument in &occurrence.arguments {
+                let intrinsic =
+                    argument
+                        .evidence
+                        .as_ref()
+                        .map(|evidence| OsirisDatabaseTypeObservation {
+                            path: source.path.clone(),
+                            range: argument.range,
+                            type_name: evidence.type_name.clone(),
+                        });
+                let (argument, propagation_source) = if occurrence.role != OsirisCallRole::Write {
+                    (intrinsic, None)
+                } else {
+                    let variable = osiris_variable_occurrence_at(osiris, argument.range);
+                    match variable {
+                        None => (intrinsic, None),
+                        Some(variable) if variable.binding_range.is_none() => {
+                            // A cast or literal-like appearance around an
+                            // unbound action variable cannot establish a DB
+                            // schema. Keep only arguments with no local
+                            // variable, such as typed literals.
+                            (None, None)
+                        }
+                        Some(variable)
+                            if argument.range == variable.range
+                                && variable.database_binding.is_some() =>
+                        {
+                            // This is a plain DB-bound local. Explicit type
+                            // evidence established later in the rule is a
+                            // valid local type and takes precedence over the
+                            // DB edge. Without it, the source column supplies
+                            // the type through the dependency graph.
+                            let binding = variable.database_binding.as_ref().unwrap();
+                            if intrinsic.is_some() {
+                                (intrinsic, None)
+                            } else {
+                                (
+                                    None,
+                                    Some((
+                                        binding.name.clone(),
+                                        binding.arity,
+                                        usize::from(binding.column),
+                                    )),
+                                )
+                            }
+                        }
+                        Some(_) => {
+                            // A previously valid event/query local, or an
+                            // explicitly cast action argument, is direct
+                            // evidence. It does not create a DB dependency.
+                            (intrinsic, None)
+                        }
+                    }
+                };
+                arguments.push(argument);
+                propagation_sources.push(propagation_source);
+            }
+            records.push(OrderedDatabaseOccurrence {
+                name: occurrence.name.clone(),
+                arity: occurrence.arity,
+                goal: osiris.goal.clone(),
+                module: source.module.to_owned(),
+                rank: source.rank,
+                path: source.path.clone(),
+                role: occurrence.role,
+                argument_ranges,
+                arguments,
+                propagation_sources,
+            });
+        }
+    }
+    records
+}
+
+fn osiris_variable_occurrence_at(
+    osiris: &bg3_index::OsirisFile,
+    argument_range: TextRange,
+) -> Option<&OsirisVariableOccurrence> {
+    osiris
+        .variables
+        .iter()
+        .flat_map(|variable| &variable.occurrence_facts)
+        .find(|occurrence| range_covers(argument_range, occurrence.range))
+}
+
+fn fold_osiris_database_schemas(
+    occurrences: &[OrderedDatabaseOccurrence],
+    goal_source_counts: &BTreeMap<String, usize>,
+) -> BTreeMap<(String, u16), OsirisDatabaseSchema> {
+    let mut schemas = BTreeMap::<(String, u16), OsirisDatabaseSchema>::new();
+    let mut by_database = BTreeMap::<(String, u16), Vec<&OrderedDatabaseOccurrence>>::new();
+    for occurrence in occurrences {
+        let key = (occurrence.name.clone(), occurrence.arity);
+        let schema = schemas
+            .entry(key.clone())
+            .or_insert_with(|| OsirisDatabaseSchema {
+                name: key.0.clone(),
+                arity: key.1,
+                columns: (0..usize::from(key.1))
+                    .map(|_| OsirisDatabaseColumnSchema::default())
+                    .collect(),
+                reads: 0,
+                writes: 0,
+                removals: 0,
+                contributors: BTreeSet::new(),
+            });
+        match occurrence.role {
+            OsirisCallRole::Read => schema.reads += 1,
+            OsirisCallRole::Write => schema.writes += 1,
+            OsirisCallRole::Remove => schema.removals += 1,
+        }
+        schema.contributors.insert((
+            occurrence.rank,
+            occurrence.module.clone(),
+            occurrence.goal.clone(),
+            occurrence.path.clone(),
+        ));
+        by_database.entry(key).or_default().push(occurrence);
+    }
+
+    for (key, records) in by_database {
+        let Some(schema) = schemas.get_mut(&key) else {
+            continue;
+        };
+        fold_osiris_database_records(schema, &records, goal_source_counts);
+    }
+    schemas
+}
+
+fn fold_osiris_database_records(
+    schema: &mut OsirisDatabaseSchema,
+    records: &[&OrderedDatabaseOccurrence],
+    goal_source_counts: &BTreeMap<String, usize>,
+) {
+    let mut start = 0;
+    while start < records.len() {
+        let goal = &records[start].goal;
+        let mut end = start + 1;
+        while end < records.len() && records[end].goal == *goal {
+            end += 1;
+        }
+        if goal_source_counts.get(goal).copied().unwrap_or_default() > 1 {
+            // Equal-name goals have no language-defined ordering. A
+            // disagreement in the group is therefore ambiguous.
+            for column in 0..usize::from(schema.arity) {
+                let mut known = BTreeMap::<String, OsirisDatabaseTypeObservation>::new();
+                for record in &records[start..end] {
+                    if let Some(Some(observation)) = record.arguments.get(column) {
+                        known
+                            .entry(observation.type_name.clone())
+                            .or_insert_with(|| observation.clone());
+                    }
+                }
+                let Some(column_schema) = schema.columns.get_mut(column) else {
+                    continue;
+                };
+                if known.len() > 1 {
+                    column_schema.established = None;
+                    column_schema.conflicts.clear();
+                    column_schema.ambiguous = true;
+                } else if !column_schema.ambiguous
+                    && let Some((_, observation)) = known.into_iter().next()
+                {
+                    fold_osiris_database_type(column_schema, observation);
+                }
+            }
+        } else {
+            for record in &records[start..end] {
+                // Every proven argument can contribute compile-time signature
+                // evidence, including reads and removals.
+                for (column, observation) in record.arguments.iter().enumerate() {
+                    if let Some(observation) = observation
+                        && let Some(column_schema) = schema.columns.get_mut(column)
+                    {
+                        fold_osiris_database_type(column_schema, observation.clone());
+                    }
+                }
+            }
+        }
+        start = end;
+    }
+}
+
+fn propagatable_osiris_database_types(
+    occurrences: &[OrderedDatabaseOccurrence],
+    goal_source_counts: &BTreeMap<String, usize>,
+) -> BTreeMap<OsirisDatabaseColumnKey, Option<String>> {
+    let mut states = BTreeMap::<OsirisDatabaseColumnKey, BTreeSet<String>>::new();
+    let mut ambiguous = BTreeSet::<OsirisDatabaseColumnKey>::new();
+    let mut outgoing =
+        BTreeMap::<OsirisDatabaseColumnKey, BTreeSet<OsirisDatabaseColumnKey>>::new();
+    let mut direct_by_goal = BTreeMap::<(OsirisDatabaseColumnKey, String), BTreeSet<String>>::new();
+
+    for occurrence in occurrences {
+        for column in 0..usize::from(occurrence.arity) {
+            states
+                .entry((occurrence.name.clone(), occurrence.arity, column))
+                .or_default();
+        }
+        if occurrence.role != OsirisCallRole::Write {
+            continue;
+        }
+        for column in 0..usize::from(occurrence.arity) {
+            let target = (occurrence.name.clone(), occurrence.arity, column);
+            if let Some(Some(observation)) = occurrence.arguments.get(column) {
+                states
+                    .entry(target.clone())
+                    .or_default()
+                    .insert(observation.type_name.clone());
+                direct_by_goal
+                    .entry((target.clone(), occurrence.goal.clone()))
+                    .or_default()
+                    .insert(observation.type_name.clone());
+            }
+            if let Some(Some(source)) = occurrence.propagation_sources.get(column) {
+                outgoing
+                    .entry(source.clone())
+                    .or_default()
+                    .insert(target.clone());
+                states.entry(source.clone()).or_default();
+            }
+        }
+    }
+
+    // Duplicate visible sources with the same goal name have no language
+    // ordering. Only incompatible direct write evidence is ambiguous; equal
+    // evidence remains usable.
+    for ((column, goal), types) in direct_by_goal {
+        if goal_source_counts.get(&goal).copied().unwrap_or_default() > 1 && types.len() > 1 {
+            ambiguous.insert(column);
+        }
+    }
+
+    // Condense the dependency graph into strongly connected components. A
+    // component receives direct roots and singleton outputs from predecessor
+    // components. This gives rooted cycles a type, leaves unrooted cycles
+    // unknown, and prevents a conflicting component from contaminating an
+    // independently rooted downstream database.
+    let keys = states.keys().cloned().collect::<Vec<_>>();
+    let mut reverse = BTreeMap::<OsirisDatabaseColumnKey, BTreeSet<OsirisDatabaseColumnKey>>::new();
+    for (source, targets) in &outgoing {
+        for target in targets {
+            reverse
+                .entry(target.clone())
+                .or_default()
+                .insert(source.clone());
+        }
+    }
+    let mut visited = BTreeSet::new();
+    let mut order = Vec::new();
+    for key in &keys {
+        osiris_database_dfs_order(key, &outgoing, &mut visited, &mut order);
+    }
+    let mut component_of = BTreeMap::<OsirisDatabaseColumnKey, usize>::new();
+    let mut components = Vec::<Vec<OsirisDatabaseColumnKey>>::new();
+    for key in order.into_iter().rev() {
+        if component_of.contains_key(&key) {
+            continue;
+        }
+        let index = components.len();
+        let mut component = Vec::new();
+        osiris_database_dfs_component(&key, &reverse, &mut component_of, index, &mut component);
+        components.push(component);
+    }
+
+    let mut predecessors = vec![BTreeSet::<usize>::new(); components.len()];
+    let mut successors = vec![BTreeSet::<usize>::new(); components.len()];
+    for (source, targets) in &outgoing {
+        let source_component = component_of[source];
+        for target in targets {
+            let target_component = component_of[target];
+            if source_component != target_component {
+                predecessors[target_component].insert(source_component);
+                successors[source_component].insert(target_component);
+            }
+        }
+    }
+    let mut indegree = predecessors.iter().map(BTreeSet::len).collect::<Vec<_>>();
+    let mut ready = (0..components.len())
+        .filter(|component| indegree[*component] == 0)
+        .collect::<BTreeSet<_>>();
+    let mut component_order = Vec::with_capacity(components.len());
+    while let Some(component) = ready.pop_first() {
+        component_order.push(component);
+        for successor in &successors[component] {
+            indegree[*successor] -= 1;
+            if indegree[*successor] == 0 {
+                ready.insert(*successor);
+            }
+        }
+    }
+
+    let mut component_types = vec![None::<String>; components.len()];
+    for component in component_order {
+        let mut candidates = BTreeSet::new();
+        let mut blocked = false;
+        for key in &components[component] {
+            candidates.extend(states[key].iter().cloned());
+            blocked |= ambiguous.contains(key);
+        }
+        for predecessor in &predecessors[component] {
+            if let Some(type_name) = &component_types[*predecessor] {
+                candidates.insert(type_name.clone());
+            }
+        }
+        if !blocked && candidates.len() == 1 {
+            component_types[component] = candidates.into_iter().next();
+        }
+    }
+
+    states
+        .into_keys()
+        .map(|key| {
+            let component = component_of[&key];
+            (key, component_types[component].clone())
+        })
+        .collect()
+}
+
+fn osiris_database_dfs_order(
+    key: &OsirisDatabaseColumnKey,
+    outgoing: &BTreeMap<OsirisDatabaseColumnKey, BTreeSet<OsirisDatabaseColumnKey>>,
+    visited: &mut BTreeSet<OsirisDatabaseColumnKey>,
+    order: &mut Vec<OsirisDatabaseColumnKey>,
+) {
+    if !visited.insert(key.clone()) {
+        return;
+    }
+    if let Some(targets) = outgoing.get(key) {
+        for target in targets {
+            osiris_database_dfs_order(target, outgoing, visited, order);
+        }
+    }
+    order.push(key.clone());
+}
+
+fn osiris_database_dfs_component(
+    key: &OsirisDatabaseColumnKey,
+    reverse: &BTreeMap<OsirisDatabaseColumnKey, BTreeSet<OsirisDatabaseColumnKey>>,
+    component_of: &mut BTreeMap<OsirisDatabaseColumnKey, usize>,
+    component: usize,
+    members: &mut Vec<OsirisDatabaseColumnKey>,
+) {
+    if component_of.contains_key(key) {
+        return;
+    }
+    component_of.insert(key.clone(), component);
+    members.push(key.clone());
+    if let Some(sources) = reverse.get(key) {
+        for source in sources {
+            osiris_database_dfs_component(source, reverse, component_of, component, members);
+        }
+    }
+}
+
+fn apply_osiris_database_propagation(
+    occurrences: &[OrderedDatabaseOccurrence],
+    available: &BTreeMap<OsirisDatabaseColumnKey, Option<String>>,
+) -> Vec<OrderedDatabaseOccurrence> {
+    occurrences
+        .iter()
+        .cloned()
+        .map(|mut occurrence| {
+            if occurrence.role == OsirisCallRole::Write {
+                for column in 0..usize::from(occurrence.arity) {
+                    if occurrence.arguments[column].is_some() {
+                        continue;
+                    }
+                    let Some(Some(source)) = occurrence.propagation_sources.get(column) else {
+                        continue;
+                    };
+                    let Some(Some(type_name)) = available.get(source) else {
+                        continue;
+                    };
+                    occurrence.arguments[column] = Some(OsirisDatabaseTypeObservation {
+                        path: occurrence.path.clone(),
+                        range: occurrence.argument_ranges[column],
+                        type_name: type_name.clone(),
+                    });
+                }
+            }
+            occurrence
+        })
+        .collect()
+}
+
+fn range_covers(outer: TextRange, inner: TextRange) -> bool {
+    (outer.start.line, outer.start.character) <= (inner.start.line, inner.start.character)
+        && (inner.end.line, inner.end.character) <= (outer.end.line, outer.end.character)
 }
 
 fn fold_osiris_database_type(
