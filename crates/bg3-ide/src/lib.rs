@@ -13,12 +13,12 @@ use std::sync::Arc;
 use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_CONTRACTS,
     OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND,
-    OsirisCallRole, OsirisContractKind, OsirisParameterDirection, OsirisVariableFact,
-    PackagedOsirisIndex, PackagedOsirisResolution, PackagedStatsCatalog, PackagedThothApiIndex,
-    PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position, Reference, SchemaCatalog,
-    SourceKind, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange,
-    ThothExpressionKind, ThothFile, TooltipCatalog, canonical_kind, osiris_contract,
-    parse_packaged_thoth_facts,
+    OsirisCallRole, OsirisContractKind, OsirisDatabaseBinding, OsirisParameterDirection,
+    OsirisVariableFact, PackagedOsirisIndex, PackagedOsirisResolution, PackagedStatsCatalog,
+    PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position,
+    Reference, SchemaCatalog, SourceKind, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION,
+    THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile, TooltipCatalog, canonical_kind,
+    osiris_contract, parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -514,7 +514,7 @@ impl WorkspaceSnapshot {
         overlays: &OverlaySet,
     ) -> Option<String> {
         if let Some(variable) = self.osiris_variable_at(path, position, overlays) {
-            return Some(self.osiris_variable_hover(variable));
+            return Some(self.osiris_variable_hover(variable, overlays));
         }
         let target = self.target_at(path, position, overlays)?;
         if let SymbolTarget::Named {
@@ -1332,12 +1332,51 @@ impl WorkspaceSnapshot {
     }
 
     /// Renders one rule-local Osiris variable without claiming a declaration.
-    fn osiris_variable_hover(&self, variable: &OsirisVariableFact) -> String {
+    fn osiris_variable_hover(
+        &self,
+        variable: &OsirisVariableFact,
+        overlays: &OverlaySet,
+    ) -> String {
         let mut markdown = HoverMarkup::new("Osiris variable", &variable.name);
-        if let Some(evidence) = &variable.evidence {
-            markdown = markdown.fact("Type", &evidence.type_name);
+        let type_name = match &variable.database_binding {
+            Some(binding) => self.osiris_database_binding_type(binding, overlays),
+            None => variable
+                .evidence
+                .as_ref()
+                .map(|evidence| evidence.type_name.clone()),
+        };
+        if let Some(type_name) = type_name {
+            markdown = markdown.fact("Type", &type_name);
         }
         markdown.finish()
+    }
+
+    /// Resolves one DB-bound variable type from visible writes only.
+    ///
+    /// A positive DB read can introduce a variable from a matching row. Its
+    /// later engine-query uses are constraints, not type-producing evidence.
+    /// Missing or conflicting writes therefore remain unknown rather than
+    /// falling back to an input contract's expected type.
+    fn osiris_database_binding_type(
+        &self,
+        binding: &OsirisDatabaseBinding,
+        overlays: &OverlaySet,
+    ) -> Option<String> {
+        let mut types = BTreeSet::new();
+        for layer in &self.layers {
+            for (_, overlay) in overlays.for_module(&layer.spec.name) {
+                collect_osiris_database_column_write_type(&overlay.parsed, binding, &mut types);
+            }
+            for (path, file) in &layer.files {
+                if overlays.contains(path) {
+                    continue;
+                }
+                collect_osiris_database_column_write_type(file, binding, &mut types);
+            }
+        }
+        (types.len() == 1)
+            .then(|| types.into_iter().next())
+            .flatten()
     }
 
     /// Returns schema field documentation when the position is on a field name.
@@ -1387,6 +1426,33 @@ impl WorkspaceSnapshot {
     }
 }
 
+/// Adds one visible database write's type for a requested column.
+fn collect_osiris_database_column_write_type(
+    file: &ParsedFile,
+    binding: &OsirisDatabaseBinding,
+    types: &mut BTreeSet<String>,
+) {
+    let Some(osiris) = &file.osiris else {
+        return;
+    };
+    let column = usize::from(binding.column);
+    for occurrence in &osiris.occurrences {
+        if occurrence.role != OsirisCallRole::Write
+            || occurrence.name != binding.name
+            || occurrence.arity != binding.arity
+        {
+            continue;
+        }
+        if let Some(Some(evidence)) = occurrence
+            .arguments
+            .get(column)
+            .map(|argument| argument.evidence.as_ref())
+        {
+            types.insert(evidence.type_name.clone());
+        }
+    }
+}
+
 /// Accumulates exact database evidence from one disk or overlay goal record.
 #[allow(clippy::too_many_arguments)]
 fn collect_osiris_database_evidence(
@@ -1413,12 +1479,15 @@ fn collect_osiris_database_evidence(
         match occurrence.role {
             OsirisCallRole::Read => *reads += 1,
             OsirisCallRole::Write => *writes += 1,
+            OsirisCallRole::Remove => {}
         }
-        for (index, argument) in occurrence.arguments.iter().enumerate() {
-            if let (Some(column), Some(evidence)) =
-                (types.get_mut(index), argument.evidence.as_ref())
-            {
-                column.insert(evidence.type_name.clone());
+        if occurrence.role == OsirisCallRole::Write {
+            for (index, argument) in occurrence.arguments.iter().enumerate() {
+                if let (Some(column), Some(evidence)) =
+                    (types.get_mut(index), argument.evidence.as_ref())
+                {
+                    column.insert(evidence.type_name.clone());
+                }
             }
         }
     }

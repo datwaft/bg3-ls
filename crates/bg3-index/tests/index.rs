@@ -1493,6 +1493,7 @@ fn tracks_rule_local_osiris_variable_occurrences_and_proven_bindings() {
     assert_ne!(caster[0].rule_range, caster[1].rule_range);
     assert_eq!(caster[0].occurrences.len(), 3);
     assert_eq!(caster[0].binding_range, Some(caster[0].occurrences[0]));
+    assert!(caster[0].database_binding.is_none());
     assert_eq!(caster[0].evidence.as_ref().unwrap().type_name, "CHARACTER");
     assert_eq!(caster[1].occurrences.len(), 2);
     assert_eq!(caster[1].binding_range, None);
@@ -1503,6 +1504,14 @@ fn tracks_rule_local_osiris_variable_occurrences_and_proven_bindings() {
         .unwrap();
     assert_eq!(from_db.occurrences.len(), 4);
     assert_eq!(from_db.binding_range, Some(from_db.occurrences[0]));
+    assert_eq!(
+        from_db.database_binding,
+        Some(bg3_index::OsirisDatabaseBinding {
+            name: "DB_Characters".into(),
+            arity: 1,
+            column: 0,
+        })
+    );
 
     let unknown = variables
         .iter()
@@ -1516,6 +1525,191 @@ fn tracks_rule_local_osiris_variable_occurrences_and_proven_bindings() {
         .find(|fact| fact.name == "_Receiver")
         .unwrap();
     assert_eq!(receiver.binding_range, None);
+}
+
+#[test]
+fn records_only_positive_database_bindings_and_write_types() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "Died((CHARACTER)_Writer)\n",
+        "THEN\n",
+        "DB_ReadOnly((CHARACTER)_Writer);\n",
+        "IF\n",
+        "DB_ReadOnly(_ReadCaster)\n",
+        "AND\n",
+        "HasPassive(_ReadCaster, \"SomePassive\", 0)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "IF\n",
+        "UnknownEvent(_HeadCaster)\n",
+        "AND\n",
+        "NOT DB_ReadOnly(_NegatedCaster)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Bindings.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty(), "{:?}", parsed.issues);
+    let osiris = parsed.osiris.as_ref().unwrap();
+
+    let read_caster = osiris
+        .variables
+        .iter()
+        .find(|fact| fact.name == "_ReadCaster")
+        .unwrap();
+    assert_eq!(
+        read_caster.database_binding,
+        Some(bg3_index::OsirisDatabaseBinding {
+            name: "DB_ReadOnly".into(),
+            arity: 1,
+            column: 0,
+        })
+    );
+
+    let writer = osiris
+        .variables
+        .iter()
+        .find(|fact| fact.name == "_Writer")
+        .unwrap();
+    assert!(writer.database_binding.is_none());
+
+    let negated = osiris
+        .variables
+        .iter()
+        .find(|fact| fact.name == "_NegatedCaster")
+        .unwrap();
+    assert!(negated.database_binding.is_none());
+    assert_eq!(negated.binding_range, None);
+
+    let database = parsed
+        .definitions
+        .iter()
+        .find(|definition| {
+            definition.kind == OSIRIS_DATABASE_KIND && definition.name == "DB_ReadOnly"
+        })
+        .unwrap();
+    assert_eq!(
+        database.fields.get("Parameters"),
+        Some(&"CHARACTER".to_owned())
+    );
+}
+
+#[test]
+fn excludes_database_removals_from_write_counts_and_types() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "DB_Removed((CHARACTER)11111111-1111-1111-1111-111111111111);\n",
+        "NOT DB_Removed((GUIDSTRING)22222222-2222-2222-2222-222222222222);\n",
+        "NOT DB_OnlyRemoved((GUIDSTRING)44444444-4444-4444-4444-444444444444);\n",
+        "KBSECTION\n",
+        "IF\n",
+        "Died((CHARACTER)_Writer)\n",
+        "THEN\n",
+        "DB_Action((CHARACTER)_Writer);\n",
+        "NOT DB_Action((GUIDSTRING)_Writer);\n",
+        "EXITSECTION\n",
+        "NOT DB_Removed((GUIDSTRING)33333333-3333-3333-3333-333333333333);\n",
+        "ENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Removals.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty(), "{:?}", parsed.issues);
+
+    let osiris = parsed.osiris.as_ref().unwrap();
+    let removed: Vec<_> = osiris
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.name == "DB_Removed")
+        .collect();
+    assert_eq!(removed.len(), 3);
+    assert!(parsed.references.iter().any(|reference| {
+        reference.context == "osiris-remove"
+            && reference.target
+                == SymbolTarget::OsirisDatabase {
+                    name: "DB_Removed".into(),
+                    arity: 1,
+                }
+    }));
+    assert!(removed.iter().any(|occurrence| {
+        occurrence.role == OsirisCallRole::Write
+            && occurrence.arguments[0]
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.type_name == "CHARACTER")
+    }));
+    assert_eq!(
+        removed
+            .iter()
+            .filter(|occurrence| occurrence.role == OsirisCallRole::Remove)
+            .count(),
+        2
+    );
+    let action: Vec<_> = osiris
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.name == "DB_Action")
+        .collect();
+    assert_eq!(action.len(), 2);
+    assert!(action.iter().any(|occurrence| {
+        occurrence.role == OsirisCallRole::Write
+            && occurrence.arguments[0]
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.type_name == "CHARACTER")
+    }));
+    assert!(action.iter().any(|occurrence| {
+        occurrence.role == OsirisCallRole::Remove
+            && occurrence.arguments[0]
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.type_name == "GUIDSTRING")
+    }));
+
+    let only_removed_definition = parsed
+        .definitions
+        .iter()
+        .find(|definition| definition.name == "DB_OnlyRemoved");
+    assert!(only_removed_definition.is_none());
+    let removed_definition = parsed
+        .definitions
+        .iter()
+        .find(|definition| definition.name == "DB_Removed")
+        .unwrap();
+    assert_eq!(removed_definition.fields["Reads"], "0");
+    assert_eq!(removed_definition.fields["Writes"], "1");
+    assert_eq!(removed_definition.fields["Parameters"], "CHARACTER");
+    let action_definition = parsed
+        .definitions
+        .iter()
+        .find(|definition| definition.name == "DB_Action")
+        .unwrap();
+    assert_eq!(action_definition.fields["Reads"], "0");
+    assert_eq!(action_definition.fields["Writes"], "1");
+    assert_eq!(action_definition.fields["Parameters"], "CHARACTER");
 }
 
 fn osiris_occurrence<'a>(
@@ -1693,6 +1887,75 @@ fn classifies_explicit_target_function_overloads() {
             !matches!(&reference.target, SymbolTarget::Named { name, .. } if name == selector)
         }));
     }
+}
+
+#[test]
+fn warm_local_cache_preserves_osiris_database_bindings() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("Bindings.txt");
+    fs::write(
+        &source_path,
+        concat!(
+            "Version 1\n",
+            "SubGoalCombiner SGC_AND\n",
+            "INITSECTION\n",
+            "KBSECTION\n",
+            "IF\nDB_Source(_Caster)\nTHEN\nGoalCompleted;\n",
+            "EXITSECTION\n",
+            "ENDEXITSECTION\n",
+        ),
+    )
+    .unwrap();
+    let source = SourceFile {
+        path: source_path,
+        kind: SourceKind::Osiris,
+    };
+    let module = ModuleSpec {
+        name: "Synthetic".into(),
+        root: directory.path().into(),
+        role: ModuleRole::Project,
+    };
+    let cache = CacheStore::new(directory.path().join("cache")).unwrap();
+    let (cold, cold_stats) = cache
+        .build_module(
+            &module,
+            std::slice::from_ref(&source),
+            &SchemaCatalog::default(),
+            "English",
+        )
+        .unwrap();
+    let (warm, warm_stats) = cache
+        .build_module(
+            &module,
+            std::slice::from_ref(&source),
+            &SchemaCatalog::default(),
+            "English",
+        )
+        .unwrap();
+    assert_eq!(cold_stats.misses, 1);
+    assert_eq!(warm_stats.hits, 1);
+    let binding = cold[0]
+        .osiris
+        .as_ref()
+        .unwrap()
+        .variables
+        .iter()
+        .find(|variable| variable.name == "_Caster")
+        .unwrap()
+        .database_binding
+        .clone();
+    assert!(binding.is_some());
+    let warm_binding = warm[0]
+        .osiris
+        .as_ref()
+        .unwrap()
+        .variables
+        .iter()
+        .find(|variable| variable.name == "_Caster")
+        .unwrap()
+        .database_binding
+        .clone();
+    assert_eq!(warm_binding, binding);
 }
 
 #[test]
