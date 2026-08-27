@@ -844,6 +844,17 @@ fn build_workspace(
         &packaged_osiris_catalog,
         &packaged_osiris_facts,
     );
+    if packaged_osiris_facts.relevant_rejected_count() > 0 {
+        eprintln!(
+            "bg3-ls: {} packaged Osiris {} rejected; packaged Osiris evidence is incomplete",
+            packaged_osiris_facts.relevant_rejected_count(),
+            if packaged_osiris_facts.relevant_rejected_count() == 1 {
+                "entry was"
+            } else {
+                "entries were"
+            },
+        );
+    }
     Ok((
         WorkspaceSnapshot::new(
             schema,

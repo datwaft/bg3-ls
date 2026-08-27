@@ -9,14 +9,16 @@ use crate::{
 };
 
 /// Invalidates cached packaged Osiris goal facts when their shape changes.
-pub const OSIRIS_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-osiris-facts-v7";
+pub const OSIRIS_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-osiris-facts-v8";
 
-/// Parses one packaged Osiris goal source into cacheable file facts.
+/// Parses one complete, syntax-valid packaged Osiris goal into cacheable facts.
 ///
 /// The virtual entry path provides the goal name; no filesystem access
-/// happens because the source already carries its decoded text.
+/// happens because the source already carries its decoded text. Loose source
+/// parsing remains recovery-friendly, but package facts must not expose a
+/// partial goal or a standalone callable signature as an indexable record.
 pub fn parse_osiris_goal_source(source: &PackagedThothSource) -> Result<ParsedFile, crate::Error> {
-    crate::parse_source(
+    let parsed = crate::parse_source(
         crate::SourceFile {
             path: PathBuf::from(source.entry()),
             kind: SourceKind::Osiris,
@@ -24,7 +26,18 @@ pub fn parse_osiris_goal_source(source: &PackagedThothSource) -> Result<ParsedFi
         source.text(),
         &SchemaCatalog::default(),
         "English",
-    )
+    )?;
+    if !parsed.issues.is_empty() {
+        return Err(crate::Error::Parse(
+            "the packaged Osiris goal contains syntax errors".into(),
+        ));
+    }
+    if parsed.osiris.is_none() {
+        return Err(crate::Error::Parse(
+            "the packaged Osiris source is not a complete goal".into(),
+        ));
+    }
+    Ok(parsed)
 }
 
 /// One declared packaged Osiris procedure or query.
@@ -124,7 +137,6 @@ impl PackagedOsirisIndex {
         index
     }
 
-    /// Resolves one exact callable without collapsing equal-priority candidates.
     /// Resolves one exact callable, collapsing agreeing same-priority candidates.
     ///
     /// Goals may repeat one procedure rule with the same signature. Such

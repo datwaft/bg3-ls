@@ -1078,6 +1078,7 @@ mod tests {
         assert!(!hit);
         assert_eq!(facts.len(), 1);
         assert_eq!(facts.rejected_count(), 1);
+        assert_eq!(facts.relevant_rejected_count(), 1);
         assert_eq!(calls.get(), 2);
 
         let (cached, hit) = cache
@@ -1088,5 +1089,6 @@ mod tests {
         assert!(hit);
         assert_eq!(cached.len(), 1);
         assert_eq!(cached.rejected_count(), 1);
+        assert_eq!(cached.relevant_rejected_count(), 1);
     }
 }

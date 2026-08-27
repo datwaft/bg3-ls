@@ -466,6 +466,7 @@ impl Coordinator {
                     OSIRIS_FACTS_EXTRACTOR_VERSION,
                     parse_osiris_goal_source,
                 )?;
+                let osiris_relevant_rejected = osiris_facts.relevant_rejected_count();
                 let packaged_osiris =
                     PackagedOsirisIndex::from_catalog_and_facts(&osiris_catalog, &osiris_facts);
                 Ok::<_, Error>((
@@ -476,6 +477,7 @@ impl Coordinator {
                     Arc::new(packaged_osiris),
                     osiris_catalog_hit,
                     osiris_facts_hit,
+                    osiris_relevant_rejected,
                 ))
             })
         };
@@ -640,6 +642,7 @@ impl Coordinator {
                 packaged_osiris,
                 osiris_catalog_hit,
                 osiris_facts_hit,
+                osiris_relevant_rejected,
             ))) => {
                 if catalog_hit {
                     cache_stats.hits += 1;
@@ -661,14 +664,31 @@ impl Coordinator {
                 } else {
                     cache_stats.misses += 1;
                 }
-                if facts.rejected_count() > 0 && !self.is_stopping() {
+                if affected.is_none() && facts.relevant_rejected_count() > 0 && !self.is_stopping()
+                {
                     client
                         .log_message(
                             MessageType::WARNING,
                             format!(
                                 "{} packaged Thoth {} rejected; packaged Thoth evidence is incomplete",
-                                facts.rejected_count(),
-                                if facts.rejected_count() == 1 {
+                                facts.relevant_rejected_count(),
+                                if facts.relevant_rejected_count() == 1 {
+                                    "entry was"
+                                } else {
+                                    "entries were"
+                                },
+                            ),
+                        )
+                        .await;
+                }
+                if affected.is_none() && osiris_relevant_rejected > 0 && !self.is_stopping() {
+                    client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "{} packaged Osiris {} rejected; packaged Osiris evidence is incomplete",
+                                osiris_relevant_rejected,
+                                if osiris_relevant_rejected == 1 {
                                     "entry was"
                                 } else {
                                     "entries were"
