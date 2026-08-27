@@ -2222,6 +2222,97 @@ fn publishes_only_proven_osiris_syntax_diagnostics() {
 }
 
 #[test]
+fn diagnoses_known_osiris_callable_roles_and_negation() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let source = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "HasPassive(11111111-1111-1111-1111-111111111111, \"P\", 1);\n",
+        "KBSECTION\n",
+        "IF\n",
+        "HasPassive(_Actor, \"P\", 1)\n",
+        "AND\n",
+        "Died(_Actor)\n",
+        "AND\n",
+        "AddActionPoints(_Actor, 1)\n",
+        "THEN\n",
+        "HasPassive(_Actor, \"P\", 1);\n",
+        "NOT AddActionPoints(_Actor, 1);\n",
+        "IF\n",
+        "Died(_Actor)\n",
+        "THEN\n",
+        "AddActionPoints(_Actor, 1);\n",
+        "EXITSECTION\n",
+        "NOT HasPassive(11111111-1111-1111-1111-111111111111, \"P\", 1);\n",
+        "ENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, source);
+    let diagnostics = workspace.diagnostics(&path, &overlays, None);
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "osiris-invalid-callable-role")
+            .count(),
+        6
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "osiris-invalid-negation")
+            .count(),
+        2
+    );
+    assert!(diagnostics.iter().all(|diagnostic| {
+        diagnostic.code == "osiris-invalid-callable-role"
+            || diagnostic.code == "osiris-invalid-negation"
+    }));
+}
+
+#[test]
+fn keeps_unknown_osiris_callable_roles_silent() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let source = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "QRY_Unknown(11111111-1111-1111-1111-111111111111);\n",
+        "KBSECTION\n",
+        "IF\n",
+        "QRY_Unknown(_Actor)\n",
+        "AND\n",
+        "NOT QRY_Unknown(_Actor)\n",
+        "THEN\n",
+        "NOT PROC_Unknown(_Actor);\n",
+        "PROC\n",
+        "PROC_Unknown(_Actor)\n",
+        "AND\n",
+        "UnknownCondition(_Actor)\n",
+        "THEN\n",
+        "UnknownAction(_Actor);\n",
+        "QRY\n",
+        "QRY_Unknown(_Actor)\n",
+        "AND\n",
+        "UnknownCondition(_Actor)\n",
+        "THEN\n",
+        "DB_NOOP(1);\n",
+        "EXITSECTION\n",
+        "NOT DB_Unknown(11111111-1111-1111-1111-111111111111);\n",
+        "ENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, source);
+    let diagnostics = workspace.diagnostics(&path, &overlays, None);
+
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn diagnoses_proven_osiris_database_alias_conflicts() {
     let (workspace, _) = fixture_workspace(200);
     let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
