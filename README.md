@@ -596,11 +596,12 @@ arguments, so a specific `CHARACTER` value remains valid for an engine
 parameter that accepts generic `GUIDSTRING`.
 
 Rule-local Osiris variables provide definition, reference, and hover navigation
-when their bindings are proven by a rule head or a positive user-database
-condition. Hover shows an exact type only when a cast or a curated rule-head
-signature proves it. Unknown callable directions, negated conditions, and
-uncertain control flow remain silent; the server does not guess which call
-arguments bind or assign a variable.
+when a rule head, positive user-database condition, or generated query
+`[out]` parameter proves their binding. Bindings and types flow forward through
+conditions in source order: a later database or query output does not resolve
+an earlier use, and an already-bound output acts as a filter. Explicit casts
+apply to their source occurrence. Unknown callable directions, negated
+conditions, and action arguments remain silent.
 
 Engine Osiris callables use the checked-in, generated contract catalog for
 signatures, parameter directions, and parameter types. Hover and signature

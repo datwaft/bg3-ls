@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use quick_xml::Reader;
@@ -18,13 +18,13 @@ use crate::domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseBinding,
     OsirisDatabaseOccurrence, OsirisEvidenceOrigin, OsirisFile, OsirisTypeEvidence,
-    OsirisVariableFact, ParsedFile, Position, Reference, SourceFile, SourceIssue, SourceKind,
-    SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment, ThothBinaryOperator, ThothCall,
-    ThothControlFlowFact, ThothDeclaration, ThothDeclarationOwner, ThothExpression,
-    ThothExpressionFact, ThothExpressionKind, ThothFile, ThothIfBranch, ThothIfBranchKind,
-    ThothLexicalScope, ThothLiteralKind, ThothMemberAccess, ThothMemberAccessKind,
-    ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId, ThothStatementId,
-    ThothUnaryOperator,
+    OsirisVariableFact, OsirisVariableOccurrence, ParsedFile, Position, Reference, SourceFile,
+    SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment,
+    ThothBinaryOperator, ThothCall, ThothControlFlowFact, ThothDeclaration, ThothDeclarationOwner,
+    ThothExpression, ThothExpressionFact, ThothExpressionKind, ThothFile, ThothIfBranch,
+    ThothIfBranchKind, ThothLexicalScope, ThothLiteralKind, ThothMemberAccess,
+    ThothMemberAccessKind, ThothMemberSegment, ThothParameter, ThothReturn, ThothScopeId,
+    ThothStatementId, ThothUnaryOperator,
 };
 use crate::localization::valid_handle;
 use crate::osiris_catalog::{
@@ -1702,7 +1702,6 @@ fn parse_osiris_rule(
     occurrences: &mut Vec<OsirisDatabaseOccurrence>,
     variables: &mut Vec<OsirisVariableFact>,
 ) -> Result<(), Error> {
-    let mut variable_types = osiris_rule_variable_types(rule, text)?;
     let Some(head) = field(rule, "head") else {
         return Ok(());
     };
@@ -1720,16 +1719,22 @@ fn parse_osiris_rule(
     let head_binds_variables = kind != "IF";
     let contract_inference =
         osiris_rule_contract_types(rule, text, &name, arguments, kind, OSIRIS_CONTRACTS)?;
-    for (variable, evidence) in contract_inference.types {
-        let Some(evidence) = evidence else {
-            continue;
-        };
-        variable_types.entry(variable).or_insert(evidence);
-    }
     let known_engine_event = osiris_event_contract(OSIRIS_CONTRACTS, &name, arity).is_some();
+    let variable_analysis = collect_osiris_variable_analysis(
+        rule,
+        text,
+        head_binds_variables || known_engine_event,
+        &contract_inference.query_output_ranges,
+        &contract_inference.database_bindings,
+        &contract_inference.contract_types,
+    )?;
     match kind {
         "PROC" | "QRY" => {
-            let parameters = osiris_parameter_labels(arguments, text, &variable_types)?;
+            // The declaration label may use an unambiguous cast in the body,
+            // but this rule-wide lookup is intentionally isolated from the
+            // occurrence-level evidence used by DB arguments.
+            let parameter_types = osiris_variable_types_in_node(rule, text)?;
+            let parameters = osiris_parameter_labels(arguments, text, &parameter_types)?;
             definitions.push(Definition {
                 kind: if kind == "PROC" {
                     OSIRIS_PROCEDURE_KIND.into()
@@ -1755,20 +1760,13 @@ fn parse_osiris_rule(
             head,
             text,
             OsirisCallRole::Read,
-            &variable_types,
+            &variable_analysis.occurrence_types,
             references,
             occurrences,
         )?,
     }
 
-    variables.extend(collect_osiris_variable_facts(
-        rule,
-        text,
-        &variable_types,
-        head_binds_variables || known_engine_event,
-        &contract_inference.query_output_ranges,
-        &contract_inference.database_bindings,
-    )?);
+    variables.extend(variable_analysis.facts);
 
     let mut cursor = rule.walk();
     for child in rule.named_children(&mut cursor) {
@@ -1779,7 +1777,7 @@ fn parse_osiris_rule(
                         call,
                         text,
                         OsirisCallRole::Read,
-                        &variable_types,
+                        &variable_analysis.occurrence_types,
                         references,
                         occurrences,
                     )?;
@@ -1792,7 +1790,7 @@ fn parse_osiris_rule(
                         call,
                         text,
                         role,
-                        &variable_types,
+                        &variable_analysis.occurrence_types,
                         references,
                         occurrences,
                     )?;
@@ -1823,53 +1821,283 @@ fn osiris_statement_role(
     })
 }
 
-/// Groups source-ordered local variables by name within one rule.
+/// The source-ordered variable facts and per-occurrence type observations for
+/// one Osiris rule.
+struct OsirisVariableAnalysis {
+    facts: Vec<OsirisVariableFact>,
+    occurrence_types: HashMap<TextRange, OsirisTypeEvidence>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum OsirisUnitBindingKind {
+    None,
+    All,
+    Database,
+    Query,
+}
+
+#[derive(Clone)]
+struct OsirisVariableOccurrenceState {
+    binding: Option<(TextRange, Option<OsirisDatabaseBinding>)>,
+    evidence: Option<OsirisTypeEvidence>,
+}
+
+struct OsirisVariableUnitContext<'a> {
+    producer_ranges: &'a HashSet<TextRange>,
+    query_output_ranges: &'a HashSet<TextRange>,
+    database_bindings: &'a HashMap<TextRange, OsirisDatabaseBinding>,
+    contract_types: &'a HashMap<TextRange, OsirisTypeEvidence>,
+    text: &'a str,
+}
+
+/// Groups source-ordered local variables by name within one rule while
+/// retaining the producer visible at each occurrence.
 ///
 /// Osiris does not declare variables separately. A head variable is an
 /// incoming trigger or subroutine parameter, and a variable first seen in a
 /// positive DB condition is assigned by that database match. Other first
 /// uses are retained as occurrences but do not receive a proven binding.
-fn collect_osiris_variable_facts(
+fn collect_osiris_variable_analysis(
     rule: Node<'_>,
     text: &str,
-    variable_types: &HashMap<String, OsirisTypeEvidence>,
     head_binds_variables: bool,
     query_output_ranges: &[TextRange],
     database_bindings: &[(TextRange, OsirisDatabaseBinding)],
-) -> Result<Vec<OsirisVariableFact>, Error> {
+    contract_types: &HashMap<TextRange, OsirisTypeEvidence>,
+) -> Result<OsirisVariableAnalysis, Error> {
+    let query_output_ranges = query_output_ranges.iter().copied().collect::<HashSet<_>>();
+    let database_bindings = database_bindings.iter().cloned().collect::<HashMap<_, _>>();
     let head = field(rule, "head");
-    let mut database_condition_arguments = Vec::new();
-    if !head_binds_variables
-        && head
-            .and_then(|head| field(head, "name"))
+    let mut current_bindings = HashMap::<String, (TextRange, Option<OsirisDatabaseBinding>)>::new();
+    let mut current_types = HashMap::<String, Option<OsirisTypeEvidence>>::new();
+    let mut occurrence_states = HashMap::<TextRange, OsirisVariableOccurrenceState>::new();
+
+    // A head establishes its arguments before any condition runs. Receivers
+    // are deliberately absent from the argument range set: they are inputs.
+    if let Some(head) = head {
+        let head_name = field(head, "name")
             .and_then(|name| name.utf8_text(text.as_bytes()).ok())
-            .is_some_and(|name| name.starts_with("DB_"))
-        && let Some(arguments) = head.and_then(|head| field(head, "arguments"))
-    {
-        database_condition_arguments.push(arguments);
-    }
-    let mut cursor = rule.walk();
-    for child in rule.named_children(&mut cursor) {
-        if child.kind() != "condition" || field(child, "negation").is_some() {
-            continue;
-        }
-        let Some(call) = direct_child(child, "call_expression") else {
-            continue;
+            .unwrap_or_default();
+        let head_kind = if head_binds_variables {
+            OsirisUnitBindingKind::All
+        } else if head_name.starts_with("DB_") {
+            OsirisUnitBindingKind::Database
+        } else {
+            OsirisUnitBindingKind::None
         };
-        let Some(name) = field(call, "name") else {
-            continue;
-        };
-        if name
-            .utf8_text(text.as_bytes())
-            .is_ok_and(|name| name.starts_with("DB_"))
-            && let Some(arguments) = field(call, "arguments")
-        {
-            database_condition_arguments.push(arguments);
-        }
+        let producer_ranges = field(head, "arguments")
+            .map(local_variable_nodes)
+            .unwrap_or_default()
+            .into_iter()
+            .map(node_range)
+            .collect::<HashSet<_>>();
+        process_osiris_variable_unit(
+            local_variable_nodes(head),
+            head_kind,
+            &OsirisVariableUnitContext {
+                producer_ranges: &producer_ranges,
+                query_output_ranges: &query_output_ranges,
+                database_bindings: &database_bindings,
+                contract_types,
+                text,
+            },
+            &mut current_bindings,
+            &mut current_types,
+            &mut occurrence_states,
+        )?;
     }
 
+    // Conditions consume one result set and produce the next one. In
+    // particular, a query output is not visible to another argument in that
+    // same call; all new bindings merge only after the unit is processed.
+    let mut cursor = rule.walk();
+    for child in rule.named_children(&mut cursor) {
+        if head.is_some_and(|head| node_range(head) == node_range(child)) {
+            continue;
+        }
+        let unit_kind = if child.kind() == "condition" {
+            if field(child, "negation").is_some() {
+                OsirisUnitBindingKind::None
+            } else if let Some(call) = direct_child(child, "call_expression") {
+                let name = field(call, "name")
+                    .map(|name| name.utf8_text(text.as_bytes()))
+                    .transpose()?;
+                if name.is_some_and(|name| name.starts_with("DB_")) {
+                    OsirisUnitBindingKind::Database
+                } else if local_variable_nodes(child)
+                    .iter()
+                    .any(|variable| query_output_ranges.contains(&node_range(*variable)))
+                {
+                    OsirisUnitBindingKind::Query
+                } else {
+                    OsirisUnitBindingKind::None
+                }
+            } else {
+                OsirisUnitBindingKind::None
+            }
+        } else {
+            OsirisUnitBindingKind::None
+        };
+        let producer_ranges = if unit_kind == OsirisUnitBindingKind::Database {
+            direct_child(child, "call_expression")
+                .and_then(|call| field(call, "arguments"))
+                .map(local_variable_nodes)
+                .unwrap_or_default()
+                .into_iter()
+                .map(node_range)
+                .collect::<HashSet<_>>()
+        } else {
+            HashSet::new()
+        };
+        process_osiris_variable_unit(
+            local_variable_nodes(child),
+            unit_kind,
+            &OsirisVariableUnitContext {
+                producer_ranges: &producer_ranges,
+                query_output_ranges: &query_output_ranges,
+                database_bindings: &database_bindings,
+                contract_types,
+                text,
+            },
+            &mut current_bindings,
+            &mut current_types,
+            &mut occurrence_states,
+        )?;
+    }
+
+    let mut variables = local_variable_nodes(rule);
+    variables.sort_by_key(|node| node.start_byte());
+    let mut occurrence_types = HashMap::new();
+    let mut facts = Vec::new();
+    for variable in variables {
+        let name = variable.utf8_text(text.as_bytes())?.to_owned();
+        let range = node_range(variable);
+        let state = occurrence_states
+            .entry(range)
+            .or_insert_with(|| OsirisVariableOccurrenceState {
+                binding: None,
+                evidence: osiris_variable_cast_evidence(variable, text).ok().flatten(),
+            })
+            .clone();
+        if let Some(evidence) = state.evidence.clone() {
+            occurrence_types.insert(range, evidence);
+        }
+        let occurrence_fact = OsirisVariableOccurrence {
+            range,
+            binding_range: state.binding.as_ref().map(|(range, _)| *range),
+            database_binding: state.binding.and_then(|(_, binding)| binding),
+            evidence: state.evidence,
+        };
+        if let Some(fact) = facts
+            .iter_mut()
+            .find(|fact: &&mut OsirisVariableFact| fact.name == name)
+        {
+            fact.occurrences.push(range);
+            if fact.binding_range.is_none() {
+                fact.binding_range = occurrence_fact.binding_range;
+                fact.database_binding = occurrence_fact.database_binding.clone();
+            }
+            if fact.evidence.is_none() {
+                fact.evidence = occurrence_fact.evidence.clone();
+            }
+            fact.occurrence_facts.push(occurrence_fact);
+        } else {
+            facts.push(OsirisVariableFact {
+                rule_range: node_range(rule),
+                name: name.clone(),
+                occurrences: vec![range],
+                binding_range: occurrence_fact.binding_range,
+                database_binding: occurrence_fact.database_binding.clone(),
+                evidence: occurrence_fact.evidence.clone(),
+                occurrence_facts: vec![occurrence_fact],
+            });
+        }
+    }
+    Ok(OsirisVariableAnalysis {
+        facts,
+        occurrence_types,
+    })
+}
+
+fn process_osiris_variable_unit(
+    mut variables: Vec<Node<'_>>,
+    binding_kind: OsirisUnitBindingKind,
+    context: &OsirisVariableUnitContext<'_>,
+    current_bindings: &mut HashMap<String, (TextRange, Option<OsirisDatabaseBinding>)>,
+    current_types: &mut HashMap<String, Option<OsirisTypeEvidence>>,
+    occurrence_states: &mut HashMap<TextRange, OsirisVariableOccurrenceState>,
+) -> Result<(), Error> {
+    variables.sort_by_key(|node| node.start_byte());
+    let previous_bindings = current_bindings.clone();
+    let previous_types = current_types.clone();
+    let repeats_share_producer = matches!(
+        binding_kind,
+        OsirisUnitBindingKind::All | OsirisUnitBindingKind::Database
+    );
+    let mut new_bindings = HashMap::<String, (TextRange, Option<OsirisDatabaseBinding>)>::new();
+    let mut type_updates = Vec::new();
+
+    for variable in variables {
+        let name = variable.utf8_text(context.text.as_bytes())?.to_owned();
+        let range = node_range(variable);
+        let was_bound = previous_bindings.contains_key(&name);
+        let is_producer = match binding_kind {
+            OsirisUnitBindingKind::None => false,
+            OsirisUnitBindingKind::All | OsirisUnitBindingKind::Database => {
+                context.producer_ranges.contains(&range)
+            }
+            OsirisUnitBindingKind::Query => context.query_output_ranges.contains(&range),
+        } && !was_bound;
+        let database_binding = context.database_bindings.get(&range).cloned();
+        let binding = previous_bindings.get(&name).cloned().or_else(|| {
+            if is_producer {
+                new_bindings
+                    .get(&name)
+                    .cloned()
+                    .or(Some((range, database_binding.clone())))
+            } else if repeats_share_producer {
+                new_bindings.get(&name).cloned()
+            } else {
+                None
+            }
+        });
+        if is_producer {
+            new_bindings
+                .entry(name.clone())
+                .or_insert_with(|| (range, database_binding));
+        }
+
+        let explicit = osiris_variable_cast_evidence(variable, context.text)?;
+        // A query output that was already bound before this condition is a
+        // filter. Its catalog type cannot overwrite the existing value type.
+        let contract_type = if context.query_output_ranges.contains(&range) && !is_producer {
+            None
+        } else {
+            context.contract_types.get(&range).cloned()
+        };
+        let evidence = explicit.clone().or(contract_type.clone()).or_else(|| {
+            previous_types
+                .get(&name)
+                .and_then(|evidence| evidence.clone())
+        });
+        if let Some(type_evidence) = explicit.or(contract_type) {
+            type_updates.push((name, type_evidence));
+        }
+        occurrence_states.insert(range, OsirisVariableOccurrenceState { binding, evidence });
+    }
+
+    for (name, binding) in new_bindings {
+        current_bindings.entry(name).or_insert(binding);
+    }
+    for (name, evidence) in type_updates {
+        update_current_type(current_types, &name, Some(evidence));
+    }
+    Ok(())
+}
+
+fn local_variable_nodes(node: Node<'_>) -> Vec<Node<'_>> {
     let mut variables = Vec::new();
-    let mut pending = vec![rule];
+    let mut pending = vec![node];
     while let Some(node) = pending.pop() {
         if node.kind() == "local_variable" {
             variables.push(node);
@@ -1878,46 +2106,49 @@ fn collect_osiris_variable_facts(
         pending.extend(node.named_children(&mut cursor));
     }
     variables.sort_by_key(|node| node.start_byte());
-
-    let mut facts = Vec::new();
-    for variable in variables {
-        let name = variable.utf8_text(text.as_bytes())?.to_owned();
-        let range = node_range(variable);
-        let database_binding = database_bindings
-            .iter()
-            .find(|(binding_range, _)| *binding_range == range)
-            .map(|(_, binding)| binding.clone());
-        let binding_candidate = (head_binds_variables
-            && head.is_some_and(|head| contains_node(head, variable)))
-            || database_condition_arguments
-                .iter()
-                .any(|arguments| contains_node(*arguments, variable))
-            || query_output_ranges.contains(&range);
-        if let Some(fact) = facts
-            .iter_mut()
-            .find(|fact: &&mut OsirisVariableFact| fact.name == name)
-        {
-            fact.occurrences.push(range);
-            if binding_candidate && fact.binding_range.is_none() {
-                fact.binding_range = Some(range);
-                fact.database_binding = database_binding;
-            }
-        } else {
-            facts.push(OsirisVariableFact {
-                rule_range: node_range(rule),
-                name: name.clone(),
-                occurrences: vec![range],
-                binding_range: binding_candidate.then_some(range),
-                database_binding: binding_candidate.then_some(database_binding).flatten(),
-                evidence: variable_types.get(&name).cloned(),
-            });
-        }
-    }
-    Ok(facts)
+    variables
 }
 
-fn contains_node(container: Node<'_>, node: Node<'_>) -> bool {
-    container.start_byte() <= node.start_byte() && node.end_byte() <= container.end_byte()
+fn osiris_variable_cast_evidence(
+    variable: Node<'_>,
+    text: &str,
+) -> Result<Option<OsirisTypeEvidence>, Error> {
+    let Some(parent) = variable.parent() else {
+        return Ok(None);
+    };
+    if parent.kind() != "typed_variable" {
+        return Ok(None);
+    }
+    let Some(cast) = field(parent, "cast") else {
+        return Ok(None);
+    };
+    let Some(type_node) = field(cast, "type") else {
+        return Ok(None);
+    };
+    Ok(Some(OsirisTypeEvidence {
+        type_name: type_node.utf8_text(text.as_bytes())?.to_owned(),
+        source_range: node_range(type_node),
+        origin: OsirisEvidenceOrigin::Explicit,
+    }))
+}
+
+fn update_current_type(
+    current_types: &mut HashMap<String, Option<OsirisTypeEvidence>>,
+    name: &str,
+    evidence: Option<OsirisTypeEvidence>,
+) {
+    current_types
+        .entry(name.to_owned())
+        .and_modify(|current| {
+            if current
+                .as_ref()
+                .zip(evidence.as_ref())
+                .is_some_and(|(current, evidence)| current.type_name != evidence.type_name)
+            {
+                *current = None;
+            }
+        })
+        .or_insert(evidence);
 }
 
 /// Adds one call reference and retains structured evidence for user databases.
@@ -1925,7 +2156,7 @@ fn collect_osiris_call(
     call: Node<'_>,
     text: &str,
     role: OsirisCallRole,
-    variable_types: &HashMap<String, OsirisTypeEvidence>,
+    occurrence_types: &HashMap<TextRange, OsirisTypeEvidence>,
     references: &mut Vec<Reference>,
     occurrences: &mut Vec<OsirisDatabaseOccurrence>,
 ) -> Result<(), Error> {
@@ -1967,7 +2198,7 @@ fn collect_osiris_call(
     for argument in arguments_node.named_children(&mut cursor) {
         arguments.push(OsirisArgument {
             range: node_range(argument),
-            evidence: osiris_argument_evidence(argument, text, variable_types)?,
+            evidence: osiris_argument_occurrence_evidence(argument, text, occurrence_types)?,
         });
     }
     occurrences.push(OsirisDatabaseOccurrence {
@@ -2092,12 +2323,12 @@ fn osiris_parameter_labels(
 }
 
 /// Collects unambiguous explicit casts for variables inside one rule.
-fn osiris_rule_variable_types(
-    rule: Node<'_>,
+fn osiris_variable_types_in_node(
+    node: Node<'_>,
     text: &str,
 ) -> Result<HashMap<String, OsirisTypeEvidence>, Error> {
     let mut candidates = HashMap::<String, Option<OsirisTypeEvidence>>::new();
-    let mut pending = vec![rule];
+    let mut pending = vec![node];
     while let Some(node) = pending.pop() {
         if node.kind() == "typed_variable"
             && let (Some(cast), Some(value)) = (field(node, "cast"), field(node, "value"))
@@ -2168,6 +2399,42 @@ fn osiris_argument_evidence(
     }))
 }
 
+/// Returns the type observation available at one source occurrence. Unlike
+/// the rule-wide parameter-label map, this cannot inherit a later cast.
+fn osiris_argument_occurrence_evidence(
+    argument: Node<'_>,
+    text: &str,
+    occurrence_types: &HashMap<TextRange, OsirisTypeEvidence>,
+) -> Result<Option<OsirisTypeEvidence>, Error> {
+    if let Some(cast) = field(argument, "cast")
+        && let Some(type_node) = field(cast, "type")
+    {
+        return Ok(Some(OsirisTypeEvidence {
+            type_name: type_node.utf8_text(text.as_bytes())?.to_owned(),
+            source_range: node_range(type_node),
+            origin: OsirisEvidenceOrigin::Explicit,
+        }));
+    }
+    let Some(value) = field(argument, "value") else {
+        return Ok(None);
+    };
+    if value.kind() == "local_variable" {
+        return Ok(occurrence_types.get(&node_range(value)).cloned());
+    }
+    let type_name = match value.kind() {
+        "integer" => "INTEGER",
+        "real" => "REAL",
+        "string_literal" => "STRING",
+        "guid_literal" => "GUIDSTRING",
+        _ => return Ok(None),
+    };
+    Ok(Some(OsirisTypeEvidence {
+        type_name: type_name.into(),
+        source_range: node_range(value),
+        origin: OsirisEvidenceOrigin::Explicit,
+    }))
+}
+
 /// A generated engine contract, or the legacy event-only aliases retained
 /// until the generated catalog is populated.
 #[derive(Clone, Copy)]
@@ -2178,9 +2445,9 @@ enum OsirisContractView<'a> {
 
 /// Contract-derived facts collected while walking one Osiris rule.
 struct OsirisContractInference {
-    types: HashMap<String, Option<OsirisTypeEvidence>>,
     query_output_ranges: Vec<TextRange>,
     database_bindings: Vec<(TextRange, OsirisDatabaseBinding)>,
+    contract_types: HashMap<TextRange, OsirisTypeEvidence>,
 }
 
 fn osiris_contract_view<'a>(
@@ -2220,9 +2487,9 @@ fn osiris_rule_contract_types(
     kind: &str,
     contracts: &[crate::osiris_catalog::OsirisContractSpec],
 ) -> Result<OsirisContractInference, Error> {
-    let mut candidates = HashMap::<String, Option<OsirisTypeEvidence>>::new();
     let mut output_ranges = Vec::new();
     let mut database_bindings = Vec::new();
+    let mut contract_types = HashMap::new();
 
     if kind == "IF" && head_name.starts_with("DB_") {
         let arity = osiris_arity(head_arguments)?;
@@ -2258,8 +2525,8 @@ fn osiris_rule_contract_types(
             head_arguments,
             text,
             false,
-            &mut candidates,
             &mut output_ranges,
+            &mut contract_types,
         )?;
     }
 
@@ -2323,25 +2590,25 @@ fn osiris_rule_contract_types(
             arguments,
             text,
             true,
-            &mut candidates,
             &mut output_ranges,
+            &mut contract_types,
         )?;
     }
 
     Ok(OsirisContractInference {
-        types: candidates,
         query_output_ranges: output_ranges,
         database_bindings,
+        contract_types,
     })
 }
 
 fn add_osiris_contract_arguments(
     contract: OsirisContractView<'_>,
     arguments: Node<'_>,
-    text: &str,
+    _text: &str,
     binds_query_outputs: bool,
-    candidates: &mut HashMap<String, Option<OsirisTypeEvidence>>,
     output_ranges: &mut Vec<TextRange>,
+    contract_types: &mut HashMap<TextRange, OsirisTypeEvidence>,
 ) -> Result<(), Error> {
     let mut cursor = arguments.walk();
     for (index, argument) in arguments.named_children(&mut cursor).enumerate() {
@@ -2370,33 +2637,30 @@ fn add_osiris_contract_arguments(
         {
             continue;
         }
-        if value.kind() != "local_variable" || field(argument, "cast").is_some() {
+        if value.kind() != "local_variable" {
             continue;
         }
-        let name = value.utf8_text(text.as_bytes())?.to_owned();
-        let evidence = OsirisTypeEvidence {
-            type_name: type_name.to_owned(),
-            source_range: node_range(value),
-            origin: OsirisEvidenceOrigin::Engine,
-        };
-        candidates
-            .entry(name)
-            .and_modify(|current| {
-                if current
-                    .as_ref()
-                    .is_some_and(|current| current.type_name != evidence.type_name)
-                {
-                    *current = None;
-                }
-            })
-            .or_insert(Some(evidence));
-        if binds_query_outputs
+        let range = node_range(value);
+        let is_output = binds_query_outputs
             && matches!(
                 direction,
                 Some(OsirisParameterDirection::InOut | OsirisParameterDirection::Out)
-            )
-        {
-            output_ranges.push(node_range(value));
+            );
+        // A cast changes type evidence, not whether a contract [out] value
+        // binds the local. Record the range before skipping derived evidence.
+        if is_output {
+            output_ranges.push(range);
+        }
+        if field(argument, "cast").is_some() {
+            continue;
+        }
+        let evidence = OsirisTypeEvidence {
+            type_name: type_name.to_owned(),
+            source_range: range,
+            origin: OsirisEvidenceOrigin::Engine,
+        };
+        if !binds_query_outputs || is_output {
+            contract_types.insert(range, evidence);
         }
     }
     Ok(())
@@ -3695,21 +3959,16 @@ mod tests {
         let inference =
             osiris_rule_contract_types(rule, text, name, arguments, "IF", OSIRIS_CONTRACTS)
                 .expect("contract evidence");
-        let mut types = osiris_rule_variable_types(rule, text).expect("explicit types");
-        for (name, evidence) in inference.types {
-            if let Some(evidence) = evidence {
-                types.entry(name).or_insert(evidence);
-            }
-        }
-        let facts = collect_osiris_variable_facts(
+        let facts = collect_osiris_variable_analysis(
             rule,
             text,
-            &types,
             true,
             &inference.query_output_ranges,
             &inference.database_bindings,
+            &inference.contract_types,
         )
-        .expect("variable facts");
+        .expect("variable facts")
+        .facts;
         let fact = |name: &str| facts.iter().find(|fact| fact.name == name).expect(name);
 
         assert_eq!(
@@ -3788,21 +4047,16 @@ mod tests {
         let arguments = field(head, "arguments").expect("head arguments");
         let inference = osiris_rule_contract_types(rule, text, name, arguments, "IF", CONTRACTS)
             .expect("contract evidence");
-        let mut types = osiris_rule_variable_types(rule, text).expect("explicit types");
-        for (name, evidence) in inference.types {
-            if let Some(evidence) = evidence {
-                types.entry(name).or_insert(evidence);
-            }
-        }
-        let facts = collect_osiris_variable_facts(
+        let facts = collect_osiris_variable_analysis(
             rule,
             text,
-            &types,
             false,
             &inference.query_output_ranges,
             &inference.database_bindings,
+            &inference.contract_types,
         )
-        .expect("variable facts");
+        .expect("variable facts")
+        .facts;
         let value = facts
             .iter()
             .find(|fact| fact.name == "_Value")
@@ -3814,5 +4068,180 @@ mod tests {
             OsirisEvidenceOrigin::Engine
         );
         assert_eq!(inference.query_output_ranges, vec![value.occurrences[0]]);
+    }
+
+    #[test]
+    fn query_outputs_bind_only_after_their_condition() {
+        static PARAMETERS: &[crate::osiris_catalog::OsirisParameterSpec] = &[
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::In,
+                type_name: "GUIDSTRING",
+                name: "_First",
+            },
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::In,
+                type_name: "GUIDSTRING",
+                name: "_Second",
+            },
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::Out,
+                type_name: "INTEGER",
+                name: "_Result",
+            },
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::In,
+                type_name: "GUIDSTRING",
+                name: "_Fourth",
+            },
+        ];
+        static INOUT_PARAMETERS: &[crate::osiris_catalog::OsirisParameterSpec] = &[
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::In,
+                type_name: "GUIDSTRING",
+                name: "_First",
+            },
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::In,
+                type_name: "GUIDSTRING",
+                name: "_Second",
+            },
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::InOut,
+                type_name: "INTEGER",
+                name: "_Result",
+            },
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::In,
+                type_name: "GUIDSTRING",
+                name: "_Fourth",
+            },
+        ];
+        static MULTI_OUTPUT_PARAMETERS: &[crate::osiris_catalog::OsirisParameterSpec] = &[
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::Out,
+                type_name: "REAL",
+                name: "_X",
+            },
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::Out,
+                type_name: "REAL",
+                name: "_Y",
+            },
+            crate::osiris_catalog::OsirisParameterSpec {
+                direction: OsirisParameterDirection::In,
+                type_name: "GUIDSTRING",
+                name: "_Target",
+            },
+        ];
+        static CONTRACTS: &[crate::osiris_catalog::OsirisContractSpec] = &[
+            crate::osiris_catalog::OsirisContractSpec {
+                kind: OsirisContractKind::Query,
+                name: "GetPositionStyle",
+                parameters: MULTI_OUTPUT_PARAMETERS,
+            },
+            crate::osiris_catalog::OsirisContractSpec {
+                kind: OsirisContractKind::Query,
+                name: "InOutTemplateIsInPartyInventory",
+                parameters: INOUT_PARAMETERS,
+            },
+            crate::osiris_catalog::OsirisContractSpec {
+                kind: OsirisContractKind::Query,
+                name: "TemplateIsInPartyInventory",
+                parameters: PARAMETERS,
+            },
+        ];
+        let text = concat!(
+            "Version 1\n",
+            "SubGoalCombiner SGC_AND\n",
+            "INITSECTION\n",
+            "KBSECTION\n",
+            "IF\n",
+            "UnknownEvent()\n",
+            "AND\n",
+            "TemplateIsInPartyInventory(_X, _X, _X, _X)\n",
+            "AND\n",
+            "InOutTemplateIsInPartyInventory(_Y, _Y, _Y, _Y)\n",
+            "AND\n",
+            "GetPositionStyle(_Z, _Z, _Z)\n",
+            "THEN\n",
+            "DB_Result(_X, _Y, _Z);\n",
+            "EXITSECTION\n",
+            "ENDEXITSECTION\n",
+        );
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_bg3::BG3_OSIRIS_LANGUAGE.into())
+            .expect("Osiris grammar");
+        let tree = parser.parse(text, None).expect("tree");
+        let rule = tree
+            .root_node()
+            .named_children(&mut tree.root_node().walk())
+            .find(|node| node.kind() == "kb_section")
+            .and_then(|section| {
+                section
+                    .named_children(&mut section.walk())
+                    .find(|node| node.kind() == "rule")
+            })
+            .expect("rule");
+        let head = field(rule, "head").expect("head");
+        let name = field(head, "name")
+            .expect("head name")
+            .utf8_text(text.as_bytes())
+            .expect("head name text");
+        let arguments = field(head, "arguments").expect("head arguments");
+        let inference = osiris_rule_contract_types(rule, text, name, arguments, "IF", CONTRACTS)
+            .expect("contract evidence");
+        let facts = collect_osiris_variable_analysis(
+            rule,
+            text,
+            false,
+            &inference.query_output_ranges,
+            &inference.database_bindings,
+            &inference.contract_types,
+        )
+        .expect("variable facts")
+        .facts;
+        for name in ["_X", "_Y"] {
+            let fact = facts.iter().find(|fact| fact.name == name).expect(name);
+            assert_eq!(fact.occurrence_facts.len(), 5);
+            assert_eq!(fact.occurrence_facts[0].binding_range, None);
+            assert_eq!(fact.occurrence_facts[1].binding_range, None);
+            assert_eq!(
+                fact.occurrence_facts[2].binding_range,
+                Some(fact.occurrences[2])
+            );
+            assert_eq!(fact.occurrence_facts[3].binding_range, None);
+            assert_eq!(
+                fact.occurrence_facts[4].binding_range,
+                Some(fact.occurrences[2])
+            );
+            assert_eq!(
+                fact.occurrence_facts[2]
+                    .evidence
+                    .as_ref()
+                    .expect("query output type")
+                    .type_name,
+                "INTEGER"
+            );
+        }
+
+        let multi_output = facts
+            .iter()
+            .find(|fact| fact.name == "_Z")
+            .expect("multi-output variable");
+        assert_eq!(multi_output.occurrence_facts.len(), 4);
+        assert_eq!(
+            multi_output.occurrence_facts[0].binding_range,
+            Some(multi_output.occurrences[0])
+        );
+        assert_eq!(
+            multi_output.occurrence_facts[1].binding_range,
+            Some(multi_output.occurrences[0])
+        );
+        assert_eq!(multi_output.occurrence_facts[2].binding_range, None);
+        assert_eq!(
+            multi_output.occurrence_facts[3].binding_range,
+            Some(multi_output.occurrences[0])
+        );
     }
 }

@@ -1609,6 +1609,271 @@ fn records_only_positive_database_bindings_and_write_types() {
 }
 
 #[test]
+fn preserves_source_order_for_osiris_variable_bindings_and_types() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "UnknownEvent(_Before)\n",
+        "AND\n",
+        "DB_Source(_FromDb)\n",
+        "AND\n",
+        "IntegerSum(1, 2, _Before)\n",
+        "AND\n",
+        "IntegerSum(1, 2, (INTEGER)_TypedOut)\n",
+        "AND\n",
+        "IntegerSum(1, 2, (INTEGER)_FromDb)\n",
+        "THEN\n",
+        "DB_Result(_Before, _FromDb, _TypedOut);\n",
+        "IF\n",
+        "CastedSpell((CHARACTER)_EventCaster, _Spell, \"Type\", \"Element\", 1)\n",
+        "AND\n",
+        "DB_Source(_HeadDb)\n",
+        "THEN\n",
+        "DB_Result(_EventCaster, _HeadDb);\n",
+        "IF\n",
+        "DB_Repeated(_Same, _Same)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Order.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty(), "{:?}", parsed.issues);
+    let variables = &parsed.osiris.as_ref().unwrap().variables;
+
+    let before = variables
+        .iter()
+        .find(|fact| fact.name == "_Before")
+        .unwrap();
+    assert_eq!(before.binding_range, Some(before.occurrences[1]));
+    assert_eq!(before.occurrence_facts.len(), 3);
+    assert_eq!(before.occurrence_facts[0].binding_range, None);
+    assert_eq!(
+        before.occurrence_facts[1].binding_range,
+        Some(before.occurrences[1])
+    );
+    assert_eq!(
+        before.occurrence_facts[2].binding_range,
+        Some(before.occurrences[1])
+    );
+
+    let from_db = variables
+        .iter()
+        .find(|fact| fact.name == "_FromDb")
+        .unwrap();
+    assert_eq!(from_db.binding_range, Some(from_db.occurrences[0]));
+    assert_eq!(
+        from_db.occurrence_facts[1].binding_range,
+        from_db.binding_range
+    );
+    assert_eq!(
+        from_db.occurrence_facts[2].binding_range,
+        from_db.binding_range
+    );
+    assert!(from_db.occurrence_facts[0].database_binding.is_some());
+
+    let typed_out = variables
+        .iter()
+        .find(|fact| fact.name == "_TypedOut")
+        .unwrap();
+    assert_eq!(typed_out.binding_range, Some(typed_out.occurrences[0]));
+    assert_eq!(
+        typed_out.occurrence_facts[0].binding_range,
+        typed_out.binding_range
+    );
+    assert_eq!(
+        typed_out.occurrence_facts[0]
+            .evidence
+            .as_ref()
+            .unwrap()
+            .type_name,
+        "INTEGER"
+    );
+    assert_eq!(
+        typed_out.occurrence_facts[1]
+            .evidence
+            .as_ref()
+            .unwrap()
+            .type_name,
+        "INTEGER"
+    );
+
+    let event_caster = variables
+        .iter()
+        .find(|fact| fact.name == "_EventCaster")
+        .unwrap();
+    assert_eq!(
+        event_caster.binding_range,
+        Some(event_caster.occurrences[0])
+    );
+    assert_eq!(
+        event_caster.occurrence_facts[1].binding_range,
+        event_caster.binding_range
+    );
+    let head_db = variables
+        .iter()
+        .find(|fact| fact.name == "_HeadDb")
+        .unwrap();
+    assert_eq!(head_db.binding_range, Some(head_db.occurrences[0]));
+
+    let same = variables.iter().find(|fact| fact.name == "_Same").unwrap();
+    assert_eq!(same.occurrence_facts.len(), 2);
+    assert_eq!(same.binding_range, Some(same.occurrences[0]));
+    assert_eq!(
+        same.occurrence_facts[1].binding_range,
+        Some(same.occurrences[0])
+    );
+    assert_eq!(
+        same.occurrence_facts[0].database_binding,
+        same.occurrence_facts[1].database_binding
+    );
+}
+
+#[test]
+fn later_cast_does_not_retype_an_earlier_osiris_database_write() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "UnknownEvent(_Value)\n",
+        "THEN\n",
+        "DB_Evidence(_Value);\n",
+        "(GUIDSTRING)_Value.ApplyExample();\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Casts.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty(), "{:?}", parsed.issues);
+    let osiris = parsed.osiris.as_ref().unwrap();
+    let write = osiris_occurrence(&osiris.occurrences, "DB_Evidence");
+    assert!(write.arguments[0].evidence.is_none());
+}
+
+#[test]
+fn preserves_proc_parameter_types_from_body_casts_without_binding_receiver_inputs() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "PROC\n",
+        "BodyProc(_Value)\n",
+        "THEN\n",
+        "HasPassive((CHARACTER)_Value, \"SomePassive\", _Result);\n",
+        "IF\n",
+        "(CHARACTER)_Receiver.CastedSpell(_Caster, \"Spell\", \"Type\", \"Element\", 1)\n",
+        "THEN\n",
+        "DB_Result(_Receiver, _Caster);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Receivers.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty(), "{:?}", parsed.issues);
+
+    let procedure = parsed
+        .definitions
+        .iter()
+        .find(|definition| definition.name == "BodyProc")
+        .unwrap();
+    assert_eq!(
+        procedure.fields.get("Parameters"),
+        Some(&"CHARACTER _Value".to_owned())
+    );
+
+    let receiver = parsed
+        .osiris
+        .as_ref()
+        .unwrap()
+        .variables
+        .iter()
+        .find(|fact| fact.name == "_Receiver")
+        .unwrap();
+    assert_eq!(receiver.binding_range, None);
+    assert_eq!(receiver.occurrence_facts[0].binding_range, None);
+
+    let caster = parsed
+        .osiris
+        .as_ref()
+        .unwrap()
+        .variables
+        .iter()
+        .find(|fact| fact.name == "_Caster")
+        .unwrap();
+    assert_eq!(caster.binding_range, Some(caster.occurrences[0]));
+}
+
+#[test]
+fn already_bound_osiris_query_outputs_remain_filters() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "DB_Source(_Value)\n",
+        "AND\n",
+        "IntegerSum(1, 2, _Value)\n",
+        "THEN\n",
+        "DB_Result(_Value);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Filters.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty(), "{:?}", parsed.issues);
+    let osiris = parsed.osiris.as_ref().unwrap();
+    let value = osiris
+        .variables
+        .iter()
+        .find(|fact| fact.name == "_Value")
+        .unwrap();
+    assert_eq!(value.occurrences.len(), 3);
+    assert_eq!(value.occurrence_facts[1].binding_range, value.binding_range);
+    let result = osiris_occurrence(&osiris.occurrences, "DB_Result");
+    assert!(result.arguments[0].evidence.is_none());
+}
+
+#[test]
 fn excludes_database_removals_from_write_counts_and_types() {
     let text = concat!(
         "Version 1\n",
@@ -1945,6 +2210,17 @@ fn warm_local_cache_preserves_osiris_database_bindings() {
         .database_binding
         .clone();
     assert!(binding.is_some());
+    let occurrence_facts = cold[0]
+        .osiris
+        .as_ref()
+        .unwrap()
+        .variables
+        .iter()
+        .find(|variable| variable.name == "_Caster")
+        .unwrap()
+        .occurrence_facts
+        .clone();
+    assert_eq!(occurrence_facts.len(), 1);
     let warm_binding = warm[0]
         .osiris
         .as_ref()
@@ -1956,6 +2232,18 @@ fn warm_local_cache_preserves_osiris_database_bindings() {
         .database_binding
         .clone();
     assert_eq!(warm_binding, binding);
+    assert_eq!(
+        warm[0]
+            .osiris
+            .as_ref()
+            .unwrap()
+            .variables
+            .iter()
+            .find(|variable| variable.name == "_Caster")
+            .unwrap()
+            .occurrence_facts,
+        occurrence_facts
+    );
 }
 
 #[test]
