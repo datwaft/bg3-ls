@@ -214,10 +214,18 @@ request text. The text does not need controlled-dictionary verification. Keep
 commands, identifiers, paths, diagnostic codes, and protocol method names
 exact.
 
-Wait for required CI checks. Do not merge a pull request with failed checks,
-unresolved conflicts, or known acceptance failures. When the task grants merge
-authority, use a squash merge and delete the remote bookmark. Otherwise, leave
-the pull request ready for review.
+Do not merge a pull request with failed checks, unresolved conflicts, stale
+head SHA, or known acceptance failures. When an authorized maintainer has
+explicit merge authority, that maintainer may merge immediately after full
+local verification of the exact pull-request head, a clean worktree, and a
+record of the verification commands. Do not wait for duplicate pending hosted
+checks when those conditions hold.
+
+This bypass does not apply to changes that affect workflows, dependencies,
+release automation, security, or platform-specific behavior. The workflow PR
+itself must wait for hosted CI. Post-merge CI on `main` remains required.
+When the task grants merge authority, use a squash merge and delete the remote
+bookmark. Otherwise, leave the pull request ready for review.
 
 After a merge:
 
@@ -259,8 +267,11 @@ Use a dedicated release pull request after a multi-PR batch. Use
 6. Confirm that the pinned `tree-sitter-bg3` tag is correct.
 
 After the release pull request merges, create an annotated `vX.Y.Z` tag from
-the merge on `main`. Push the tag and create related GitHub release notes.
-Never tag a pull request commit. Do not reuse or move a published version tag.
+the merge on `main` and push the tag. The release workflow requires an
+annotated `vMAJOR.MINOR.PATCH` tag with no leading zeroes, validates the tag,
+and publishes the release notes and platform archives after its exact-tag
+verification passes. Never tag a pull request commit. Do not reuse or move a
+published version tag.
 
 Release artifacts and `bg3-ls --version` must report the same version. Keep the
 Cargo lockfile in each release commit.
