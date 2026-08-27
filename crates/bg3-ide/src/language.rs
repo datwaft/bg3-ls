@@ -329,12 +329,13 @@ impl WorkspaceSnapshot {
     ) -> Option<SignatureHelp> {
         let (_, file) = self.file(path, overlays)?;
         let text = overlays.get(path)?.text.as_str();
+        if file.source.kind == SourceKind::Osiris {
+            let before = source_prefix(text, position)?;
+            return self.osiris_signature_help(before, overlays);
+        }
         let line = source_line(text, position.line)?;
         let cursor = usize::try_from(position.character).ok()?.min(line.len());
         let before = &line[..cursor];
-        if file.source.kind == SourceKind::Osiris {
-            return self.osiris_signature_help(before, overlays);
-        }
         // A Stats value starts with an unmatched document quote while the user edits it.
         // Remove the data-clause prefix before balancing expression quotes and calls.
         let expression = value_context(before)
@@ -2370,35 +2371,99 @@ fn xml_attribute_start<'a>(element: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
+/// Returns the document prefix ending at an internal UTF-8 position.
+///
+/// Signature help scans from the start of an Osiris document because calls may
+/// span lines.  The public LSP layer converts its negotiated UTF-16 position
+/// to this byte-oriented position before calling the IDE layer.
+fn source_prefix(source: &str, position: Position) -> Option<&str> {
+    let requested_line = usize::try_from(position.line).ok()?;
+    let mut line = 0;
+    let mut line_start = 0;
+    for (index, byte) in source.bytes().enumerate() {
+        if line == requested_line {
+            break;
+        }
+        if byte == b'\n' {
+            line += 1;
+            line_start = index + 1;
+        }
+    }
+    if line != requested_line {
+        return None;
+    }
+    let line_end = source[line_start..]
+        .find('\n')
+        .map_or(source.len(), |offset| line_start + offset);
+    let current_line = &source[line_start..line_end];
+    let requested_column = usize::try_from(position.character)
+        .unwrap_or(usize::MAX)
+        .min(current_line.len());
+    let byte_column = current_line
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(current_line.len()))
+        .take_while(|index| *index <= requested_column)
+        .last()
+        .unwrap_or(0);
+    Some(&source[..line_start + byte_column])
+}
+
 /// Finds the innermost incomplete function call and active argument.
 fn call_context(value: &str) -> Option<CallContext> {
     let bytes = value.as_bytes();
     let mut stack = Vec::<CallParen>::new();
     let mut quote = None;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    let mut previous_identifier = None;
     let mut cursor = 0;
     while cursor < bytes.len() {
         let byte = bytes[cursor];
-        if let Some(active) = quote {
-            if byte == active && bytes.get(cursor.wrapping_sub(1)) != Some(&b'\\') {
+        if line_comment {
+            if byte == b'\n' {
+                line_comment = false;
+            }
+            cursor += 1;
+            continue;
+        }
+        if block_comment {
+            if byte == b'*' && bytes.get(cursor + 1) == Some(&b'/') {
+                block_comment = false;
+                cursor += 2;
+            } else {
+                cursor += 1;
+            }
+            continue;
+        }
+        if let Some((active, escaped)) = quote {
+            if escaped {
+                quote = Some((active, false));
+            } else if byte == b'\\' {
+                quote = Some((active, true));
+            } else if byte == active {
                 quote = None;
             }
             cursor += 1;
             continue;
         }
         match byte {
-            b'\'' | b'"' => quote = Some(byte),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                line_comment = true;
+                cursor += 2;
+                continue;
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                block_comment = true;
+                cursor += 2;
+                continue;
+            }
+            b'\'' | b'"' => {
+                previous_identifier = None;
+                quote = Some((byte, false));
+            }
             b'(' => {
-                let mut end = cursor;
-                while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-                    end -= 1;
-                }
-                let mut start = end;
-                while start > 0
-                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
-                {
-                    start -= 1;
-                }
-                if start < end {
+                if let Some((start, end)) = previous_identifier.take() {
                     stack.push(CallParen::Call {
                         function: value[start..end].to_owned(),
                         argument: 0,
@@ -2412,13 +2477,32 @@ fn call_context(value: &str) -> Option<CallContext> {
                 if let Some(CallParen::Call { argument, .. }) = stack.last_mut() {
                     *argument += 1;
                 }
+                previous_identifier = None;
             }
             b')' => {
                 stack.pop();
+                previous_identifier = None;
             }
-            _ => {}
+            byte if byte.is_ascii_alphanumeric() || byte == b'_' => {
+                let start = cursor;
+                cursor += 1;
+                while cursor < bytes.len()
+                    && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
+                {
+                    cursor += 1;
+                }
+                previous_identifier = Some((start, cursor));
+                continue;
+            }
+            byte if byte.is_ascii_whitespace() => {}
+            _ => {
+                previous_identifier = None;
+            }
         }
         cursor += 1;
+    }
+    if line_comment || block_comment {
+        return None;
     }
     stack.into_iter().rev().find_map(|frame| match frame {
         CallParen::Call {
@@ -2437,17 +2521,41 @@ fn call_context(value: &str) -> Option<CallContext> {
 /// Extracts the first top-level argument from an incomplete call.
 fn first_call_argument(arguments: &str) -> Option<String> {
     let bytes = arguments.as_bytes();
-    let mut depth = 0_u16;
+    let mut depth = 0_usize;
     let mut quote = None;
+    let mut line_comment = false;
+    let mut block_comment = false;
     for (index, byte) in bytes.iter().copied().enumerate() {
-        if let Some(active) = quote {
-            if byte == active && bytes.get(index.wrapping_sub(1)) != Some(&b'\\') {
+        if line_comment {
+            if byte == b'\n' {
+                line_comment = false;
+            }
+            continue;
+        }
+        if block_comment {
+            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                block_comment = false;
+            }
+            continue;
+        }
+        if let Some((active, escaped)) = quote {
+            if escaped {
+                quote = Some((active, false));
+            } else if byte == b'\\' {
+                quote = Some((active, true));
+            } else if byte == active {
                 quote = None;
             }
             continue;
         }
         match byte {
-            b'\'' | b'"' => quote = Some(byte),
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                line_comment = true;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                block_comment = true;
+            }
+            b'\'' | b'"' => quote = Some((byte, false)),
             b'(' => depth += 1,
             b')' if depth > 0 => depth -= 1,
             b',' | b')' if depth == 0 => {
@@ -2739,4 +2847,82 @@ fn is_functor_statement_head(head: &str) -> bool {
     head[tail_start..]
         .chars()
         .all(|character| character.is_ascii_whitespace())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{call_context, source_prefix};
+    use bg3_index::Position;
+
+    #[test]
+    fn call_context_tracks_multiline_arguments_and_lexical_noise() {
+        let value = concat!(
+            "UsingSpell(\n",
+            "    /* FakeCall(\"ignored, comma\") */ (CHARACTER)_Caster,\n",
+            "    \"Target, (not a call)\" /* comma, and FakeCall(1, 2) */,\n",
+        );
+        let context = call_context(value).expect("open call");
+        assert_eq!(context.function, "UsingSpell");
+        assert_eq!(context.argument, 2);
+    }
+
+    #[test]
+    fn call_context_does_not_offer_help_inside_comments() {
+        assert!(call_context("UsingSpell( // FakeCall(1, 2)").is_none());
+        assert!(call_context("UsingSpell(/* FakeCall(1, 2)").is_none());
+    }
+
+    #[test]
+    fn call_context_skips_comments_between_name_and_parenthesis() {
+        for value in [
+            "UsingSpell /* block comment */ (",
+            "UsingSpell // line comment\n(",
+        ] {
+            let context = call_context(value).expect("call after comment");
+            assert_eq!(context.function, "UsingSpell");
+            assert_eq!(context.argument, 0);
+        }
+    }
+
+    #[test]
+    fn call_context_ignores_escaped_quotes_and_nested_groups() {
+        let value = "UsingSpell(((CHARACTER)_Caster), \"Target\\\"Name, (not a call)\"";
+        let context = call_context(value).expect("open call");
+        assert!(matches!(
+            context,
+            super::CallContext {
+                function,
+                argument: 1,
+                ..
+            } if function == "UsingSpell"
+        ));
+
+        let context = call_context("UsingSpell(Inner(1, 2), ").expect("outer call");
+        assert!(matches!(
+            context,
+            super::CallContext {
+                function,
+                argument: 1,
+                ..
+            } if function == "UsingSpell"
+        ));
+    }
+
+    #[test]
+    fn source_prefix_preserves_document_context_at_utf8_position() {
+        let source = "prefix 😄\nUsingSpell(\n  _Caster,\n";
+        let prefix = source_prefix(
+            source,
+            Position {
+                line: 2,
+                character: 10,
+            },
+        )
+        .expect("line prefix");
+        assert_eq!(prefix, "prefix 😄\nUsingSpell(\n  _Caster,");
+        assert!(matches!(
+            call_context(prefix),
+            Some(super::CallContext { argument: 1, .. })
+        ));
+    }
 }
