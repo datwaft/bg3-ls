@@ -1784,6 +1784,7 @@ fn preserves_proc_parameter_types_from_body_casts_without_binding_receiver_input
         "AND\n",
         "HasPassive((CHARACTER)_Value, \"SomePassive\", _Result)\n",
         "THEN\n",
+        "GoalCompleted;\n",
         "IF\n",
         "(CHARACTER)_Receiver.CastedSpell(_Caster, \"Spell\", \"Type\", \"Element\", 1)\n",
         "THEN\n",
@@ -2008,6 +2009,64 @@ fn reports_only_osiris_syntax_errors_for_malformed_goals() {
             .iter()
             .all(|issue| issue.code == "osiris-syntax-error")
     );
+}
+
+#[test]
+fn recovers_structurally_complete_osiris_goals_with_syntax_errors() {
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/BrokenRule.txt"),
+            kind: SourceKind::Osiris,
+        },
+        "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nIF\nBroken(\nTHEN\nDB_Seen(1);\nEXITSECTION\nENDEXITSECTION\n",
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert!(!parsed.issues.is_empty());
+    assert!(parsed.osiris.is_some());
+    assert!(
+        parsed.definitions.iter().any(|definition| {
+            definition.kind == "OsirisGoal" && definition.name == "BrokenRule"
+        })
+    );
+}
+
+#[test]
+fn does_not_index_standalone_osiris_signatures_as_goals() {
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Signature.txt"),
+            kind: SourceKind::Osiris,
+        },
+        "Example([in] INTEGER _Value)\n",
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert!(parsed.issues.is_empty(), "{:?}", parsed.issues);
+    assert!(parsed.definitions.is_empty());
+    assert!(parsed.osiris.is_none());
+}
+
+#[test]
+fn does_not_index_recovered_partial_osiris_goals() {
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Incomplete.txt"),
+            kind: SourceKind::Osiris,
+        },
+        "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nIF\nEvent()\nTHEN\nDB_Seen(1);\n",
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert!(!parsed.issues.is_empty());
+    assert!(parsed.definitions.is_empty());
+    assert!(parsed.osiris.is_none());
 }
 
 #[test]
