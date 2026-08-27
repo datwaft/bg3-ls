@@ -389,6 +389,382 @@ fn osiris_database_schema_agrees_for_hover_signature_and_bound_variables() {
     assert!(workspace.diagnostics(&paths[0], &overlays, None).is_empty());
 }
 
+#[test]
+fn propagates_database_types_across_writes_to_a_global_fixpoint() {
+    let root = synthetic_osiris_goal(
+        "DB_Propagation((CHARACTER)CHARACTERGUID_Root_11111111-1111-1111-1111-111111111111);",
+    );
+    let chain = synthetic_osiris_goal_with_kb(
+        "",
+        concat!(
+            "IF\nDB_Propagation(_First)\nTHEN\nDB_PropagationMiddle(_First);\n",
+            "IF\nDB_PropagationMiddle(_Second)\nTHEN\nDB_PropagationTarget(_Second);\n",
+            "IF\nDB_Unrooted(_First)\nTHEN\nDB_UnrootedTarget(_First);\n",
+        ),
+    );
+    let (workspace, paths) = synthetic_osiris_workspace(&[
+        ("TargetModule", "A_Target", ModuleRole::Project, &chain),
+        ("RootModule", "Z_Root", ModuleRole::Dependency, &root),
+    ]);
+
+    let hover = workspace
+        .hover(
+            &paths[0],
+            source_position(&chain, "DB_PropagationTarget"),
+            &OverlaySet::default(),
+        )
+        .expect("propagated target hover");
+    assert!(
+        hover.contains("Signature: `DB_PropagationTarget(CHARACTER)`"),
+        "{hover}"
+    );
+    let middle = workspace
+        .hover(
+            &paths[0],
+            source_position(&chain, "DB_PropagationMiddle"),
+            &OverlaySet::default(),
+        )
+        .expect("propagated middle hover");
+    assert!(
+        middle.contains("Signature: `DB_PropagationMiddle(CHARACTER)`"),
+        "{middle}"
+    );
+    let isolated = workspace
+        .hover(
+            &paths[0],
+            source_position(&chain, "DB_UnrootedTarget"),
+            &OverlaySet::default(),
+        )
+        .expect("isolated target hover");
+    assert!(
+        isolated.contains("Signature: `DB_UnrootedTarget(unknown)`"),
+        "{isolated}"
+    );
+}
+
+#[test]
+fn database_propagation_keeps_unrooted_cycles_unknown_and_retracts_overlays() {
+    let cycle = synthetic_osiris_goal_with_kb(
+        "",
+        concat!(
+            "IF\nDB_CycleA(_A)\nTHEN\nDB_CycleB(_A);\n",
+            "IF\nDB_CycleB(_B)\nTHEN\nDB_CycleA(_B);\n",
+        ),
+    );
+    let root = synthetic_osiris_goal(
+        "DB_CycleA((CHARACTER)CHARACTERGUID_Root_11111111-1111-1111-1111-111111111111);",
+    );
+    let (workspace, paths) = synthetic_osiris_workspace(&[
+        ("CycleModule", "A_Cycle", ModuleRole::Project, &cycle),
+        ("RootModule", "Z_Root", ModuleRole::Dependency, &root),
+    ]);
+    let unknown_cycle = synthetic_osiris_goal_with_kb(
+        "",
+        "IF\nDB_UnrootedA(_A)\nTHEN\nDB_UnrootedB(_A);\nIF\nDB_UnrootedB(_B)\nTHEN\nDB_UnrootedA(_B);\n",
+    );
+    let (unknown_workspace, unknown_paths) = synthetic_osiris_workspace(&[(
+        "CycleModule",
+        "A_Cycle",
+        ModuleRole::Project,
+        &unknown_cycle,
+    )]);
+
+    let cycle_hover = workspace
+        .hover(
+            &paths[0],
+            source_position(&cycle, "DB_CycleB"),
+            &OverlaySet::default(),
+        )
+        .expect("rooted cycle hover");
+    assert!(
+        cycle_hover.contains("Signature: `DB_CycleB(CHARACTER)`"),
+        "{cycle_hover}"
+    );
+    let unknown_hover = unknown_workspace
+        .hover(
+            &unknown_paths[0],
+            source_position(&unknown_cycle, "DB_UnrootedB"),
+            &OverlaySet::default(),
+        )
+        .expect("unrooted cycle hover");
+    assert!(
+        unknown_hover.contains("Signature: `DB_UnrootedB(unknown)`"),
+        "{unknown_hover}"
+    );
+
+    let character = synthetic_osiris_goal(
+        "DB_OverlaySource((CHARACTER)CHARACTERGUID_Character_11111111-1111-1111-1111-111111111111);",
+    );
+    let target = synthetic_osiris_goal_with_kb(
+        "",
+        "IF\nDB_OverlaySource(_Value)\nTHEN\nDB_OverlayTarget(_Value);\n",
+    );
+    let (overlay_workspace, overlay_paths) = synthetic_osiris_workspace(&[
+        ("TargetModule", "A_Target", ModuleRole::Project, &target),
+        ("RootModule", "Z_Root", ModuleRole::Dependency, &character),
+    ]);
+    let guid = synthetic_osiris_goal(
+        "DB_OverlaySource((GUIDSTRING)GUIDSTRING_Guid_22222222-2222-2222-2222-222222222222);",
+    );
+    let overlays =
+        synthetic_osiris_overlay(&overlay_workspace, &overlay_paths[1], "RootModule", &guid);
+    let guid_hover = overlay_workspace
+        .hover(
+            &overlay_paths[0],
+            source_position(&target, "DB_OverlayTarget"),
+            &overlays,
+        )
+        .expect("overlay target hover");
+    assert!(
+        guid_hover.contains("Signature: `DB_OverlayTarget(GUIDSTRING)`"),
+        "{guid_hover}"
+    );
+    let empty = synthetic_osiris_goal("GoalCompleted;");
+    let overlays =
+        synthetic_osiris_overlay(&overlay_workspace, &overlay_paths[1], "RootModule", &empty);
+    let removed_hover = overlay_workspace
+        .hover(
+            &overlay_paths[0],
+            source_position(&target, "DB_OverlayTarget"),
+            &overlays,
+        )
+        .expect("overlay target hover after source removal");
+    assert!(
+        removed_hover.contains("Signature: `DB_OverlayTarget(unknown)`"),
+        "{removed_hover}"
+    );
+
+    let opposing = synthetic_osiris_goal_with_kb(
+        concat!(
+            "DB_OpposingA((CHARACTER)CHARACTERGUID_Character_44444444-4444-4444-4444-444444444444);\n",
+            "DB_OpposingB((GUIDSTRING)GUIDSTRING_Guid_55555555-5555-5555-5555-555555555555);",
+        ),
+        concat!(
+            "IF\nDB_OpposingA(_A)\nTHEN\nDB_OpposingB(_A);\n",
+            "IF\nDB_OpposingB(_B)\nTHEN\nDB_OpposingA(_B);\n",
+            "IF\nDB_OpposingA(_Target)\nTHEN\nDB_OpposingTarget(_Target);\n",
+            "IF\nDB_OpposingTarget(_After)\nTHEN\nDB_OpposingAfter(_After);\n",
+        ),
+    );
+    let (opposing_workspace, opposing_paths) =
+        synthetic_osiris_workspace(&[("OnlyModule", "Opposing", ModuleRole::Project, &opposing)]);
+    let opposing_hover = opposing_workspace
+        .hover(
+            &opposing_paths[0],
+            source_position(&opposing, "DB_OpposingTarget"),
+            &OverlaySet::default(),
+        )
+        .expect("opposing cycle target hover");
+    assert!(
+        opposing_hover.contains("Signature: `DB_OpposingTarget(unknown)`"),
+        "{opposing_hover}"
+    );
+    let opposing_after_hover = opposing_workspace
+        .hover(
+            &opposing_paths[0],
+            source_position(&opposing, "DB_OpposingAfter"),
+            &OverlaySet::default(),
+        )
+        .expect("opposing cycle downstream target hover");
+    assert!(
+        opposing_after_hover.contains("Signature: `DB_OpposingAfter(unknown)`"),
+        "{opposing_after_hover}"
+    );
+}
+
+#[test]
+fn database_propagation_does_not_use_read_only_or_negated_roots() {
+    let source = synthetic_osiris_goal_with_kb(
+        "",
+        concat!(
+            "IF\nDB_ReadOnly((CHARACTER)_Read)\nTHEN\nGoalCompleted;\n",
+            "IF\nDB_ReadOnly(_Value)\nTHEN\nDB_ReadOnlyTarget(_Value);\n",
+            "IF\nUnknownEvent(_Trigger)\nAND\nNOT DB_Negated((CHARACTER)_Negated)\nTHEN\nDB_NegatedTarget(_Negated);\n",
+            "IF\nUnknownActionTrigger(_Unbound)\nTHEN\nDB_UnboundTarget((CHARACTER)_Unbound);\n",
+        ),
+    );
+    let (workspace, paths) =
+        synthetic_osiris_workspace(&[("OnlyModule", "ReadOnly", ModuleRole::Project, &source)]);
+    for database in ["DB_ReadOnlyTarget", "DB_NegatedTarget", "DB_UnboundTarget"] {
+        let hover = workspace
+            .hover(
+                &paths[0],
+                source_position(&source, database),
+                &OverlaySet::default(),
+            )
+            .expect("derived target hover");
+        assert!(
+            hover.contains(&format!("Signature: `{database}(unknown)`")),
+            "{hover}"
+        );
+    }
+}
+
+#[test]
+fn database_propagation_blocks_conflicting_and_ambiguous_sources() {
+    let conflicting = synthetic_osiris_goal_with_kb(
+        concat!(
+            "DB_ConflictSource((CHARACTER)CHARACTERGUID_Character_11111111-1111-1111-1111-111111111111);\n",
+            "DB_ConflictSource((GUIDSTRING)GUIDSTRING_Guid_22222222-2222-2222-2222-222222222222);",
+        ),
+        concat!(
+            "IF\nDB_ConflictSource(_Value)\nTHEN\nDB_ConflictTarget(_Value);\n",
+            "IF\nDB_ConflictSource(_Explicit)\nAND\nUnknownCondition((CHARACTER)_Explicit)\nTHEN\nDB_ConflictExplicitTarget(_Explicit);\n",
+        ),
+    );
+    let (workspace, paths) = synthetic_osiris_workspace(&[(
+        "OnlyModule",
+        "Conflict",
+        ModuleRole::Project,
+        &conflicting,
+    )]);
+    let conflict_hover = workspace
+        .hover(
+            &paths[0],
+            source_position(&conflicting, "DB_ConflictTarget"),
+            &OverlaySet::default(),
+        )
+        .expect("conflicting target hover");
+    assert!(
+        conflict_hover.contains("Signature: `DB_ConflictTarget(unknown)`"),
+        "{conflict_hover}"
+    );
+    let explicit_hover = workspace
+        .hover(
+            &paths[0],
+            source_position(&conflicting, "DB_ConflictExplicitTarget"),
+            &OverlaySet::default(),
+        )
+        .expect("explicitly typed local target hover");
+    assert!(
+        explicit_hover.contains("Signature: `DB_ConflictExplicitTarget(CHARACTER)`"),
+        "{explicit_hover}"
+    );
+
+    let character = synthetic_osiris_goal(
+        "DB_AmbiguousSource((CHARACTER)CHARACTERGUID_Character_33333333-3333-3333-3333-333333333333);",
+    );
+    let guid = synthetic_osiris_goal(
+        "DB_AmbiguousSource((GUIDSTRING)GUIDSTRING_Guid_44444444-4444-4444-4444-444444444444);",
+    );
+    let target = synthetic_osiris_goal_with_kb(
+        "",
+        "IF\nDB_AmbiguousSource(_Value)\nTHEN\nDB_AmbiguousTarget(_Value);\n",
+    );
+    let (workspace, paths) = synthetic_osiris_workspace(&[
+        ("First", "SameGoal", ModuleRole::Dependency, &character),
+        ("Second", "SameGoal", ModuleRole::Project, &guid),
+        ("Target", "Target", ModuleRole::Project, &target),
+    ]);
+    let ambiguous_hover = workspace
+        .hover(
+            &paths[2],
+            source_position(&target, "DB_AmbiguousTarget"),
+            &OverlaySet::default(),
+        )
+        .expect("ambiguous target hover");
+    assert!(
+        ambiguous_hover.contains("Signature: `DB_AmbiguousTarget(unknown)`"),
+        "{ambiguous_hover}"
+    );
+}
+
+#[test]
+fn propagated_database_evidence_keeps_conflict_diagnostics_at_the_later_write() {
+    let target = synthetic_osiris_goal_with_kb(
+        "",
+        "IF\nDB_ProvenSource(_Value)\nTHEN\nDB_ProvenTarget(_Value);\n",
+    );
+    let explicit = synthetic_osiris_goal_with_kb(
+        "",
+        "IF\nUnknownEvent(_Who)\nTHEN\nDB_ProvenTarget((GUIDSTRING)GUIDSTRING_Later_22222222-2222-2222-2222-222222222222);\n",
+    );
+    let root = synthetic_osiris_goal(
+        "DB_ProvenSource((CHARACTER)CHARACTERGUID_Root_11111111-1111-1111-1111-111111111111);",
+    );
+    let (workspace, paths) = synthetic_osiris_workspace(&[
+        ("Target", "A_Target", ModuleRole::Project, &target),
+        ("Explicit", "B_Explicit", ModuleRole::Dependency, &explicit),
+        ("Root", "Z_Root", ModuleRole::Dependency, &root),
+    ]);
+
+    let diagnostics = workspace.diagnostics(&paths[1], &OverlaySet::default(), None);
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code, "osiris-database-alias-mismatch");
+    assert_eq!(
+        diagnostic.message,
+        "Column 1 of `DB_ProvenTarget/1` is established as `CHARACTER`. This argument supplies `GUIDSTRING`. Add an explicit `(CHARACTER)` cast."
+    );
+    let explicit_line = explicit
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("DB_ProvenTarget"))
+        .expect("explicit target write line");
+    assert_eq!(
+        diagnostic.range.start.line,
+        u32::try_from(explicit_line.0).unwrap()
+    );
+    assert_eq!(
+        diagnostic.range.start.character,
+        u32::try_from(explicit_line.1.find("(GUIDSTRING)").unwrap()).unwrap()
+    );
+
+    let target_hover = workspace
+        .hover(
+            &paths[0],
+            source_position(&target, "DB_ProvenTarget"),
+            &OverlaySet::default(),
+        )
+        .expect("propagated target hover");
+    assert!(
+        target_hover.contains("Signature: `DB_ProvenTarget(CHARACTER)`"),
+        "{target_hover}"
+    );
+    let target_line = target
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("DB_ProvenTarget"))
+        .expect("target write line");
+    let target_overlays = synthetic_osiris_overlay(&workspace, &paths[0], "Target", &target);
+    let signature = workspace
+        .signature_help(
+            &paths[0],
+            Position {
+                line: u32::try_from(target_line.0).unwrap(),
+                character: u32::try_from(target_line.1.find(')').unwrap()).unwrap(),
+            },
+            &target_overlays,
+        )
+        .expect("propagated target signature");
+    assert_eq!(signature.label, "DB_ProvenTarget(CHARACTER)");
+}
+
+#[test]
+fn database_propagation_keeps_bound_filters_on_their_local_type() {
+    let source = synthetic_osiris_goal_with_kb(
+        "DB_FilterSource((CHARACTER)CHARACTERGUID_Source_55555555-5555-5555-5555-555555555555);",
+        concat!(
+            "IF\nUsingSpell((GUIDSTRING)_Filter, \"Spell\", \"Type\", \"Element\", 1)\n",
+            "AND\nDB_FilterSource(_Filter)\n",
+            "THEN\nDB_FilterTarget(_Filter);\n",
+        ),
+    );
+    let (workspace, paths) =
+        synthetic_osiris_workspace(&[("OnlyModule", "Filters", ModuleRole::Project, &source)]);
+    let hover = workspace
+        .hover(
+            &paths[0],
+            source_position(&source, "DB_FilterTarget"),
+            &OverlaySet::default(),
+        )
+        .expect("filter target hover");
+    assert!(
+        hover.contains("Signature: `DB_FilterTarget(GUIDSTRING)`"),
+        "{hover}"
+    );
+}
+
 fn source_position(text: &str, needle: &str) -> Position {
     text.lines()
         .enumerate()

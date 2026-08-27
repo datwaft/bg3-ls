@@ -124,8 +124,12 @@ alphabetical Story goal order, independently of module precedence or absolute
 paths. Source occurrence order is preserved within each goal. Duplicate goal
 names are equal-order inputs; incompatible evidence remains ambiguous. Proven
 database reads and removals can contribute compile-time schema evidence, while
-runtime read, write, and removal counts remain separate. Open-file overlays
-replace their disk records during schema construction.
+runtime read, write, and removal counts remain separate. Proven types also flow
+from positive database reads into later writes through rule-local variables and
+a global fixed point, including multi-hop and rooted-cycle cases. Only unique,
+non-conflicting visible writes can root this propagation; missing, conflicting,
+ambiguous, read-only, and negated sources remain unknown. Open-file overlays
+replace their disk records and recompute the propagation closure.
 
 Version 0.27.3 fixes a false `osiris-database-alias-mismatch` diagnostic when a
 database fact is read to match an existing row. Relational reads use the
