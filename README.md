@@ -119,11 +119,18 @@ the generated artifact. The normal language server uses only the checked-in
 catalog; it does not require an installed game or a mod-local
 `story_header.div`. Do not commit installed game files or extracted game data.
 
+Unreleased changes make implicit Osiris database schemas follow global
+alphabetical Story goal order, independently of module precedence or absolute
+paths. Source occurrence order is preserved within each goal. Duplicate goal
+names are equal-order inputs; incompatible evidence remains ambiguous. Proven
+database reads and removals can contribute compile-time schema evidence, while
+runtime read, write, and removal counts remain separate. Open-file overlays
+replace their disk records during schema construction.
+
 Version 0.27.3 fixes a false `osiris-database-alias-mismatch` diagnostic when a
-database fact is read to match an existing row. Database aliases are now
-derived from writes only; relational reads use the established database schema
-without requiring an explicit cast. Existing configuration remains compatible,
-and no migration is required.
+database fact is read to match an existing row. Relational reads use the
+established database schema without requiring an explicit cast. Existing
+configuration remains compatible, and no migration is required.
 
 Version 0.27.2 fixes Osiris signature context when typed casts use grouping
 parentheses, and uses the released `bg3_osiris` grammar contract for generated
@@ -586,9 +593,11 @@ out of scope.
 
 Osiris goals receive the stable `osiris-database-alias-mismatch` error when a
 user database column receives two different aliases across the visible loose
-goals of the workspace. A column established as `CHARACTER` by a cast or an
-engine event signature rejects a later plain `GUIDSTRING` argument, matching
-the story compiler. Uncast variables inherit aliases from the versioned
+goals of the workspace. Schema establishment follows alphabetical goal order
+and source occurrence order within each goal, independently of module
+precedence. A column established as `CHARACTER` by a cast or an engine event
+signature rejects a later plain `GUIDSTRING` argument, matching the story
+compiler. Uncast variables inherit aliases from the versioned
 generated engine contract catalog, which covers installed events, calls, and
 queries; unknown contracts and unknown columns stay silent. The server uses
 callable parameters as type evidence but does not diagnose engine call
