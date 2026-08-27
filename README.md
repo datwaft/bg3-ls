@@ -119,17 +119,14 @@ the generated artifact. The normal language server uses only the checked-in
 catalog; it does not require an installed game or a mod-local
 `story_header.div`. Do not commit installed game files or extracted game data.
 
-Unreleased changes make implicit Osiris database schemas follow global
-alphabetical Story goal order, independently of module precedence or absolute
-paths. Source occurrence order is preserved within each goal. Duplicate goal
-names are equal-order inputs; incompatible evidence remains ambiguous. Proven
-database reads and removals can contribute compile-time schema evidence, while
-runtime read, write, and removal counts remain separate. Proven types also flow
-from positive database reads into later writes through rule-local variables and
-a global fixed point, including multi-hop and rooted-cycle cases. Only unique,
-non-conflicting visible writes can root this propagation; missing, conflicting,
-ambiguous, read-only, and negated sources remain unknown. Open-file overlays
-replace their disk records and recompute the propagation closure.
+Version 0.28.0 adds source-ordered Osiris database schema analysis. Database
+types now use global Story goal order independently from module precedence, and
+unique database types propagate through valid rule-local reads into later
+writes. Hover, signature help, variable types, and diagnostics share the same
+schema and propagation results. Missing, conflicting, ambiguous, or
+overlay-incomplete evidence remains unknown. Open-file overlays replace their
+disk records and recompute the propagation closure. Existing configuration
+remains compatible, and no migration is required.
 
 Version 0.27.3 fixes a false `osiris-database-alias-mismatch` diagnostic when a
 database fact is read to match an existing row. Relational reads use the
