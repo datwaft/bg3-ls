@@ -1280,6 +1280,143 @@ fn database_binding_type_survives_later_engine_input_use() {
 }
 
 #[test]
+fn osiris_variable_hover_and_definition_follow_the_source_ordered_producer() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let source = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "(CHARACTER)_Receiver.Died((CHARACTER)_Writer)\n",
+        "THEN\n",
+        "DB_Source((CHARACTER)_Writer);\n",
+        "IF\n",
+        "UnknownEvent(_Before)\n",
+        "AND\n",
+        "DB_Source(_FromDb)\n",
+        "AND\n",
+        "IntegerSum(1, 2, (INTEGER)_TypedOut)\n",
+        "THEN\n",
+        "DB_Result(_Before, _FromDb, _TypedOut);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, source);
+
+    let before = workspace
+        .hover(&path, source_position_nth(source, "_Before", 0), &overlays)
+        .unwrap();
+    assert!(!before.contains("Type:"), "{before}");
+    assert!(
+        workspace
+            .definition_locations_at(&path, source_position_nth(source, "_Before", 0), &overlays,)
+            .is_empty()
+    );
+
+    let receiver = workspace
+        .hover(
+            &path,
+            source_position_nth(source, "_Receiver", 0),
+            &overlays,
+        )
+        .unwrap();
+    assert!(receiver.contains("Type: `CHARACTER`"), "{receiver}");
+    assert!(
+        workspace
+            .definition_locations_at(
+                &path,
+                source_position_nth(source, "_Receiver", 0),
+                &overlays,
+            )
+            .is_empty()
+    );
+
+    let from_db = workspace
+        .hover(&path, source_position_nth(source, "_FromDb", 0), &overlays)
+        .unwrap();
+    assert!(from_db.contains("Type: `CHARACTER`"), "{from_db}");
+    let from_db_definition = workspace.definition_locations_at(
+        &path,
+        source_position_nth(source, "_FromDb", 1),
+        &overlays,
+    );
+    assert_eq!(from_db_definition.len(), 1);
+    assert_eq!(
+        from_db_definition[0].range,
+        bg3_index::TextRange {
+            start: source_position_nth(source, "_FromDb", 0),
+            end: Position {
+                line: source_position_nth(source, "_FromDb", 0).line,
+                character: source_position_nth(source, "_FromDb", 0).character + 7,
+            },
+        }
+    );
+
+    let typed_out = workspace
+        .hover(
+            &path,
+            source_position_nth(source, "_TypedOut", 0),
+            &overlays,
+        )
+        .unwrap();
+    assert!(typed_out.contains("Type: `INTEGER`"), "{typed_out}");
+    assert_eq!(
+        workspace
+            .definition_locations_at(
+                &path,
+                source_position_nth(source, "_TypedOut", 1),
+                &overlays,
+            )
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn osiris_variable_hover_prefers_an_occurrence_cast_over_database_type() {
+    let (workspace, _) = fixture_workspace(200);
+    let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");
+    let source = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "DB_Conflicting((CHARACTER)_Value)\n",
+        "THEN\n",
+        "DB_Conflicting((GUIDSTRING)_Value);\n",
+        "IF\n",
+        "DB_Missing((CHARACTER)_Missing)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let overlays = overlay(&workspace, &path, source);
+
+    let conflicting = workspace
+        .hover(&path, source_position_nth(source, "_Value", 0), &overlays)
+        .expect("conflicting database variable hover");
+    assert!(conflicting.contains("Type: `CHARACTER`"), "{conflicting}");
+
+    let (missing_line, missing_source) = source
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("DB_Missing"))
+        .unwrap();
+    let missing_position = Position {
+        line: u32::try_from(missing_line).unwrap(),
+        character: u32::try_from(missing_source.rfind("_Missing").unwrap()).unwrap(),
+    };
+    let missing = workspace
+        .hover(&path, missing_position, &overlays)
+        .expect("missing database variable hover");
+    assert!(missing.contains("Type: `CHARACTER`"), "{missing}");
+}
+
+#[test]
 fn supports_source_backed_osiris_navigation_signatures_and_overlays() {
     let (workspace, _) = fixture_workspace(200);
     let path = fixtures().join("project/Mods/MyMod/Story/RawFiles/Goals/MainGoal.txt");

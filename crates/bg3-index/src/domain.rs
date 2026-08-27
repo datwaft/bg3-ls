@@ -144,6 +144,29 @@ pub struct OsirisDatabaseBinding {
     pub column: u16,
 }
 
+/// One source occurrence of a rule-local Osiris variable.
+///
+/// Unlike the grouped [`OsirisVariableFact`], this record preserves the
+/// binding state at the occurrence. A variable can be used before a later DB
+/// or query output binds it, so one rule-wide binding range is not sufficient
+/// for navigation or hover.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OsirisVariableOccurrence {
+    pub range: TextRange,
+    /// The producer visible at this occurrence, including the occurrence that
+    /// established the value. `None` means no producer is proven yet.
+    #[serde(default)]
+    pub binding_range: Option<TextRange>,
+    /// The DB column that supplied the value, when the visible producer is a
+    /// positive DB condition.
+    #[serde(default)]
+    pub database_binding: Option<OsirisDatabaseBinding>,
+    /// Type evidence available at this source position. Evidence from later
+    /// casts is intentionally not copied backwards into earlier occurrences.
+    #[serde(default)]
+    pub evidence: Option<OsirisTypeEvidence>,
+}
+
 /// One rule-local Osiris variable grouped by name.
 ///
 /// The rule range keeps equal variable names in different rules separate.
@@ -159,6 +182,11 @@ pub struct OsirisVariableFact {
     #[serde(default)]
     pub database_binding: Option<OsirisDatabaseBinding>,
     pub evidence: Option<OsirisTypeEvidence>,
+    /// Source-ordered occurrence facts. Empty for caches written before the
+    /// occurrence-level model was introduced; callers must fall back to the
+    /// legacy grouped fields in that case.
+    #[serde(default)]
+    pub occurrence_facts: Vec<OsirisVariableOccurrence>,
 }
 
 /// Osiris-specific facts retained with one cacheable goal record.
