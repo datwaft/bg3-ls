@@ -4,8 +4,8 @@ use std::sync::Arc;
 use bg3_ide::{CompletionKind, OverlayDocument, OverlaySet, WorkspaceSnapshot};
 use bg3_index::{
     ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_FACTS_EXTRACTOR_VERSION, PackagedOsirisIndex,
-    PackagedThothCatalog, PackagedThothSource, Position, SchemaCatalog, SourceFile, SourceKind,
-    parse_osiris_goal_source, parse_packaged_thoth_facts, parse_source,
+    PackagedOsirisResolution, PackagedThothCatalog, PackagedThothSource, Position, SchemaCatalog,
+    SourceFile, SourceKind, parse_osiris_goal_source, parse_packaged_thoth_facts, parse_source,
 };
 
 fn osiris_source(
@@ -26,6 +26,10 @@ fn goal_text(body: &str) -> String {
 
 fn proc_declaration(signature: &str) -> String {
     goal_text(&format!("PROC\n{signature}\nTHEN\nDB_Noop(1);"))
+}
+
+fn query_declaration(signature: &str) -> String {
+    goal_text(&format!("QRY\n{signature}\nTHEN\nDB_Noop(1);"))
 }
 
 fn index(catalog: &PackagedThothCatalog) -> Arc<PackagedOsirisIndex> {
@@ -202,6 +206,68 @@ fn generated_engine_contracts_provide_callable_hover_and_signature_help() {
             .documentation
             .contains("Returns a character's value for the named action resource")
     );
+}
+
+#[test]
+fn legacy_engine_events_remain_completable_when_missing_from_generated_catalog() {
+    let (workspace, caller_path) = workspace_with(None);
+    for name in [
+        "CombatTurnTimedOut",
+        "QuestAcceptReverted",
+        "QuestCloseReverted",
+    ] {
+        let text = format!(
+            "Version 1\nSubGoalCombiner SGC_AND\nINITSECTION\nKBSECTION\nIF\n{name}\nTHEN\nGoalCompleted;\nEXITSECTION\nENDEXITSECTION\n"
+        );
+        let overlays = osiris_overlay(&workspace, &caller_path, &text);
+        let completion = workspace.completion(
+            &caller_path,
+            Position {
+                line: 5,
+                character: u32::try_from(name.len()).expect("name length fits"),
+            },
+            &overlays,
+            false,
+        );
+        let item = completion
+            .items
+            .iter()
+            .find(|item| item.label == name)
+            .unwrap_or_else(|| panic!("missing completion for {name}"));
+        assert_eq!(item.kind, CompletionKind::Function);
+        assert!(
+            item.detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("legacy event catalog")),
+            "{name} detail: {:?}",
+            item.detail
+        );
+    }
+
+    let signature_text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "CombatTurnTimedOut(_Combat)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n"
+    );
+    let overlays = osiris_overlay(&workspace, &caller_path, signature_text);
+    let signature = workspace
+        .signature_help(
+            &caller_path,
+            Position {
+                line: 5,
+                character: u32::try_from("CombatTurnTimedOut(".len()).expect("position fits"),
+            },
+            &overlays,
+        )
+        .expect("legacy event signature help");
+    assert_eq!(signature.label, "CombatTurnTimedOut(GUIDSTRING)");
 }
 
 #[test]
@@ -453,6 +519,121 @@ fn ambiguous_installed_declarations_stay_untyped() {
 }
 
 #[test]
+fn mixed_role_installed_declarations_are_not_placed_by_guessing() {
+    let catalog = Arc::new(
+        PackagedThothCatalog::from_sources([
+            osiris_source(
+                "Shared",
+                &base_entry("Procedure"),
+                "Shared.pak",
+                0,
+                &proc_declaration("RoleMixed((INTEGER)_Value)"),
+            ),
+            osiris_source(
+                "Shared",
+                &base_entry("Query"),
+                "Query.pak",
+                0,
+                &query_declaration("RoleMixed((INTEGER)_Value)"),
+            ),
+        ])
+        .expect("catalog"),
+    );
+    let (workspace, caller_path) = workspace_with(None);
+    let packaged = index(catalog.as_ref());
+    assert!(matches!(
+        packaged.resolve("Shared", "RoleMixed", 1),
+        PackagedOsirisResolution::Ambiguous(_)
+    ));
+    let workspace = workspace.with_packaged_osiris(packaged);
+
+    let head = goal_text("IF\nRoleMixed\nTHEN\nGoalCompleted;");
+    let head_overlays = osiris_overlay(&workspace, &caller_path, &head);
+    let head_completion = workspace.completion(
+        &caller_path,
+        Position {
+            line: 5,
+            character: 9,
+        },
+        &head_overlays,
+        false,
+    );
+    assert!(
+        !head_completion
+            .items
+            .iter()
+            .any(|item| item.label == "RoleMixed")
+    );
+
+    let action = goal_text("IF\nDied(_Who)\nTHEN\nRoleMixed\n");
+    let action_overlays = osiris_overlay(&workspace, &caller_path, &action);
+    let action_completion = workspace.completion(
+        &caller_path,
+        Position {
+            line: 7,
+            character: 9,
+        },
+        &action_overlays,
+        false,
+    );
+    assert!(
+        !action_completion
+            .items
+            .iter()
+            .any(|item| item.label == "RoleMixed")
+    );
+}
+
+#[test]
+fn higher_precedence_invalid_installed_role_masks_lower_and_generated_completion() {
+    let catalog = Arc::new(
+        PackagedThothCatalog::from_sources([
+            osiris_source(
+                "A",
+                &module_base_entry("A", "Lower"),
+                "A.pak",
+                0,
+                &proc_declaration("Died((GUIDSTRING)_Lower)"),
+            ),
+            osiris_source(
+                "B",
+                &module_base_entry("B", "Higher"),
+                "B.pak",
+                0,
+                &query_declaration("Died((GUIDSTRING)_Higher)"),
+            ),
+        ])
+        .expect("catalog"),
+    );
+    let (workspace, caller_path) = workspace_with_base_modules(&["A", "B"], None);
+    let workspace = workspace.with_packaged_osiris(index(catalog.as_ref()));
+    let caller = goal_text("IF\nDied(_Who)\nTHEN\nD");
+    let overlays = osiris_overlay(&workspace, &caller_path, &caller);
+    let line = caller
+        .lines()
+        .position(|line| line == "D")
+        .expect("action prefix line");
+    let completion = workspace.completion(
+        &caller_path,
+        Position {
+            line: u32::try_from(line).expect("line fits"),
+            character: 1,
+        },
+        &overlays,
+        false,
+    );
+    assert!(
+        !completion.items.iter().any(|item| item.label == "Died"),
+        "shadowed labels: {:?}",
+        completion
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn higher_precedence_base_module_masks_lower_ambiguity() {
     let catalog = Arc::new(
         PackagedThothCatalog::from_sources([
@@ -576,6 +757,30 @@ fn overlays_update_loose_declarations_live() {
             .is_some_and(|detail| detail.contains("installed Shared"))
     );
     assert_eq!(item.kind, CompletionKind::Function);
+
+    let lowercase = CALLER.replacen("ProcHeal(_Who, _Much);", "proch", 1);
+    let lowercase_overlays = osiris_overlay(&workspace, &caller_path, &lowercase);
+    let lowercase_completion = workspace.completion(
+        &caller_path,
+        Position {
+            line: 7,
+            character: 5,
+        },
+        &lowercase_overlays,
+        false,
+    );
+    assert!(
+        lowercase_completion
+            .items
+            .iter()
+            .any(|item| item.label == "ProcHeal"),
+        "packaged completion labels: {:?}",
+        lowercase_completion
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>()
+    );
 }
 
 fn source_position(text: &str, needle: &str) -> Position {

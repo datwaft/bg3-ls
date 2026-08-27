@@ -38,7 +38,7 @@ pub use catalog::{
     FunctorPrefixSpec, OsirisSignature, ParameterSpec, context_member, context_members,
     context_properties, context_property, context_side, enum_value, field_documentation,
     field_kind, function_spec, functor_prefix, functor_prefixes, is_lsx_value_field,
-    member_enumeration, osiris_signature,
+    member_enumeration, osiris_legacy_signatures, osiris_signature,
 };
 pub use discovery::{
     discover_module, module_watch_roots, path_is_within, resolve_path, source_kind_for_document,
@@ -64,8 +64,9 @@ pub use localization::{
 };
 pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
 pub use osiris_api::{
-    OSIRIS_FACTS_EXTRACTOR_VERSION, PackagedOsirisCallable, PackagedOsirisCandidate,
-    PackagedOsirisIndex, PackagedOsirisResolution, parse_osiris_goal_source,
+    OSIRIS_FACTS_EXTRACTOR_VERSION, PackagedOsirisCallable, PackagedOsirisCallableRole,
+    PackagedOsirisCandidate, PackagedOsirisIndex, PackagedOsirisResolution,
+    parse_osiris_goal_source,
 };
 pub use osiris_catalog::{
     GENERATED_OSIRIS_CATALOG_GENERATOR_VERSION, OSIRIS_CATALOG_GENERATOR_VERSION,

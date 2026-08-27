@@ -982,14 +982,17 @@ pub fn function_spec(name: &str) -> Option<&'static FunctionSpec> {
 /// evidence.
 pub type OsirisSignature = &'static [&'static str];
 
-/// Curated engine event signatures covering the full installed event set.
+/// Curated engine event signatures covering the legacy event set.
 ///
 /// Transcribed from the machine-generated community reference of the
 /// installed engine API (`Osi.Events.lua`, retrieved 2026-08-25). Primitive
 /// parameter spellings map to Osiris aliases: `integer` to `INTEGER`,
-/// `string` to `STRING`, and `number` to `REAL`. Only rule heads consult this
-/// table, and only to derive evidence that an uncast head-bound variable
 /// would carry.
+/// `string` to `STRING`, and `number` to `REAL`. Every alias is atomic; no
+/// subtype relations exist between aliases. Rule heads use this table to
+/// derive evidence that an uncast head-bound variable would carry. Completion
+/// also uses it for legacy events that are not present in the generated
+/// `story_header.div` catalog.
 const OSIRIS_SIGNATURES: &[(&str, OsirisSignature)] = &[
     ("Activated", &["GUIDSTRING"]),
     (
@@ -1752,6 +1755,12 @@ pub fn osiris_signature(name: &str, arity: u16) -> Option<OsirisSignature> {
         .iter()
         .find(|(candidate, parameters)| *candidate == name && parameters.len() as u16 == arity)
         .map(|(_, parameters)| *parameters)
+}
+
+/// Returns the legacy engine event aliases that complement the generated
+/// `story_header.div` catalog.
+pub fn osiris_legacy_signatures() -> &'static [(&'static str, OsirisSignature)] {
+    OSIRIS_SIGNATURES
 }
 
 /// Returns the typed symbol kind for one known field.

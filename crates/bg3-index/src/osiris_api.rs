@@ -40,6 +40,22 @@ pub fn parse_osiris_goal_source(source: &PackagedThothSource) -> Result<ParsedFi
     Ok(parsed)
 }
 
+/// The callable role that packaged source evidence proves.
+///
+/// A same-name and same-arity disagreement can still prove that every
+/// candidate is a procedure or query. A disagreement between those roles is
+/// intentionally represented as `Unknown`; callers must not place it in a
+/// statement position by guessing one declaration kind.
+#[derive(
+    Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
+pub enum PackagedOsirisCallableRole {
+    Procedure,
+    Query,
+    #[default]
+    Unknown,
+}
+
 /// One declared packaged Osiris procedure or query.
 ///
 /// Parameters keep the authored declaration order. Each entry is the stored
@@ -49,6 +65,11 @@ pub fn parse_osiris_goal_source(source: &PackagedThothSource) -> Result<ParsedFi
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PackagedOsirisCallable {
     pub kind: String,
+    /// The role remains explicit even when parameter declarations are
+    /// ambiguous. `Unknown` means that the candidates cannot be safely
+    /// placed as either a procedure or query.
+    #[serde(default)]
+    pub role: PackagedOsirisCallableRole,
     pub parameters: Vec<String>,
     pub goal: String,
 }
@@ -123,6 +144,7 @@ impl PackagedOsirisIndex {
                 };
                 let callable = PackagedOsirisCallable {
                     kind: definition.kind.clone(),
+                    role: packaged_osiris_callable_role(&definition.kind),
                     parameters: stored_osiris_parameters(definition),
                     goal: osiris.goal.clone(),
                 };
@@ -156,9 +178,10 @@ impl PackagedOsirisIndex {
             .take_while(|candidate| candidate.source.priority() == first.source.priority())
             .count();
         let top = &candidates[..top_count];
-        let agrees = top
-            .iter()
-            .all(|candidate| candidate.callable().parameters == first.callable().parameters);
+        let agrees = top.iter().all(|candidate| {
+            candidate.callable().parameters == first.callable().parameters
+                && candidate.callable().role == first.callable().role
+        });
         if agrees {
             PackagedOsirisResolution::Unique(first)
         } else {
@@ -177,10 +200,13 @@ impl PackagedOsirisIndex {
             .collect()
     }
 
-    /// Returns unique effective callables in one module matching a prefix.
+    /// Returns effective callables in one module matching a prefix.
     ///
     /// Ambiguous same-priority declarations are returned with empty
-    /// parameters so callers stay untyped instead of choosing one.
+    /// parameters. Their role is preserved when all candidates agree on
+    /// procedure versus query; mixed-role ambiguity is returned as
+    /// [`PackagedOsirisCallableRole::Unknown`] and must not be placed by
+    /// callers as either kind.
     pub fn completions_for_module(
         &self,
         module: &str,
@@ -188,20 +214,41 @@ impl PackagedOsirisIndex {
     ) -> Vec<(String, u16, PackagedOsirisCallable)> {
         let mut completions = Vec::new();
         for (candidate_module, name, arity) in self.effective.keys() {
-            if candidate_module != module || !name.starts_with(prefix) {
+            if candidate_module != module
+                || !name
+                    .get(..prefix.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            {
                 continue;
             }
             match self.resolve(module, name, *arity) {
                 PackagedOsirisResolution::Missing => continue,
-                PackagedOsirisResolution::Ambiguous(_) => completions.push((
-                    name.clone(),
-                    *arity,
-                    PackagedOsirisCallable {
-                        kind: OSIRIS_PROCEDURE_KIND.to_owned(),
-                        parameters: Vec::new(),
-                        goal: String::new(),
-                    },
-                )),
+                PackagedOsirisResolution::Ambiguous(candidates) => {
+                    let role = candidates
+                        .first()
+                        .map(|candidate| candidate.callable().role)
+                        .filter(|role| {
+                            candidates
+                                .iter()
+                                .all(|candidate| candidate.callable().role == *role)
+                        })
+                        .unwrap_or_default();
+                    let kind = match role {
+                        PackagedOsirisCallableRole::Procedure => OSIRIS_PROCEDURE_KIND,
+                        PackagedOsirisCallableRole::Query => OSIRIS_QUERY_KIND,
+                        PackagedOsirisCallableRole::Unknown => "",
+                    };
+                    completions.push((
+                        name.clone(),
+                        *arity,
+                        PackagedOsirisCallable {
+                            kind: kind.to_owned(),
+                            role,
+                            parameters: Vec::new(),
+                            goal: String::new(),
+                        },
+                    ));
+                }
                 PackagedOsirisResolution::Unique(candidate) => {
                     completions.push((name.clone(), *arity, candidate.callable().clone()))
                 }
@@ -254,6 +301,14 @@ impl PackagedOsirisIndex {
                 source: source.clone(),
                 callable,
             });
+    }
+}
+
+fn packaged_osiris_callable_role(kind: &str) -> PackagedOsirisCallableRole {
+    match kind {
+        OSIRIS_PROCEDURE_KIND => PackagedOsirisCallableRole::Procedure,
+        OSIRIS_QUERY_KIND => PackagedOsirisCallableRole::Query,
+        _ => PackagedOsirisCallableRole::Unknown,
     }
 }
 

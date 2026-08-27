@@ -633,6 +633,11 @@ definition or references for binding locations. Hover formats long engine
 signatures with one parameter per line. Signature help refreshes after commas
 and selects the parameter at the cursor throughout the call.
 
+Osiris callable completion follows the statement role: engine events are
+offered for rule heads, queries for conditions, and calls for actions. User
+procedures and queries follow the same action and condition split. Database
+facts remain available in rule heads, conditions, and fact actions.
+
 Procedures and queries declared in installed base-module goals are indexed
 the same way as packaged Thoth helpers. Hover, signature help, and completion
 show their authored parameter aliases with module provenance and no file

@@ -2758,6 +2758,274 @@ fn supports_language_features_in_lsx_values_without_stats_diagnostics() {
 }
 
 #[test]
+fn completion_filters_osiris_callables_by_statement_role() {
+    let declarations = concat!(
+        "PROC\n",
+        "RoleProc((INTEGER)_Value)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "QRY\n",
+        "RoleQuery((INTEGER)_Value)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+    );
+    let disk_text =
+        synthetic_osiris_goal_with_kb("", "PROC\nRoleProc((INTEGER)_Value)\nTHEN\nGoalCompleted;");
+    let (workspace, paths) =
+        synthetic_osiris_workspace(&[("Project", "RoleGoal", ModuleRole::Project, &disk_text)]);
+    let path = &paths[0];
+
+    let position_for = |text: &str, prefix: &str| {
+        text.lines()
+            .enumerate()
+            .find_map(|(line, value)| {
+                (value == prefix).then_some(Position {
+                    line: u32::try_from(line).unwrap(),
+                    character: u32::try_from(value.len()).unwrap(),
+                })
+            })
+            .expect("completion prefix line")
+    };
+
+    let head_text =
+        synthetic_osiris_goal_with_kb("", &format!("{declarations}IF\nDie\nTHEN\nGoalCompleted;"));
+    let head_overlays = synthetic_osiris_overlay(&workspace, path, "Project", &head_text);
+    let head = workspace.completion(path, position_for(&head_text, "Die"), &head_overlays, false);
+    assert!(head.items.iter().any(|item| item.label == "Died"));
+    assert!(!head.items.iter().any(|item| item.label == "HasPassive"));
+    assert!(!head.items.iter().any(|item| item.label == "AddGold"));
+    assert!(!head.items.iter().any(|item| item.label == "RoleProc"));
+    assert!(!head.items.iter().any(|item| item.label == "RoleQuery"));
+
+    let condition_text = synthetic_osiris_goal_with_kb(
+        "",
+        &format!("{declarations}IF\nDied(_Who)\nAND\nHas\nTHEN\nGoalCompleted;"),
+    );
+    let condition_overlays = synthetic_osiris_overlay(&workspace, path, "Project", &condition_text);
+    let condition = workspace.completion(
+        path,
+        position_for(&condition_text, "Has"),
+        &condition_overlays,
+        false,
+    );
+    assert!(
+        condition
+            .items
+            .iter()
+            .any(|item| item.label == "HasPassive")
+    );
+    assert!(!condition.items.iter().any(|item| item.label == "Died"));
+    assert!(!condition.items.iter().any(|item| item.label == "AddGold"));
+
+    let query_text = synthetic_osiris_goal_with_kb(
+        "",
+        &format!("{declarations}IF\nDied(_Who)\nAND\nRole\nTHEN\nGoalCompleted;"),
+    );
+    let query_overlays = synthetic_osiris_overlay(&workspace, path, "Project", &query_text);
+    let query = workspace.completion(
+        path,
+        position_for(&query_text, "Role"),
+        &query_overlays,
+        false,
+    );
+    assert!(query.items.iter().any(|item| item.label == "RoleQuery"));
+    assert!(!query.items.iter().any(|item| item.label == "RoleProc"));
+
+    let action_text =
+        synthetic_osiris_goal_with_kb("", &format!("{declarations}IF\nDied(_Who)\nTHEN\nRole"));
+    let action_overlays = synthetic_osiris_overlay(&workspace, path, "Project", &action_text);
+    let action = workspace.completion(
+        path,
+        position_for(&action_text, "Role"),
+        &action_overlays,
+        false,
+    );
+    assert!(action.items.iter().any(|item| item.label == "RoleProc"));
+    assert!(!action.items.iter().any(|item| item.label == "RoleQuery"));
+
+    let generated_action_text =
+        synthetic_osiris_goal_with_kb("", &format!("{declarations}IF\nDied(_Who)\nTHEN\nAddG"));
+    let generated_action_overlays =
+        synthetic_osiris_overlay(&workspace, path, "Project", &generated_action_text);
+    let generated_action = workspace.completion(
+        path,
+        position_for(&generated_action_text, "AddG"),
+        &generated_action_overlays,
+        false,
+    );
+    assert!(
+        generated_action
+            .items
+            .iter()
+            .any(|item| item.label == "AddGold")
+    );
+    assert!(
+        !generated_action
+            .items
+            .iter()
+            .any(|item| item.label == "Died")
+    );
+    assert!(
+        !generated_action
+            .items
+            .iter()
+            .any(|item| item.label == "HasPassive")
+    );
+}
+
+#[test]
+fn completion_shadows_invalid_roles_and_preserves_same_rank_role_ambiguity() {
+    let lower =
+        synthetic_osiris_goal_with_kb("", "PROC\nDied((GUIDSTRING)_Lower)\nTHEN\nGoalCompleted;");
+    let project =
+        synthetic_osiris_goal_with_kb("", "QRY\nDied((GUIDSTRING)_Higher)\nTHEN\nGoalCompleted;");
+    let (workspace, paths) = synthetic_osiris_workspace(&[
+        ("Dependency", "Lower", ModuleRole::Dependency, &lower),
+        ("Project", "Caller", ModuleRole::Project, &project),
+    ]);
+
+    let position_for = |text: &str, prefix: &str| {
+        text.lines()
+            .enumerate()
+            .find_map(|(line, value)| {
+                (value == prefix).then_some(Position {
+                    line: u32::try_from(line).unwrap(),
+                    character: u32::try_from(value.len()).unwrap(),
+                })
+            })
+            .expect("completion prefix line")
+    };
+
+    // The higher-priority project QRY is not an action. It still claims the
+    // key, so neither the lower PROC nor generated/legacy Died event appears.
+    let shadowed = synthetic_osiris_goal_with_kb(
+        "",
+        "QRY\nDied((GUIDSTRING)_Higher)\nTHEN\nGoalCompleted;\nIF\nDied(_Who)\nTHEN\nD",
+    );
+    let shadowed_overlays = synthetic_osiris_overlay(&workspace, &paths[1], "Project", &shadowed);
+    let shadowed_completion = workspace.completion(
+        &paths[1],
+        position_for(&shadowed, "D"),
+        &shadowed_overlays,
+        false,
+    );
+    assert!(
+        !shadowed_completion
+            .items
+            .iter()
+            .any(|item| item.label == "Died"),
+        "shadowed labels: {:?}",
+        shadowed_completion
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let mixed = synthetic_osiris_goal_with_kb(
+        "",
+        "PROC\nRoleMixed((INTEGER)_Value)\nTHEN\nGoalCompleted;\nQRY\nRoleMixed((INTEGER)_Value)\nTHEN\nGoalCompleted;\nIF\nDied(_Who)\nAND\nRole\nTHEN\nGoalCompleted;",
+    );
+    let mixed_overlays = synthetic_osiris_overlay(&workspace, &paths[1], "Project", &mixed);
+    let mixed_completion = workspace.completion(
+        &paths[1],
+        position_for(&mixed, "Role"),
+        &mixed_overlays,
+        false,
+    );
+    assert!(
+        !mixed_completion
+            .items
+            .iter()
+            .any(|item| item.label == "RoleMixed"),
+        "mixed-role labels: {:?}",
+        mixed_completion
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn osiris_completion_ignores_comment_markers_and_handles_trailing_empty_line() {
+    let comment_text = synthetic_osiris_goal_with_kb(
+        "",
+        "IF\nDied(_Who)\nAND\n/*\nTHEN\n*/\nHas\nTHEN\nGoalCompleted;",
+    );
+    let (workspace, paths) =
+        synthetic_osiris_workspace(&[("Project", "Comments", ModuleRole::Project, &comment_text)]);
+    let comment_overlays =
+        synthetic_osiris_overlay(&workspace, &paths[0], "Project", &comment_text);
+    let mut condition_position = source_position(&comment_text, "Has");
+    condition_position.character += 3;
+    let condition = workspace.completion(&paths[0], condition_position, &comment_overlays, false);
+    assert!(
+        condition
+            .items
+            .iter()
+            .any(|item| item.label == "HasPassive"),
+        "available labels: {:?}",
+        condition
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(!condition.items.iter().any(|item| item.label == "AddGold"));
+
+    let string_comment_text = synthetic_osiris_goal_with_kb(
+        "",
+        "IF\nDied(_Who)\nAND\nDB_Noop(\"url // /* escaped \\\" quote\");\nHas\nTHEN\nGoalCompleted;",
+    );
+    let string_comment_overlays =
+        synthetic_osiris_overlay(&workspace, &paths[0], "Project", &string_comment_text);
+    let mut string_condition_position = source_position(&string_comment_text, "Has");
+    string_condition_position.character += 3;
+    let string_condition = workspace.completion(
+        &paths[0],
+        string_condition_position,
+        &string_comment_overlays,
+        false,
+    );
+    assert!(
+        string_condition
+            .items
+            .iter()
+            .any(|item| item.label == "HasPassive"),
+        "string marker labels: {:?}",
+        string_condition
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let trailing_text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "Died(_Who)\n",
+        "THEN\n",
+    );
+    let trailing_overlays =
+        synthetic_osiris_overlay(&workspace, &paths[0], "Project", trailing_text);
+    let trailing_line = u32::try_from(trailing_text.split('\n').count() - 1).unwrap();
+    let trailing = workspace.completion(
+        &paths[0],
+        Position {
+            line: trailing_line,
+            character: 0,
+        },
+        &trailing_overlays,
+        false,
+    );
+    assert!(trailing.items.iter().any(|item| item.label == "AddGold"));
+}
+
+#[test]
 fn hovers_typed_lsx_localization_handles_from_loose_and_packed_sources() {
     let (workspace, _) = fixture_workspace(200);
     let loose_handle = "h000000000000000000000000000000000001";
