@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::Error;
-use crate::thoth::{PackagedThothCatalog, PackagedThothSource};
+use crate::thoth::{PackagedThothCatalog, PackagedThothResolution, PackagedThothSource};
 
 /// Invalidates cached packaged Thoth facts when their semantic shape changes.
-pub const THOTH_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-thoth-facts-v5";
+pub const THOTH_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-thoth-facts-v6";
 
 /// One parsed Thoth fact record with the package entry that produced it.
 ///
@@ -49,6 +49,7 @@ pub struct PackagedThothFacts<F> {
     extractor_version: String,
     records: Vec<PackagedThothFact<F>>,
     rejected: usize,
+    relevant_rejected: usize,
 }
 
 impl<F> PackagedThothFacts<F> {
@@ -56,11 +57,13 @@ impl<F> PackagedThothFacts<F> {
         extractor_version: impl Into<String>,
         records: Vec<PackagedThothFact<F>>,
         rejected: usize,
+        relevant_rejected: usize,
     ) -> Self {
         Self {
             extractor_version: extractor_version.into(),
             records,
             rejected,
+            relevant_rejected,
         }
     }
 
@@ -93,6 +96,16 @@ impl<F> PackagedThothFacts<F> {
         self.rejected
     }
 
+    /// Returns the number of rejected candidates that affect effective data.
+    ///
+    /// A lower-priority rejection is not relevant when a unique higher
+    /// candidate supplies the same virtual entry. Rejections at the highest
+    /// priority, including tied candidates, remain relevant because they can
+    /// suppress or make effective evidence incomplete.
+    pub fn relevant_rejected_count(&self) -> usize {
+        self.relevant_rejected
+    }
+
     /// Iterates over all source-backed records.
     pub fn iter(&self) -> impl Iterator<Item = &PackagedThothFact<F>> {
         self.records.iter()
@@ -115,16 +128,29 @@ where
     let extractor_version = extractor_version.into();
     let mut records = Vec::new();
     let mut rejected = 0;
+    let mut relevant_rejected = 0;
     for source in catalog.sources() {
         match parse(source) {
             Ok(facts) => records.push(PackagedThothFact::new(source.clone(), facts)),
-            Err(_) => rejected += 1,
+            Err(_) => {
+                rejected += 1;
+                if match catalog.resolve(source.module(), source.entry()) {
+                    PackagedThothResolution::Unique(effective) => effective == source,
+                    PackagedThothResolution::Ambiguous(candidates) => {
+                        candidates.iter().any(|candidate| candidate == source)
+                    }
+                    PackagedThothResolution::Missing => false,
+                } {
+                    relevant_rejected += 1;
+                }
+            }
         }
     }
     Ok(PackagedThothFacts::new(
         extractor_version,
         records,
         rejected,
+        relevant_rejected,
     ))
 }
 
@@ -170,6 +196,7 @@ mod tests {
         assert_eq!(facts.extractor_version(), "facts-v1");
         assert_eq!(facts.len(), 2);
         assert_eq!(facts.rejected_count(), 0);
+        assert_eq!(facts.relevant_rejected_count(), 0);
         assert_eq!(
             facts.records()[0].facts(),
             "/synthetic/patch.pak:Mods/Example/Scripts/thoth/helpers/base.khn"
