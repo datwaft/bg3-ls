@@ -8,7 +8,7 @@ mod thoth_members;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_CONTRACTS,
@@ -79,6 +79,8 @@ pub(crate) struct OsirisDatabaseSchema {
     pub(crate) removals: usize,
     pub(crate) contributors: BTreeSet<(usize, String, String, PathBuf)>,
 }
+
+type OsirisDatabaseSchemas = BTreeMap<(String, u16), OsirisDatabaseSchema>;
 
 struct VisibleOsirisSource<'a> {
     module: &'a str,
@@ -233,20 +235,76 @@ pub struct OverlayDocument {
 }
 
 /// Open document records kept separate from immutable disk module indexes.
-#[derive(Clone, Debug, Default)]
 pub struct OverlaySet {
     pub(crate) documents: BTreeMap<PathBuf, OverlayDocument>,
+    database_schemas_cache: Mutex<Option<(u64, Arc<OsirisDatabaseSchemas>)>>,
+}
+
+impl Clone for OverlaySet {
+    fn clone(&self) -> Self {
+        Self {
+            documents: self.documents.clone(),
+            database_schemas_cache: Mutex::new(None),
+        }
+    }
+}
+
+impl std::fmt::Debug for OverlaySet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OverlaySet")
+            .field("documents", &self.documents)
+            .finish()
+    }
+}
+
+impl Default for OverlaySet {
+    fn default() -> Self {
+        Self {
+            documents: BTreeMap::new(),
+            database_schemas_cache: Mutex::new(None),
+        }
+    }
+}
+
+impl OverlaySet {
+    fn cached_database_schemas(&self, generation: u64) -> Option<Arc<OsirisDatabaseSchemas>> {
+        let cache = self
+            .database_schemas_cache
+            .lock()
+            .expect("overlay database schema cache lock poisoned");
+        cache.as_ref().and_then(|(cached_generation, schemas)| {
+            (*cached_generation == generation).then(|| Arc::clone(schemas))
+        })
+    }
+
+    fn cache_database_schemas(&self, generation: u64, schemas: Arc<OsirisDatabaseSchemas>) {
+        *self
+            .database_schemas_cache
+            .lock()
+            .expect("overlay database schema cache lock poisoned") = Some((generation, schemas));
+    }
+
+    fn invalidate_database_schemas(&self) {
+        *self
+            .database_schemas_cache
+            .lock()
+            .expect("overlay database schema cache lock poisoned") = None;
+    }
 }
 
 impl OverlaySet {
     /// Replaces the overlay for one open source path.
     pub fn insert(&mut self, path: PathBuf, document: OverlayDocument) {
         self.documents.insert(path, document);
+        self.invalidate_database_schemas();
     }
 
     /// Removes an overlay so queries use the disk record again.
     pub fn remove(&mut self, path: &Path) {
-        self.documents.remove(path);
+        if self.documents.remove(path).is_some() {
+            self.invalidate_database_schemas();
+        }
     }
 
     /// Returns the current overlay for one path.
@@ -294,6 +352,7 @@ pub struct WorkspaceSnapshot {
     packaged_osiris: Arc<PackagedOsirisIndex>,
     tooltips: Arc<TooltipCatalog>,
     incomplete_kinds: BTreeSet<String>,
+    base_osiris_database_schemas: Arc<OsirisDatabaseSchemas>,
 }
 
 fn empty_packaged_thoth_facts() -> PackagedThothFacts<ThothFile> {
@@ -314,6 +373,10 @@ impl WorkspaceSnapshot {
         max_workspace_symbols: usize,
         max_completion_items: usize,
     ) -> Self {
+        let base_osiris_database_schemas = Arc::new(build_osiris_database_schemas(
+            &layers,
+            &OverlaySet::default(),
+        ));
         Self {
             schema,
             layers,
@@ -328,6 +391,7 @@ impl WorkspaceSnapshot {
             packaged_osiris: Arc::new(PackagedOsirisIndex::default()),
             tooltips: Arc::new(TooltipCatalog::default()),
             incomplete_kinds: BTreeSet::new(),
+            base_osiris_database_schemas,
         }
     }
 
@@ -881,10 +945,9 @@ impl WorkspaceSnapshot {
         let SymbolTarget::OsirisDatabase { name, arity } = target else {
             return None;
         };
-        let schema = self
-            .osiris_database_schemas(overlays)
-            .remove(&(name.clone(), *arity))?;
-        let parameters = osiris_database_parameter_types(&schema);
+        let schemas = self.osiris_database_schemas(overlays);
+        let schema = schemas.get(&(name.clone(), *arity))?;
+        let parameters = osiris_database_parameter_types(schema);
         let database_name = format!("{name}/{arity}");
         let signature = format!("{}({})", name, parameters.join(", "));
         let mut markdown = HoverMarkup::new("Osiris database", &database_name)
@@ -899,7 +962,7 @@ impl WorkspaceSnapshot {
         }
         if !schema.contributors.is_empty() {
             let mut goals = String::from("**Contributing goals**");
-            let mut contributors: Vec<_> = schema.contributors.into_iter().collect();
+            let mut contributors: Vec<_> = schema.contributors.iter().cloned().collect();
             contributors.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
             let omitted = contributors.len().saturating_sub(MAX_HOVER_LIST_ENTRIES);
             for (_, module, goal, path) in contributors.into_iter().take(MAX_HOVER_LIST_ENTRIES) {
@@ -942,15 +1005,23 @@ impl WorkspaceSnapshot {
                     } else {
                         "Installed Osiris query"
                     };
-                    return Some(
-                        HoverMarkup::new(heading, &format!("{name}/{arity}"))
+                    let mut markdown = HoverMarkup::new(heading, &format!("{name}/{arity}"))
                             .fact("Module", &layer.spec.name)
                             .fact("Signature", &format!("{}({})", name, callable.parameters.join(", ")))
                             .markdown(
                                 "Declared in an installed package goal. Parameter aliases come from the authored declaration; the entry stays virtual and has no file location.",
-                            )
-                            .finish(),
-                    );
+                            );
+                    let kind = match callable.kind.as_str() {
+                        OSIRIS_PROCEDURE_KIND => Some(OsirisContractKind::Call),
+                        OSIRIS_QUERY_KIND => Some(OsirisContractKind::Query),
+                        _ => None,
+                    };
+                    if let Some(kind) = kind
+                        && let Some(description) = packaged_osiris_description(name, arity, kind)
+                    {
+                        markdown = markdown.prose(description);
+                    }
+                    return Some(markdown.finish());
                 }
             }
         }
@@ -1446,9 +1517,8 @@ impl WorkspaceSnapshot {
         binding: &OsirisDatabaseBinding,
         overlays: &OverlaySet,
     ) -> Option<String> {
-        let schema = self
-            .osiris_database_schemas(overlays)
-            .remove(&(binding.name.clone(), binding.arity))?;
+        let schemas = self.osiris_database_schemas(overlays);
+        let schema = schemas.get(&(binding.name.clone(), binding.arity))?;
         let column = schema.columns.get(usize::from(binding.column))?;
         if column.ambiguous || !column.conflicts.is_empty() {
             return None;
@@ -1512,64 +1582,79 @@ impl WorkspaceSnapshot {
     pub(crate) fn osiris_database_schemas(
         &self,
         overlays: &OverlaySet,
-    ) -> BTreeMap<(String, u16), OsirisDatabaseSchema> {
-        let mut sources = Vec::new();
-        for (rank, layer) in self.layers.iter().enumerate() {
-            for (path, overlay) in overlays.for_module(&layer.spec.name) {
-                if overlay.parsed.source.kind == SourceKind::Osiris {
-                    sources.push(VisibleOsirisSource {
-                        module: &layer.spec.name,
-                        rank,
-                        path: path.clone(),
-                        file: &overlay.parsed,
-                    });
-                }
-            }
-            for (path, file) in &layer.files {
-                if overlays.contains(path) || file.source.kind != SourceKind::Osiris {
-                    continue;
-                }
+    ) -> Arc<OsirisDatabaseSchemas> {
+        if overlays.documents.is_empty() {
+            return Arc::clone(&self.base_osiris_database_schemas);
+        }
+        if let Some(schemas) = overlays.cached_database_schemas(self.generation) {
+            return schemas;
+        }
+        let schemas = Arc::new(build_osiris_database_schemas(&self.layers, overlays));
+        overlays.cache_database_schemas(self.generation, Arc::clone(&schemas));
+        schemas
+    }
+}
+
+fn build_osiris_database_schemas(
+    layers: &[Arc<ModuleIndex>],
+    overlays: &OverlaySet,
+) -> OsirisDatabaseSchemas {
+    let mut sources = Vec::new();
+    for (rank, layer) in layers.iter().enumerate() {
+        for (path, overlay) in overlays.for_module(&layer.spec.name) {
+            if overlay.parsed.source.kind == SourceKind::Osiris {
                 sources.push(VisibleOsirisSource {
                     module: &layer.spec.name,
                     rank,
                     path: path.clone(),
-                    file,
+                    file: &overlay.parsed,
                 });
             }
         }
-        sources.sort_by(|left, right| {
-            let left_goal = left
-                .file
-                .osiris
-                .as_ref()
-                .map_or("", |osiris| osiris.goal.as_str());
-            let right_goal = right
-                .file
-                .osiris
-                .as_ref()
-                .map_or("", |osiris| osiris.goal.as_str());
-            left_goal
-                .cmp(right_goal)
-                .then_with(|| left.path.cmp(&right.path))
-        });
-
-        let mut goal_source_counts = BTreeMap::<String, usize>::new();
-        for source in &sources {
-            if let Some(osiris) = &source.file.osiris {
-                *goal_source_counts.entry(osiris.goal.clone()).or_default() += 1;
+        for (path, file) in &layer.files {
+            if overlays.contains(path) || file.source.kind != SourceKind::Osiris {
+                continue;
             }
+            sources.push(VisibleOsirisSource {
+                module: &layer.spec.name,
+                rank,
+                path: path.clone(),
+                file,
+            });
         }
-
-        // Build the immutable dependency graph once. A graph/SCC pass keeps
-        // conflicts from oscillating between known and unknown states and
-        // recomputes the complete closure when overlays change the source
-        // set. Runtime bindings remain source-ordered parser facts; this pass
-        // only supplies compile-time types to already-valid DB writes.
-        let base_occurrences = ordered_osiris_database_occurrences(&sources);
-        let available = propagatable_osiris_database_types(&base_occurrences, &goal_source_counts);
-        let occurrences = apply_osiris_database_propagation(&base_occurrences, &available);
-        fold_osiris_database_schemas(&occurrences, &goal_source_counts)
     }
+    sources.sort_by(|left, right| {
+        let left_goal = left
+            .file
+            .osiris
+            .as_ref()
+            .map_or("", |osiris| osiris.goal.as_str());
+        let right_goal = right
+            .file
+            .osiris
+            .as_ref()
+            .map_or("", |osiris| osiris.goal.as_str());
+        left_goal
+            .cmp(right_goal)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    let mut goal_source_counts = BTreeMap::<String, usize>::new();
+    for source in &sources {
+        if let Some(osiris) = &source.file.osiris {
+            *goal_source_counts.entry(osiris.goal.clone()).or_default() += 1;
+        }
+    }
+
+    // Build the immutable dependency graph once. A graph/SCC pass keeps
+    // conflicts from oscillating between known and unknown states and
+    // recomputes the complete closure when overlays change the source
+    // set. Runtime bindings remain source-ordered parser facts; this pass
+    // only supplies compile-time types to already-valid DB writes.
+    let base_occurrences = ordered_osiris_database_occurrences(&sources);
+    let available = propagatable_osiris_database_types(&base_occurrences, &goal_source_counts);
+    let occurrences = apply_osiris_database_propagation(&base_occurrences, &available);
+    fold_osiris_database_schemas(&occurrences, &goal_source_counts)
 }
 
 /// Builds database occurrences from the effective source set in global Story
@@ -2227,6 +2312,16 @@ fn osiris_contract_kind_label(kind: OsirisContractKind) -> &'static str {
     }
 }
 
+pub(crate) fn packaged_osiris_description(
+    name: &str,
+    arity: u16,
+    kind: OsirisContractKind,
+) -> Option<&'static str> {
+    osiris_contract(OSIRIS_CONTRACTS, name, arity)
+        .filter(|contract| contract.kind == kind)
+        .and_then(|_| bg3_index::osiris_callable_description(name, arity))
+}
+
 fn osiris_contract_signature_markdown(
     name: &str,
     contract: &bg3_index::OsirisContractSpec,
@@ -2457,7 +2552,7 @@ fn abbreviate_home(path: &Path, home: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bg3_index::PackagedThothSource;
+    use bg3_index::{PackagedThothSource, SourceFile, parse_source};
 
     #[test]
     fn packaged_facts_are_replaced_without_mutating_an_existing_snapshot() {
@@ -2485,6 +2580,46 @@ mod tests {
         assert_eq!(old_facts.len(), 1);
         assert_eq!(next.packaged_thoth_facts_count(), 0);
         assert!(!Arc::ptr_eq(&old_facts, &next.packaged_thoth_facts()));
+    }
+
+    #[test]
+    fn overlay_database_schema_cache_is_distinct_and_invalidated() {
+        let path = PathBuf::from("/synthetic/overlay.txt");
+        let mut overlays = OverlaySet::default();
+        let schemas = Arc::new(OsirisDatabaseSchemas::new());
+        overlays.cache_database_schemas(1, Arc::clone(&schemas));
+        assert!(Arc::ptr_eq(
+            &overlays.cached_database_schemas(1).expect("cached schemas"),
+            &schemas
+        ));
+
+        let cloned = overlays.clone();
+        assert!(cloned.cached_database_schemas(1).is_none());
+
+        let parsed = parse_source(
+            SourceFile {
+                path: path.clone(),
+                kind: SourceKind::Osiris,
+            },
+            "",
+            &SchemaCatalog::default(),
+            "English",
+        )
+        .expect("empty Osiris source");
+        overlays.insert(
+            path.clone(),
+            OverlayDocument {
+                module: "MyMod".into(),
+                version: 1,
+                text: String::new(),
+                parsed: Arc::new(parsed),
+            },
+        );
+        assert!(overlays.cached_database_schemas(1).is_none());
+
+        overlays.cache_database_schemas(1, schemas);
+        overlays.remove(&path);
+        assert!(overlays.cached_database_schemas(1).is_none());
     }
 
     #[test]

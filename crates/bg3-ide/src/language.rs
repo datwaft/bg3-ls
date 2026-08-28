@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::{
     HoverMarkup, MAX_HOVER_LIST_ENTRIES, OverlaySet, WorkspaceSnapshot, markdown_inline_code,
-    range_contains,
+    packaged_osiris_description, range_contains,
 };
 use bg3_index::{
     Definition, FUNCTIONS, ModuleRole, OSIRIS_CONTRACTS, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
@@ -1373,6 +1373,8 @@ impl WorkspaceSnapshot {
                         "{} /{arity} — installed {module}",
                         osiris_contract_kind_label(kind)
                     ));
+                    item.documentation =
+                        packaged_osiris_description(&name, arity, kind).map(str::to_owned);
                     if snippets {
                         item.new_text = osiris_call_snippet(&name, arity, &callable.parameters);
                         item.snippet = arity > 0;
@@ -1989,12 +1991,23 @@ impl WorkspaceSnapshot {
                 }
                 PackagedOsirisResolution::Unique(candidate) => {
                     let callable = candidate.callable();
+                    let kind = match callable.role {
+                        PackagedOsirisCallableRole::Procedure => OsirisContractKind::Call,
+                        PackagedOsirisCallableRole::Query => OsirisContractKind::Query,
+                        PackagedOsirisCallableRole::Unknown => unreachable!(
+                            "unique packaged Osiris candidates must have a known callable role"
+                        ),
+                    };
+                    let mut documentation = format!(
+                        "Declared in an installed package goal for module `{}`.",
+                        candidate.source().module()
+                    );
+                    if let Some(description) = packaged_osiris_description(name, arity, kind) {
+                        documentation = format!("{description}\n\n{documentation}");
+                    }
                     return Some(SignatureHelp {
                         label: format!("{name}({})", callable.parameters.join(", ")),
-                        documentation: format!(
-                            "Declared in an installed package goal for module `{}`.",
-                            candidate.source().module()
-                        ),
+                        documentation,
                         parameters: callable.parameters.clone(),
                         active_parameter: argument,
                     });
