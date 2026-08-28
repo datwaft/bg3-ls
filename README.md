@@ -43,7 +43,7 @@ provided by the client.
 
 - Neovim nightly or Neovim 0.12+
 - the `bg3_stats`, `bg3_lsx`, `bg3_localization`, `bg3_thoth`, and
-  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.6.0
+  `bg3_osiris` filetypes from `tree-sitter-bg3` 0.7.2
 - unpacked BG3 Toolkit data
 - unpacked source directories for each mod dependency
 
@@ -63,7 +63,7 @@ CI checks out the exact `tree-sitter-bg3` tag:
 
 ```sh
 git clone https://github.com/datwaft/bg3-ls
-git clone --branch v0.6.0 https://github.com/datwaft/tree-sitter-bg3
+git clone --branch v0.7.2 https://github.com/datwaft/tree-sitter-bg3
 cd bg3-ls
 cargo install --path crates/bg3-ls --locked
 ```
@@ -118,6 +118,17 @@ Generation records the exact game build metadata and the input header hash in
 the generated artifact. The normal language server uses only the checked-in
 catalog; it does not require an installed game or a mod-local
 `story_header.div`. Do not commit installed game files or extracted game data.
+
+Version 0.29.0 completes the Osiris validation and editor-support batch.
+Callable roles, event placement, and `NOT` usage are validated
+conservatively. GUID-family mismatches, malformed packaged facts, and
+incomplete roots are rejected when syntax or contract metadata proves the
+problem. Multiline signature help now tracks the complete call context,
+completion respects parameter roles, and document symbols use declaration
+spans. The release uses `tree-sitter-bg3` 0.7.2, which rejects empty `THEN`
+blocks, parses dotted enum constants, and distinguishes complete goal files
+from standalone callable-signature sources. Existing configuration remains
+compatible, and no migration is required.
 
 Version 0.28.0 adds source-ordered Osiris database schema analysis. Database
 types now use global Story goal order independently from module precedence, and
