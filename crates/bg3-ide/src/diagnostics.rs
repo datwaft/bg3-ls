@@ -172,8 +172,8 @@ fn add_osiris_database_diagnostics(
     overlays: &OverlaySet,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for schema in workspace.osiris_database_schemas(overlays).into_values() {
-        for (index, column) in schema.columns.into_iter().enumerate() {
+    for schema in workspace.osiris_database_schemas(overlays).values() {
+        for (index, column) in schema.columns.iter().enumerate() {
             // A column without an established alias has nothing to violate.
             if column.established.is_none() {
                 continue;

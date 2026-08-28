@@ -209,6 +209,77 @@ fn generated_engine_contracts_provide_callable_hover_and_signature_help() {
 }
 
 #[test]
+fn installed_engine_query_keeps_curated_description_across_language_features() {
+    let catalog = Arc::new(
+        PackagedThothCatalog::from_sources([osiris_source(
+            "Shared",
+            &base_entry("EngineQuery"),
+            "Shared.pak",
+            0,
+            &query_declaration(
+                "GetActionResourceValuePersonal((CHARACTER)_Player, (STRING)_ResourceName, (INTEGER)_ResourceLevel, (REAL)_Amount)",
+            ),
+        )])
+        .expect("catalog"),
+    );
+    let (workspace, caller_path) = workspace_with(None);
+    let workspace = workspace.with_packaged_osiris(index(catalog.as_ref()));
+    let overlays = osiris_overlay(&workspace, &caller_path, GENERATED_ENGINE_CALLER);
+
+    let hover = workspace
+        .hover(
+            &caller_path,
+            source_position(GENERATED_ENGINE_CALLER, "GetActionResourceValuePersonal"),
+            &overlays,
+        )
+        .expect("installed engine query hover");
+    assert!(
+        hover.contains("Returns a character's value for the named action resource"),
+        "{hover}"
+    );
+
+    let (line, column) = call_position(GENERATED_ENGINE_CALLER, "GetActionResourceValuePersonal");
+    let signature = workspace
+        .signature_help(
+            &caller_path,
+            Position {
+                line,
+                character: column,
+            },
+            &overlays,
+        )
+        .expect("installed engine query signature help");
+    assert!(
+        signature
+            .documentation
+            .contains("Returns a character's value for the named action resource")
+    );
+
+    let completion_text = goal_text("IF\nTextEvent(\"go\")\nAND\nGetA\nTHEN\nGoalCompleted;");
+    let completion_overlays = osiris_overlay(&workspace, &caller_path, &completion_text);
+    let completion = workspace.completion(
+        &caller_path,
+        Position {
+            line: 7,
+            character: 4,
+        },
+        &completion_overlays,
+        false,
+    );
+    let item = completion
+        .items
+        .iter()
+        .find(|item| item.label == "GetActionResourceValuePersonal")
+        .expect("installed engine query completion");
+    assert_eq!(
+        item.documentation.as_deref(),
+        Some(
+            "Returns a character's value for the named action resource at the requested resource level."
+        )
+    );
+}
+
+#[test]
 fn legacy_engine_events_remain_completable_when_missing_from_generated_catalog() {
     let (workspace, caller_path) = workspace_with(None);
     for name in [

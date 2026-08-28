@@ -914,20 +914,26 @@ impl Coordinator {
 
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let incomplete_kinds = config.incomplete_kinds();
-        let workspace = WorkspaceSnapshot::new(
-            schema,
-            layers,
-            generation,
-            config.max_workspace_symbols,
-            config.max_completion_items,
-        )
-        .with_base_localization(base_localization)
-        .with_packaged_thoth(packaged_thoth)
-        .with_packaged_thoth_facts(packaged_thoth_facts)
-        .with_packaged_osiris(packaged_osiris)
-        .with_packaged_stats(packaged_stats_catalog)
-        .with_tooltips(tooltips)
-        .with_incomplete_kinds(incomplete_kinds);
+        let max_workspace_symbols = config.max_workspace_symbols;
+        let max_completion_items = config.max_completion_items;
+        let workspace = tokio::task::spawn_blocking(move || {
+            WorkspaceSnapshot::new(
+                schema,
+                layers,
+                generation,
+                max_workspace_symbols,
+                max_completion_items,
+            )
+            .with_base_localization(base_localization)
+            .with_packaged_thoth(packaged_thoth)
+            .with_packaged_thoth_facts(packaged_thoth_facts)
+            .with_packaged_osiris(packaged_osiris)
+            .with_packaged_stats(packaged_stats_catalog)
+            .with_tooltips(tooltips)
+            .with_incomplete_kinds(incomplete_kinds)
+        })
+        .await
+        .map_err(|error| Error::Index(format!("workspace task failed: {error}")))?;
         let info = index_info(&workspace, cache_stats);
         Ok((workspace, info))
     }
