@@ -872,3 +872,109 @@ fn provides_osiris_signature_help_for_later_arguments() {
     assert_eq!(client.exit().expect("exit"), Some(0));
     drop(workspace);
 }
+
+#[test]
+fn provides_osiris_signature_help_across_lines_and_lexical_noise() {
+    let (workspace, mut client, _) = initialized_client(Some(&["utf-16"]));
+    let (_path, uri) = osiris_uri(&workspace);
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "UsingSpell( // FakeCall(1, 2)\n",
+        "    /* FakeCall(\"ignored, comma\") */ (CHARACTER)_Caster,\n",
+        "    \"Target, (not a call)\" /* 😄 comma, */,\n",
+        "    -, -, _StoryActionID)\n",
+        "THEN\n",
+        "DB_Use(_Caster);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    wait_for_index(&mut client);
+    client
+        .notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "bg3_osiris",
+                    "version": 1,
+                    "text": text
+                }
+            }),
+        )
+        .expect("open Osiris document");
+
+    let opening_line = text.lines().nth(5).expect("UsingSpell line");
+    let opening_parenthesis = opening_line.find('(').expect("opening parenthesis") + 1;
+    let opening = client
+        .request_result(
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": 5,
+                    "character": opening_parenthesis
+                }
+            }),
+        )
+        .expect("signature help after opening parenthesis");
+    assert_eq!(opening["activeParameter"], json!(0));
+    assert_eq!(
+        opening["signatures"][0]["label"]
+            .as_str()
+            .and_then(|label| label.split_once('('))
+            .map(|(name, _)| name),
+        Some("UsingSpell")
+    );
+
+    let comment_cursor = opening_line.find("FakeCall").expect("comment call") + 4;
+    let in_comment = client
+        .request_result(
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": 5,
+                    "character": comment_cursor
+                }
+            }),
+        )
+        .expect("signature help in comment");
+    assert!(
+        in_comment.is_null(),
+        "comments must not create signature context"
+    );
+
+    let second_argument_line = text.lines().nth(7).expect("second argument line");
+    let separator = second_argument_line
+        .rfind(',')
+        .expect("separator after second argument");
+    let utf16_cursor = second_argument_line[..separator + 1].encode_utf16().count();
+    let later_argument = client
+        .request_result(
+            "textDocument/signatureHelp",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": 7,
+                    "character": u32::try_from(utf16_cursor).expect("position fits")
+                }
+            }),
+        )
+        .expect("signature help after multiline argument");
+    assert_eq!(later_argument["activeParameter"], json!(2));
+    assert_eq!(
+        later_argument["signatures"][0]["label"]
+            .as_str()
+            .and_then(|label| label.split_once('('))
+            .map(|(name, _)| name),
+        Some("UsingSpell")
+    );
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+    drop(workspace);
+}
