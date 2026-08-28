@@ -1596,6 +1596,7 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         "osiris-syntax-error",
         "The Osiris goal syntax is not valid.",
     );
+    collect_osiris_callable_role_issues(root, text, &mut issues)?;
 
     let mut goal_fields = BTreeMap::new();
     if let Some(version) = direct_child(root, "version_declaration")
@@ -1690,6 +1691,219 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         }),
         thoth: None,
     })
+}
+
+/// Validates the placement of known engine callables in one goal.
+///
+/// The generated catalog and curated event signatures are the only sources
+/// strong enough to establish an engine callable's role. Unknown names remain
+/// silent because they may be user-defined procedures/queries or calls
+/// supplied by another Story source. The rules mirror the compiler's role
+/// checks: events and databases can start an IF rule, queries can be
+/// conditions, and calls can be actions.
+fn collect_osiris_callable_role_issues(
+    root: Node<'_>,
+    text: &str,
+    issues: &mut Vec<SourceIssue>,
+) -> Result<(), Error> {
+    let mut cursor = root.walk();
+    for section in root.named_children(&mut cursor) {
+        match section.kind() {
+            "init_section" | "exit_section" => {
+                let mut section_cursor = section.walk();
+                for statement in section.named_children(&mut section_cursor) {
+                    if statement.kind() != "fact_statement" {
+                        continue;
+                    }
+                    let Some(call) = field(statement, "call") else {
+                        continue;
+                    };
+                    validate_osiris_callable_placement(
+                        call,
+                        text,
+                        OsirisCallPlacement::InitExitAction,
+                        field(statement, "negation").is_some(),
+                        issues,
+                    )?;
+                }
+            }
+            "kb_section" => {
+                let mut section_cursor = section.walk();
+                for rule in section.named_children(&mut section_cursor) {
+                    if rule.kind() != "rule" {
+                        continue;
+                    }
+                    let kind = field(rule, "kind")
+                        .and_then(|kind| kind.utf8_text(text.as_bytes()).ok())
+                        .unwrap_or("IF");
+                    if let Some(head) = field(rule, "head") {
+                        let placement = match kind {
+                            "PROC" => OsirisCallPlacement::ProcedureHead,
+                            "QRY" => OsirisCallPlacement::QueryHead,
+                            _ => OsirisCallPlacement::IfHead,
+                        };
+                        validate_osiris_callable_placement(head, text, placement, false, issues)?;
+                    }
+
+                    let mut rule_cursor = rule.walk();
+                    for child in rule.named_children(&mut rule_cursor) {
+                        match child.kind() {
+                            "condition" => {
+                                let Some(call) = direct_child(child, "call_expression") else {
+                                    continue;
+                                };
+                                validate_osiris_callable_placement(
+                                    call,
+                                    text,
+                                    OsirisCallPlacement::Condition,
+                                    field(child, "negation").is_some(),
+                                    issues,
+                                )?;
+                            }
+                            "action_statement" => {
+                                let Some(call) = field(child, "call") else {
+                                    continue;
+                                };
+                                validate_osiris_callable_placement(
+                                    call,
+                                    text,
+                                    OsirisCallPlacement::RuleAction,
+                                    field(child, "negation").is_some(),
+                                    issues,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OsirisCallPlacement {
+    InitExitAction,
+    IfHead,
+    ProcedureHead,
+    QueryHead,
+    Condition,
+    RuleAction,
+}
+
+/// Returns the generated role for a known callable, including legacy event
+/// aliases that remain part of the event catalog fallback.
+fn known_osiris_callable_kind(name: &str, arity: u16) -> Option<OsirisContractKind> {
+    if let Some(contract) = osiris_contract(OSIRIS_CONTRACTS, name, arity) {
+        return Some(contract.kind);
+    }
+    // Do not let the legacy event aliases hide an ambiguous generated
+    // declaration. A generated name/arity match that cannot be selected is
+    // not strong enough evidence for a placement diagnostic.
+    if OSIRIS_CONTRACTS
+        .iter()
+        .any(|contract| contract.name == name && contract.parameters.len() as u16 == arity)
+    {
+        return None;
+    }
+    osiris_signature(name, arity).map(|_| OsirisContractKind::Event)
+}
+
+fn validate_osiris_callable_placement(
+    call: Node<'_>,
+    text: &str,
+    placement: OsirisCallPlacement,
+    negated: bool,
+    issues: &mut Vec<SourceIssue>,
+) -> Result<(), Error> {
+    let Some(name_node) = field(call, "name") else {
+        return Ok(());
+    };
+    let Some(arguments) = field(call, "arguments") else {
+        return Ok(());
+    };
+    let name = name_node.utf8_text(text.as_bytes())?;
+    let arity = osiris_arity(arguments)?;
+    // A PROC/QRY head declares a user callable. Unknown names are left alone;
+    // a prefix such as `DB_`, `QRY_`, or `PROC_` is only a convention and does
+    // not prove an engine role.
+    let Some(kind) = known_osiris_callable_kind(name, arity) else {
+        return Ok(());
+    };
+
+    if negated
+        && matches!(
+            placement,
+            OsirisCallPlacement::RuleAction | OsirisCallPlacement::InitExitAction
+        )
+    {
+        issues.push(SourceIssue {
+            code: "osiris-invalid-negation".into(),
+            message: format!(
+                "NOT can only be applied to database facts; `{name}/{arity}` is an engine {}.",
+                osiris_contract_kind_name(kind)
+            ),
+            range: node_range(name_node),
+        });
+    }
+
+    let valid = match placement {
+        OsirisCallPlacement::IfHead => kind == OsirisContractKind::Event,
+        OsirisCallPlacement::ProcedureHead | OsirisCallPlacement::QueryHead => false,
+        OsirisCallPlacement::Condition => {
+            matches!(
+                kind,
+                OsirisContractKind::Query | OsirisContractKind::Sysquery
+            )
+        }
+        OsirisCallPlacement::RuleAction | OsirisCallPlacement::InitExitAction => {
+            matches!(kind, OsirisContractKind::Call | OsirisContractKind::Syscall)
+        }
+    };
+    if valid {
+        return Ok(());
+    }
+
+    let message = match placement {
+        OsirisCallPlacement::IfHead => format!(
+            "Osiris engine {} `{name}/{arity}` cannot trigger an IF rule; only events and databases can be the first trigger.",
+            osiris_contract_kind_name(kind)
+        ),
+        OsirisCallPlacement::ProcedureHead => format!(
+            "Osiris engine {} `{name}/{arity}` cannot be declared as a PROC.",
+            osiris_contract_kind_name(kind)
+        ),
+        OsirisCallPlacement::QueryHead => format!(
+            "Osiris engine {} `{name}/{arity}` cannot be declared as a QRY.",
+            osiris_contract_kind_name(kind)
+        ),
+        OsirisCallPlacement::Condition => format!(
+            "Osiris engine {} `{name}/{arity}` cannot be used as a condition; only queries, sysqueries, user queries, and databases are valid here.",
+            osiris_contract_kind_name(kind)
+        ),
+        OsirisCallPlacement::RuleAction | OsirisCallPlacement::InitExitAction => format!(
+            "Osiris engine {} `{name}/{arity}` cannot be used as an action; only calls, syscalls, procedures, and databases are valid here.",
+            osiris_contract_kind_name(kind)
+        ),
+    };
+    issues.push(SourceIssue {
+        code: "osiris-invalid-callable-role".into(),
+        message,
+        range: node_range(name_node),
+    });
+    Ok(())
+}
+
+fn osiris_contract_kind_name(kind: OsirisContractKind) -> &'static str {
+    match kind {
+        OsirisContractKind::Call => "call",
+        OsirisContractKind::Event => "event",
+        OsirisContractKind::Query => "query",
+        OsirisContractKind::Syscall => "syscall",
+        OsirisContractKind::Sysquery => "sysquery",
+    }
 }
 
 /// Extracts one complete rule and its rule-local explicit variable types.
@@ -3994,6 +4208,108 @@ mod tests {
         assert!(fact("_CallArg").evidence.is_none());
         assert_eq!(fact("_ActionOutput").binding_range, None);
         assert!(fact("_ActionOutput").evidence.is_none());
+    }
+
+    #[test]
+    fn validates_known_osiris_callable_roles_and_negation() {
+        let text = concat!(
+            "Version 1\n",
+            "SubGoalCombiner SGC_AND\n",
+            "INITSECTION\n",
+            "HasPassive(11111111-1111-1111-1111-111111111111, \"P\", 1);\n",
+            "KBSECTION\n",
+            "IF\n",
+            "HasPassive(_Actor, \"P\", 1)\n",
+            "AND\n",
+            "Died(_Actor)\n",
+            "AND\n",
+            "AddActionPoints(_Actor, 1)\n",
+            "AND\n",
+            "NOT HasPassive(_Actor, \"P\", 1)\n",
+            "THEN\n",
+            "HasPassive(_Actor, \"P\", 1);\n",
+            "NOT AddActionPoints(_Actor, 1);\n",
+            "IF\n",
+            "Died(_Actor)\n",
+            "THEN\n",
+            "AddActionPoints(_Actor, 1);\n",
+            "PROC\n",
+            "Died(_Actor)\n",
+            "THEN\n",
+            "AddActionPoints(_Actor, 1);\n",
+            "QRY\n",
+            "AddActionPoints(_Actor, 1)\n",
+            "THEN\n",
+            "DB_NOOP(1);\n",
+            "IF\n",
+            "QRY_User(_Actor)\n",
+            "AND\n",
+            "UnknownCondition(_Actor)\n",
+            "THEN\n",
+            "UnknownAction(_Actor);\n",
+            "PROC\n",
+            "PROC_User(_Actor)\n",
+            "AND\n",
+            "UnknownCondition(_Actor)\n",
+            "THEN\n",
+            "UnknownAction(_Actor);\n",
+            "QRY\n",
+            "QRY_User(_Actor)\n",
+            "AND\n",
+            "UnknownCondition(_Actor)\n",
+            "THEN\n",
+            "DB_NOOP(1);\n",
+            "IF\n",
+            "DB_User(_Actor)\n",
+            "THEN\n",
+            "NOT DB_User(_Actor);\n",
+            "EXITSECTION\n",
+            "NOT HasPassive(11111111-1111-1111-1111-111111111111, \"P\", 1);\n",
+            "ENDEXITSECTION\n",
+        );
+        let parsed = parse_source(
+            SourceFile {
+                path: Path::new("Mods/MyMod/Story/RawFiles/Goals/Roles.txt").into(),
+                kind: SourceKind::Osiris,
+            },
+            text,
+            &SchemaCatalog::default(),
+            "English",
+        )
+        .expect("valid Osiris source");
+
+        let role_issues = parsed
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "osiris-invalid-callable-role")
+            .collect::<Vec<_>>();
+        assert_eq!(role_issues.len(), 8);
+        assert!(role_issues.iter().any(|issue| {
+            issue
+                .message
+                .contains("only events and databases can be the first trigger")
+        }));
+        assert!(role_issues.iter().any(|issue| {
+            issue
+                .message
+                .contains("cannot be used as a condition; only queries, sysqueries, user queries, and databases")
+        }));
+        assert!(role_issues.iter().any(|issue| {
+            issue.message.contains(
+                "cannot be used as an action; only calls, syscalls, procedures, and databases",
+            )
+        }));
+        assert_eq!(
+            parsed
+                .issues
+                .iter()
+                .filter(|issue| issue.code == "osiris-invalid-negation")
+                .count(),
+            2
+        );
+        assert!(parsed.issues.iter().all(|issue| {
+            issue.code == "osiris-invalid-callable-role" || issue.code == "osiris-invalid-negation"
+        }));
     }
 
     #[test]

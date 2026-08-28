@@ -605,6 +605,14 @@ callable parameters as type evidence but does not diagnose engine call
 arguments, so a specific `CHARACTER` value remains valid for an engine
 parameter that accepts generic `GUIDSTRING`.
 
+Known engine callables also receive conservative role checks. Events must be
+the first trigger of an `IF` rule, queries and sysqueries must be conditions,
+and calls and syscalls must be actions. `NOT` is diagnosed on actions when it
+is applied to a known engine callable; database facts remain valid negated
+conditions and removals. Unknown names remain silent because they may be
+user-defined callables from another Story source; a `DB_`, `QRY_`, or `PROC_`
+prefix alone does not establish a role.
+
 Rule-local Osiris variables provide definition, reference, and hover navigation
 when a rule head, positive user-database condition, or generated query
 `[out]` parameter proves their binding. Bindings and types flow forward through
@@ -760,6 +768,8 @@ The stable syntax diagnostic codes are:
 | Thoth | `thoth-syntax-error` | Thoth syntax only |
 | Thoth | `thoth-annotation-error` | Supported annotation syntax |
 | Osiris goals | `osiris-syntax-error` | Osiris goal syntax |
+| Osiris goals | `osiris-invalid-callable-role` | Known engine callable placement |
+| Osiris goals | `osiris-invalid-negation` | `NOT` action applied to a known engine callable |
 
 Human output uses one-based lines and columns. JSON output uses zero-based
 `line` and `character` values that match LSP positions. `--fail-on` accepts
