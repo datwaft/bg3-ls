@@ -1596,10 +1596,27 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
         "osiris-syntax-error",
         "The Osiris goal syntax is not valid.",
     );
-    collect_osiris_callable_role_issues(root, text, &mut issues)?;
+    // A `.txt` file below a Goals directory must contain a complete goal.
+    // The grammar also accepts standalone callable signatures for editor
+    // tooling, and Tree-sitter can recover a partial goal while a document is
+    // being edited. Neither shape is an indexable goal source. Keep the
+    // syntax issues from the recovery tree, but do not let partial facts leak
+    // into module or database indexes.
+    let Some(goal_root) = complete_osiris_goal_root(root) else {
+        return Ok(ParsedFile {
+            source,
+            definitions: Vec::new(),
+            references: Vec::new(),
+            observed_functions: Vec::new(),
+            issues,
+            osiris: None,
+            thoth: None,
+        });
+    };
+    collect_osiris_callable_role_issues(goal_root, text, &mut issues)?;
 
     let mut goal_fields = BTreeMap::new();
-    if let Some(version) = direct_child(root, "version_declaration")
+    if let Some(version) = direct_child(goal_root, "version_declaration")
         && let Some(value) = field(version, "value")
     {
         goal_fields.insert(
@@ -1607,13 +1624,13 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
             value.utf8_text(text.as_bytes())?.to_owned(),
         );
     }
-    let goal_selection = direct_child(root, "version_declaration")
+    let goal_selection = direct_child(goal_root, "version_declaration")
         .map(node_range)
-        .unwrap_or_else(|| node_range(root));
+        .unwrap_or_else(|| node_range(goal_root));
     let mut definitions = vec![Definition {
         kind: OSIRIS_GOAL_KIND.into(),
         name: goal.clone(),
-        range: node_range(root),
+        range: node_range(goal_root),
         selection_range: goal_selection,
         fields: goal_fields,
         field_ranges: BTreeMap::new(),
@@ -1626,8 +1643,8 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
     let mut references = Vec::new();
     let mut occurrences = Vec::new();
     let mut variables = Vec::new();
-    let mut cursor = root.walk();
-    for node in root.named_children(&mut cursor) {
+    let mut cursor = goal_root.walk();
+    for node in goal_root.named_children(&mut cursor) {
         match node.kind() {
             "init_section" | "exit_section" => {
                 let mut section_cursor = node.walk();
@@ -1906,6 +1923,36 @@ fn osiris_contract_kind_name(kind: OsirisContractKind) -> &'static str {
     }
 }
 
+/// Returns the complete goal node represented by one Osiris parse tree.
+///
+/// `source_file` also accepts the standalone callable-signature form used by
+/// editor tooling. The goal grammar may wrap its required sections in a
+/// named `goal_file` node, while older generated parsers expose those sections
+/// directly under `source_file`; accept both shapes through their structural
+/// contract instead of relying on one generated node name. Syntax errors do
+/// not disqualify a structurally complete goal: loose parsing must preserve
+/// the recovered declarations and facts that editor features can still use.
+fn complete_osiris_goal_root(root: Node<'_>) -> Option<Node<'_>> {
+    if has_complete_osiris_goal_sections(root) {
+        return Some(root);
+    }
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .find(|child| has_complete_osiris_goal_sections(*child))
+}
+
+/// Checks the required top-level structure of a complete Osiris goal.
+fn has_complete_osiris_goal_sections(node: Node<'_>) -> bool {
+    [
+        "version_declaration",
+        "subgoal_combiner_declaration",
+        "init_section",
+        "kb_section",
+        "exit_section",
+    ]
+    .into_iter()
+    .all(|kind| direct_child(node, kind).is_some())
+}
 /// Extracts one complete rule and its rule-local explicit variable types.
 fn parse_osiris_rule(
     rule: Node<'_>,
@@ -4154,9 +4201,13 @@ mod tests {
             .set_language(&tree_sitter_bg3::BG3_OSIRIS_LANGUAGE.into())
             .expect("Osiris grammar");
         let tree = parser.parse(text, None).expect("tree");
-        let rule = tree
+        let goal = tree
             .root_node()
             .named_children(&mut tree.root_node().walk())
+            .find(|node| node.kind() == "goal_file")
+            .expect("goal file");
+        let rule = goal
+            .named_children(&mut goal.walk())
             .find(|node| node.kind() == "kb_section")
             .and_then(|section| {
                 section
@@ -4345,9 +4396,13 @@ mod tests {
             .set_language(&tree_sitter_bg3::BG3_OSIRIS_LANGUAGE.into())
             .expect("Osiris grammar");
         let tree = parser.parse(text, None).expect("tree");
-        let rule = tree
+        let goal = tree
             .root_node()
             .named_children(&mut tree.root_node().walk())
+            .find(|node| node.kind() == "goal_file")
+            .expect("goal file");
+        let rule = goal
+            .named_children(&mut goal.walk())
             .find(|node| node.kind() == "kb_section")
             .and_then(|section| {
                 section
@@ -4489,9 +4544,13 @@ mod tests {
             .set_language(&tree_sitter_bg3::BG3_OSIRIS_LANGUAGE.into())
             .expect("Osiris grammar");
         let tree = parser.parse(text, None).expect("tree");
-        let rule = tree
+        let goal = tree
             .root_node()
             .named_children(&mut tree.root_node().walk())
+            .find(|node| node.kind() == "goal_file")
+            .expect("goal file");
+        let rule = goal
+            .named_children(&mut goal.walk())
             .find(|node| node.kind() == "kb_section")
             .and_then(|section| {
                 section
