@@ -976,9 +976,10 @@ pub fn function_spec(name: &str) -> Option<&'static FunctionSpec> {
 
 /// One curated engine event signature with ordered parameter aliases.
 ///
-/// Alias names follow the Osiris story compiler vocabulary. The server treats
-/// every alias as its own exact name; it never relates two aliases, so a
-/// `CHARACTER` value and a plain `GUIDSTRING` value are different evidence.
+/// Alias names follow the Osiris story compiler vocabulary. The database
+/// checker applies the verified GUID-family compatibility rules from the
+/// versioned generated catalog; this table only supplies event parameter
+/// evidence.
 pub type OsirisSignature = &'static [&'static str];
 
 /// Curated engine event signatures covering the full installed event set.
@@ -986,8 +987,7 @@ pub type OsirisSignature = &'static [&'static str];
 /// Transcribed from the machine-generated community reference of the
 /// installed engine API (`Osi.Events.lua`, retrieved 2026-08-25). Primitive
 /// parameter spellings map to Osiris aliases: `integer` to `INTEGER`,
-/// `string` to `STRING`, and `number` to `REAL`. Every alias is atomic; no
-/// subtype relations exist between aliases. Only rule heads consult this
+/// `string` to `STRING`, and `number` to `REAL`. Only rule heads consult this
 /// table, and only to derive evidence that an uncast head-bound variable
 /// would carry.
 const OSIRIS_SIGNATURES: &[(&str, OsirisSignature)] = &[

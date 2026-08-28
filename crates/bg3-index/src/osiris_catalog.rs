@@ -20,6 +20,87 @@ pub use generated_osiris_catalog::{
 /// Version of the checked-in generated contract format.
 pub const OSIRIS_CATALOG_GENERATOR_VERSION: &str = "bg3-ls-osiris-catalog-v1";
 
+/// The generic GUID value type used by the BG3 Osiris compiler.
+pub const OSIRIS_GUIDSTRING_TYPE: &str = "GUIDSTRING";
+
+/// BG3 GUID aliases verified for the generated contract catalog's source
+/// build. Each name has GUIDSTRING as its intrinsic type, but two different
+/// specialized aliases are not interchangeable. Keep this list tied to the
+/// versioned catalog until alias metadata is emitted by the catalog
+/// generator; unknown names must remain unresolved.
+pub const OSIRIS_GUID_ALIASES: &[&str] = &[
+    "ANIMATION",
+    "CHARACTER",
+    "CHARACTERROOT",
+    "DIALOGRESOURCE",
+    "DIFFICULTYCLASS",
+    "DISTURBANCEPROPERTY",
+    "DLC",
+    "EFFECTRESOURCE",
+    "FACTION",
+    "FLAG",
+    "GOLDREWARD",
+    "ITEM",
+    "ITEMROOT",
+    "LEVELTEMPLATE",
+    "PLATFORM",
+    "ROOT",
+    "RULESETMODIFIER",
+    "SHAPESHIFTRULE",
+    "SPLINE",
+    "TAG",
+    "TIMELINERESOURCE",
+    "TRIGGER",
+    "TUTORIALEVENT",
+    "UNIFIEDTUTORIAL",
+    "VOICEBARKRESOURCE",
+];
+
+const OSIRIS_INTRINSIC_TYPES: &[&str] = &["INTEGER", "INTEGER64", "REAL", "STRING"];
+
+/// Returns whether two proven Osiris type names are compatible for a
+/// database argument.
+///
+/// `Some(true)` means that the names are equal or that one is the generic
+/// `GUIDSTRING` type and the other is a verified BG3 GUID alias. `Some(false)`
+/// means that both names are verified, distinct specialized GUID aliases.
+/// `None` means that the relationship is not known and callers must stay
+/// silent rather than guessing. The same rule applies to non-GUID types: an
+/// exact spelling is compatible, while different or unknown spellings are not
+/// proven compatible.
+pub fn osiris_type_compatibility(left: &str, right: &str) -> Option<bool> {
+    if left == right {
+        return Some(true);
+    }
+
+    let left_is_guid_alias = left == OSIRIS_GUIDSTRING_TYPE || OSIRIS_GUID_ALIASES.contains(&left);
+    let right_is_guid_alias =
+        right == OSIRIS_GUIDSTRING_TYPE || OSIRIS_GUID_ALIASES.contains(&right);
+    if left_is_guid_alias && right_is_guid_alias {
+        if left == OSIRIS_GUIDSTRING_TYPE || right == OSIRIS_GUIDSTRING_TYPE {
+            Some(true)
+        } else {
+            Some(false)
+        }
+    } else if is_known_osiris_type(left) && is_known_osiris_type(right) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn is_known_osiris_type(type_name: &str) -> bool {
+    OSIRIS_INTRINSIC_TYPES.contains(&type_name)
+        || type_name == OSIRIS_GUIDSTRING_TYPE
+        || OSIRIS_GUID_ALIASES.contains(&type_name)
+        || OSIRIS_CONTRACTS.iter().any(|contract| {
+            contract
+                .parameters
+                .iter()
+                .any(|parameter| parameter.type_name == type_name)
+        })
+}
+
 /// The direction of one Osiris query parameter.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum OsirisParameterDirection {

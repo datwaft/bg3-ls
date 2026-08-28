@@ -1,8 +1,39 @@
 use bg3_index::{
     context_member, context_members, context_properties, context_property, context_side,
     enum_value, field_documentation, function_spec, functor_prefix, functor_prefixes,
-    member_enumeration, osiris_signature,
+    member_enumeration, osiris_signature, osiris_type_compatibility,
 };
+
+#[test]
+fn models_verified_bg3_guid_family_compatibility() {
+    assert_eq!(
+        osiris_type_compatibility("GUIDSTRING", "CHARACTER"),
+        Some(true)
+    );
+    assert_eq!(
+        osiris_type_compatibility("CHARACTER", "GUIDSTRING"),
+        Some(true)
+    );
+    assert_eq!(
+        osiris_type_compatibility("CHARACTER", "CHARACTER"),
+        Some(true)
+    );
+    assert_eq!(osiris_type_compatibility("CHARACTER", "ITEM"), Some(false));
+    assert_eq!(
+        osiris_type_compatibility("CHARACTER", "CHARACTERGUID"),
+        None,
+        "unverified DOS2 spellings stay unknown"
+    );
+    assert_eq!(osiris_type_compatibility("INTEGER", "REAL"), Some(false));
+    assert_eq!(
+        osiris_type_compatibility("INTEGER", "CHARACTER"),
+        Some(false)
+    );
+    assert_eq!(
+        osiris_type_compatibility("UNVERIFIED", "UNVERIFIED"),
+        Some(true)
+    );
+}
 
 #[test]
 fn preserves_the_original_engine_event_signatures() {

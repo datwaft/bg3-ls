@@ -596,14 +596,15 @@ Osiris goals receive the stable `osiris-database-alias-mismatch` error when a
 user database column receives two different aliases across the visible loose
 goals of the workspace. Schema establishment follows alphabetical goal order
 and source occurrence order within each goal, independently of module
-precedence. A column established as `CHARACTER` by a cast or an engine event
-signature rejects a later plain `GUIDSTRING` argument, matching the story
-compiler. Uncast variables inherit aliases from the versioned
-generated engine contract catalog, which covers installed events, calls, and
-queries; unknown contracts and unknown columns stay silent. The server uses
-callable parameters as type evidence but does not diagnose engine call
-arguments, so a specific `CHARACTER` value remains valid for an engine
-parameter that accepts generic `GUIDSTRING`.
+precedence. The checker accepts a generic `GUIDSTRING` with any verified
+specialized GUID alias, such as `CHARACTER` or `ITEM`, but rejects two
+different specialized aliases, such as `CHARACTER` and `ITEM`, when both are
+proven. Unknown aliases remain silent. Uncast variables inherit aliases from
+the versioned generated engine contract catalog, which covers installed
+events, calls, and queries; unknown contracts and unknown columns stay silent.
+The server uses callable parameters as type evidence but does not diagnose
+engine call arguments, so a specific `CHARACTER` value remains valid for an
+engine parameter that accepts generic `GUIDSTRING`.
 
 Known engine callables also receive conservative role checks. Events must be
 the first trigger of an `IF` rule, queries and sysqueries must be conditions,
@@ -865,9 +866,10 @@ unambiguous annotations and stay silent for unknown receivers or fields.
 
 Osiris support does not execute or compile Story, provide control-flow
 analysis, or infer aliases from a mod-local `story_header.div`. Runtime engine
-contracts come from the checked-in generated catalog; regenerating that catalog
-is a maintainer operation that requires the game installation. Variable
-tracking remains rule-local and conservative: it
+contracts and the verified GUID-family aliases are versioned with the
+checked-in generated catalog; regenerating that catalog is a maintainer
+operation that requires the game installation. Variable tracking remains
+rule-local and conservative: it
 does not infer bindings through unknown callable directions, negation, or
 uncertain control flow. Database alias compatibility is diagnosed only when
 the visible source or curated event signatures prove the relevant aliases.

@@ -18,7 +18,8 @@ use bg3_index::{
     PackagedStatsCatalog, PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts,
     ParsedFile, Position, Reference, SchemaCatalog, SourceKind, SymbolTarget,
     THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile,
-    TooltipCatalog, canonical_kind, osiris_contract, parse_packaged_thoth_facts,
+    TooltipCatalog, canonical_kind, osiris_contract, osiris_type_compatibility,
+    parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -56,6 +57,11 @@ pub(crate) struct OsirisDatabaseColumnSchema {
     pub(crate) established: Option<OsirisDatabaseTypeObservation>,
     pub(crate) conflicts: Vec<OsirisDatabaseTypeObservation>,
     pub(crate) ambiguous: bool,
+    /// All distinct source observations in Story order. The established
+    /// observation is not enough to compare GUID aliases because generic
+    /// `GUIDSTRING` is compatible with each specialized alias while those
+    /// aliases are not compatible with each other.
+    observations: Vec<OsirisDatabaseTypeObservation>,
 }
 
 /// One implicit database schema assembled from all visible loose Story goals.
@@ -1725,25 +1731,23 @@ fn fold_osiris_database_records(
             // Equal-name goals have no language-defined ordering. A
             // disagreement in the group is therefore ambiguous.
             for column in 0..usize::from(schema.arity) {
-                let mut known = BTreeMap::<String, OsirisDatabaseTypeObservation>::new();
+                let mut known = Vec::<OsirisDatabaseTypeObservation>::new();
                 for record in &records[start..end] {
                     if let Some(Some(observation)) = record.arguments.get(column) {
-                        known
-                            .entry(observation.type_name.clone())
-                            .or_insert_with(|| observation.clone());
+                        add_osiris_type_observation(&mut known, observation.clone());
                     }
                 }
                 let Some(column_schema) = schema.columns.get_mut(column) else {
                     continue;
                 };
-                if known.len() > 1 {
+                if !known.is_empty() && osiris_type_observations_resolve(&known).is_none() {
                     column_schema.established = None;
                     column_schema.conflicts.clear();
                     column_schema.ambiguous = true;
-                } else if !column_schema.ambiguous
-                    && let Some((_, observation)) = known.into_iter().next()
-                {
-                    fold_osiris_database_type(column_schema, observation);
+                } else if !column_schema.ambiguous {
+                    for observation in known {
+                        fold_osiris_database_type(column_schema, observation);
+                    }
                 }
             }
         } else {
@@ -1767,11 +1771,11 @@ fn propagatable_osiris_database_types(
     occurrences: &[OrderedDatabaseOccurrence],
     goal_source_counts: &BTreeMap<String, usize>,
 ) -> BTreeMap<OsirisDatabaseColumnKey, Option<String>> {
-    let mut states = BTreeMap::<OsirisDatabaseColumnKey, BTreeSet<String>>::new();
+    let mut states = BTreeMap::<OsirisDatabaseColumnKey, Vec<String>>::new();
     let mut ambiguous = BTreeSet::<OsirisDatabaseColumnKey>::new();
     let mut outgoing =
         BTreeMap::<OsirisDatabaseColumnKey, BTreeSet<OsirisDatabaseColumnKey>>::new();
-    let mut direct_by_goal = BTreeMap::<(OsirisDatabaseColumnKey, String), BTreeSet<String>>::new();
+    let mut direct_by_goal = BTreeMap::<(OsirisDatabaseColumnKey, String), Vec<String>>::new();
 
     for occurrence in occurrences {
         for column in 0..usize::from(occurrence.arity) {
@@ -1785,14 +1789,16 @@ fn propagatable_osiris_database_types(
         for column in 0..usize::from(occurrence.arity) {
             let target = (occurrence.name.clone(), occurrence.arity, column);
             if let Some(Some(observation)) = occurrence.arguments.get(column) {
-                states
-                    .entry(target.clone())
-                    .or_default()
-                    .insert(observation.type_name.clone());
-                direct_by_goal
-                    .entry((target.clone(), occurrence.goal.clone()))
-                    .or_default()
-                    .insert(observation.type_name.clone());
+                add_osiris_type_candidate(
+                    states.entry(target.clone()).or_default(),
+                    observation.type_name.clone(),
+                );
+                add_osiris_type_candidate(
+                    direct_by_goal
+                        .entry((target.clone(), occurrence.goal.clone()))
+                        .or_default(),
+                    observation.type_name.clone(),
+                );
             }
             if let Some(Some(source)) = occurrence.propagation_sources.get(column) {
                 outgoing
@@ -1808,7 +1814,9 @@ fn propagatable_osiris_database_types(
     // ordering. Only incompatible direct write evidence is ambiguous; equal
     // evidence remains usable.
     for ((column, goal), types) in direct_by_goal {
-        if goal_source_counts.get(&goal).copied().unwrap_or_default() > 1 && types.len() > 1 {
+        if goal_source_counts.get(&goal).copied().unwrap_or_default() > 1
+            && osiris_type_candidates_resolve(&types).is_none()
+        {
             ambiguous.insert(column);
         }
     }
@@ -1874,19 +1882,21 @@ fn propagatable_osiris_database_types(
 
     let mut component_types = vec![None::<String>; components.len()];
     for component in component_order {
-        let mut candidates = BTreeSet::new();
+        let mut candidates = Vec::new();
         let mut blocked = false;
         for key in &components[component] {
-            candidates.extend(states[key].iter().cloned());
+            for type_name in &states[key] {
+                add_osiris_type_candidate(&mut candidates, type_name.clone());
+            }
             blocked |= ambiguous.contains(key);
         }
         for predecessor in &predecessors[component] {
             if let Some(type_name) = &component_types[*predecessor] {
-                candidates.insert(type_name.clone());
+                add_osiris_type_candidate(&mut candidates, type_name.clone());
             }
         }
-        if !blocked && candidates.len() == 1 {
-            component_types[component] = candidates.into_iter().next();
+        if !blocked {
+            component_types[component] = osiris_type_candidates_resolve(&candidates);
         }
     }
 
@@ -1971,6 +1981,57 @@ fn range_covers(outer: TextRange, inner: TextRange) -> bool {
         && (inner.end.line, inner.end.character) <= (outer.end.line, outer.end.character)
 }
 
+/// Retains each distinct candidate. Compatibility is not transitive for the
+/// GUID family: `GUIDSTRING` matches both `CHARACTER` and `ITEM`, while those
+/// specialized aliases do not match each other. The complete candidate set is
+/// therefore required before a type can be selected.
+fn add_osiris_type_candidate(candidates: &mut Vec<String>, type_name: String) {
+    if candidates.iter().any(|candidate| candidate == &type_name) {
+        return;
+    }
+    candidates.push(type_name);
+}
+
+/// Retains one source location for each distinct type in an equal-order goal
+/// group. A later schema fold still records every retained type so ordered
+/// observations can report the first proven pairwise mismatch.
+fn add_osiris_type_observation(
+    observations: &mut Vec<OsirisDatabaseTypeObservation>,
+    observation: OsirisDatabaseTypeObservation,
+) {
+    if observations
+        .iter()
+        .any(|existing| existing.type_name == observation.type_name)
+    {
+        return;
+    }
+    observations.push(observation);
+}
+
+/// Returns the first candidate when every distinct candidate is pairwise
+/// proven compatible. Unknown relationships and proven mismatches both stay
+/// unresolved so propagation cannot make an unsafe choice.
+fn osiris_type_candidates_resolve(candidates: &[String]) -> Option<String> {
+    for (index, left) in candidates.iter().enumerate() {
+        for right in &candidates[index + 1..] {
+            if osiris_type_compatibility(left, right) != Some(true) {
+                return None;
+            }
+        }
+    }
+    candidates.first().cloned()
+}
+
+fn osiris_type_observations_resolve(
+    observations: &[OsirisDatabaseTypeObservation],
+) -> Option<String> {
+    let types = observations
+        .iter()
+        .map(|observation| observation.type_name.clone())
+        .collect::<Vec<_>>();
+    osiris_type_candidates_resolve(&types)
+}
+
 fn fold_osiris_database_type(
     column: &mut OsirisDatabaseColumnSchema,
     observation: OsirisDatabaseTypeObservation,
@@ -1978,11 +2039,14 @@ fn fold_osiris_database_type(
     if column.ambiguous {
         return;
     }
-    match &column.established {
-        None => column.established = Some(observation),
-        Some(established) if established.type_name == observation.type_name => {}
-        Some(_) => column.conflicts.push(observation),
+    if column.established.is_none() {
+        column.established = Some(observation.clone());
+    } else if column.observations.iter().any(|existing| {
+        osiris_type_compatibility(&existing.type_name, &observation.type_name) != Some(true)
+    }) {
+        column.conflicts.push(observation.clone());
     }
+    column.observations.push(observation);
 }
 
 pub(crate) fn osiris_database_parameter_types(schema: &OsirisDatabaseSchema) -> Vec<String> {

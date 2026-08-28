@@ -3,7 +3,7 @@ use std::path::Path;
 use bg3_index::{
     Definition, SchemaDefinition, SchemaField, SourceKind, SymbolTarget, TextRange,
     ThothBinaryOperator, ThothExpressionKind, ThothUnaryOperator, TypeExpression,
-    is_schema_discriminator,
+    is_schema_discriminator, osiris_type_compatibility,
 };
 use uuid::Uuid;
 
@@ -160,7 +160,8 @@ impl WorkspaceSnapshot {
     }
 }
 
-/// Diagnoses user database columns whose occurrences disagree on one alias.
+/// Diagnoses user database columns whose occurrences use incompatible proven
+/// GUID aliases.
 ///
 /// Establishment follows the global Story goal order, not module precedence.
 /// Compile-time evidence may come from any proven database occurrence, while
@@ -174,18 +175,42 @@ fn add_osiris_database_diagnostics(
     for schema in workspace.osiris_database_schemas(overlays).into_values() {
         for (index, column) in schema.columns.into_iter().enumerate() {
             // A column without an established alias has nothing to violate.
-            let Some(established) = column.established else {
+            if column.established.is_none() {
                 continue;
-            };
+            }
             if column.ambiguous {
                 continue;
             }
-            for conflict in column.conflicts {
-                if conflict.path != path {
+            for (observation_index, observation) in column.observations.iter().enumerate() {
+                if observation.path != path {
                     continue;
                 }
+                // Repeated values of the same proven type do not introduce a
+                // new mismatch. This also prevents a later repeat of an
+                // established alias from being reported only because an
+                // incompatible alias appeared between the two occurrences.
+                if column.observations[..observation_index]
+                    .iter()
+                    .any(|prior| prior.type_name == observation.type_name)
+                {
+                    continue;
+                }
+                // The compiler permits generic GUIDSTRING values to match a
+                // verified specialized alias. Different specialized aliases
+                // remain a proven mismatch; unknown relationships stay
+                // silent under the no-false-diagnostics policy.
+                let Some(established) =
+                    column.observations[..observation_index]
+                        .iter()
+                        .find(|prior| {
+                            osiris_type_compatibility(&prior.type_name, &observation.type_name)
+                                == Some(false)
+                        })
+                else {
+                    continue;
+                };
                 diagnostics.push(Diagnostic {
-                    range: conflict.range,
+                    range: observation.range,
                     severity: DiagnosticSeverity::Error,
                     code: "osiris-database-alias-mismatch".into(),
                     message: format!(
@@ -194,7 +219,7 @@ fn add_osiris_database_diagnostics(
                         schema.name,
                         schema.arity,
                         established.type_name,
-                        conflict.type_name,
+                        observation.type_name,
                         established.type_name,
                     ),
                 });
