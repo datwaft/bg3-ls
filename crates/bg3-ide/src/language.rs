@@ -7,13 +7,14 @@ use crate::{
 };
 use bg3_index::{
     Definition, FUNCTIONS, ModuleRole, OSIRIS_CONTRACTS, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
-    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedOsirisResolution, PackagedThothApiResolution,
-    PackagedThothApiSymbol, PackagedThothApiSymbolKind, PackagedThothCatalog, Position,
-    SchemaDefinition, SchemaField, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange,
-    ThothAnnotations, ThothFunctionContract, context_member, context_members, context_properties,
-    context_property, context_side, enum_value, field_documentation, field_kind, function_spec,
-    functor_prefix, functor_prefixes, is_lsx_value_field, is_structural_stats_value,
-    member_enumeration, osiris_contract,
+    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisContractKind, PackagedOsirisCallableRole,
+    PackagedOsirisResolution, PackagedThothApiResolution, PackagedThothApiSymbol,
+    PackagedThothApiSymbolKind, PackagedThothCatalog, Position, SchemaDefinition, SchemaField,
+    SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAnnotations,
+    ThothFunctionContract, context_member, context_members, context_properties, context_property,
+    context_side, enum_value, field_documentation, field_kind, function_spec, functor_prefix,
+    functor_prefixes, is_lsx_value_field, is_structural_stats_value, member_enumeration,
+    osiris_contract, osiris_legacy_signatures,
 };
 /// The semantic category of one completion result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1241,7 +1242,8 @@ impl WorkspaceSnapshot {
         items
     }
 
-    /// Completes visible user declarations only at Osiris call or parent-goal positions.
+    /// Completes Osiris declarations and generated engine contracts in their
+    /// valid statement positions.
     fn complete_osiris(
         &self,
         document: &str,
@@ -1257,7 +1259,16 @@ impl WorkspaceSnapshot {
         let mut seen = BTreeSet::new();
         let mut items = Vec::new();
         for layer in self.layers.iter().rev() {
-            let mut candidates = BTreeMap::<(String, String, u16), Definition>::new();
+            let mut candidates = BTreeMap::<(String, String, u16), Vec<Definition>>::new();
+            let incomplete_overlay_paths = overlays
+                .for_module(&layer.spec.name)
+                .filter(|(_, overlay)| {
+                    overlay.parsed.source.kind == SourceKind::Osiris
+                        && overlay.parsed.definitions.is_empty()
+                        && !overlay.parsed.issues.is_empty()
+                })
+                .map(|(path, _)| path.clone())
+                .collect::<BTreeSet<_>>();
             for (_, overlay) in overlays.for_module(&layer.spec.name) {
                 for definition in &overlay.parsed.definitions {
                     add_osiris_completion_candidate(
@@ -1269,7 +1280,9 @@ impl WorkspaceSnapshot {
                 }
             }
             for record in &layer.definitions {
-                if overlays.contains(record.path.as_ref()) {
+                if overlays.contains(record.path.as_ref())
+                    && !incomplete_overlay_paths.contains(record.path.as_ref())
+                {
                     continue;
                 }
                 add_osiris_completion_candidate(
@@ -1279,35 +1292,58 @@ impl WorkspaceSnapshot {
                     context.goals,
                 );
             }
-            for ((namespace, name, arity), definition) in candidates {
-                if !seen.insert((namespace, name.clone(), arity)) {
+            for ((namespace, name, arity), definitions) in candidates {
+                if !seen.insert((namespace.clone(), name.clone(), arity)) {
                     continue;
                 }
-                let mut item = basic_item(
-                    &name,
-                    context.prefix,
-                    position,
-                    if context.goals {
-                        CompletionKind::Reference
-                    } else {
-                        CompletionKind::Function
-                    },
-                );
-                item.detail = Some(if context.goals {
-                    format!("Osiris goal — {}", layer.spec.name)
-                } else {
-                    format!(
-                        "{} /{arity} — {}",
-                        osiris_kind_label(&definition.kind),
-                        layer.spec.name
-                    )
-                });
-                if snippets && !context.goals {
-                    let parameters = stored_parameters(&definition);
-                    item.new_text = osiris_call_snippet(&name, arity, &parameters);
-                    item.snippet = arity > 0;
+                // A same-rank PROC/QRY disagreement cannot be placed safely.
+                // Keep the key shadowed while suppressing both declarations;
+                // otherwise iteration order would choose one role by accident.
+                let mixed_callable_roles = namespace == "callable"
+                    && definitions
+                        .iter()
+                        .any(|definition| definition.kind == OSIRIS_PROCEDURE_KIND)
+                    && definitions
+                        .iter()
+                        .any(|definition| definition.kind == OSIRIS_QUERY_KIND);
+                if mixed_callable_roles {
+                    continue;
                 }
-                items.push(item);
+                for definition in definitions {
+                    let callable_kind = match definition.kind.as_str() {
+                        OSIRIS_PROCEDURE_KIND => Some(OsirisContractKind::Call),
+                        OSIRIS_QUERY_KIND => Some(OsirisContractKind::Query),
+                        _ => None,
+                    };
+                    if !osiris_callable_allowed(callable_kind, context.position) {
+                        continue;
+                    }
+                    let mut item = basic_item(
+                        &name,
+                        context.prefix,
+                        position,
+                        if context.goals {
+                            CompletionKind::Reference
+                        } else {
+                            CompletionKind::Function
+                        },
+                    );
+                    item.detail = Some(if context.goals {
+                        format!("Osiris goal — {}", layer.spec.name)
+                    } else {
+                        format!(
+                            "{} /{arity} — {}",
+                            osiris_kind_label(&definition.kind),
+                            layer.spec.name
+                        )
+                    });
+                    if snippets && !context.goals {
+                        let parameters = stored_parameters(&definition);
+                        item.new_text = osiris_call_snippet(&name, arity, &parameters);
+                        item.snippet = arity > 0;
+                    }
+                    items.push(item);
+                }
             }
         }
         if !context.goals {
@@ -1325,11 +1361,17 @@ impl WorkspaceSnapshot {
                     if !seen.insert(("callable".into(), name.clone(), arity)) {
                         continue;
                     }
+                    let Some(kind) = osiris_contract_kind_from_packaged_role(callable.role) else {
+                        continue;
+                    };
+                    if !osiris_callable_allowed(Some(kind), context.position) {
+                        continue;
+                    }
                     let mut item =
                         basic_item(&name, context.prefix, position, CompletionKind::Function);
                     item.detail = Some(format!(
                         "{} /{arity} — installed {module}",
-                        osiris_kind_label(&callable.kind)
+                        osiris_contract_kind_label(kind)
                     ));
                     if snippets {
                         item.new_text = osiris_call_snippet(&name, arity, &callable.parameters);
@@ -1337,6 +1379,76 @@ impl WorkspaceSnapshot {
                     }
                     items.push(item);
                 }
+            }
+
+            for contract in OSIRIS_CONTRACTS {
+                let arity = u16::try_from(contract.parameters.len()).unwrap_or(u16::MAX);
+                if !starts_with_case_insensitive(contract.name, context.prefix)
+                    || !osiris_callable_allowed(Some(contract.kind), context.position)
+                    || osiris_contract(OSIRIS_CONTRACTS, contract.name, arity).is_none()
+                    || !seen.insert(("callable".into(), contract.name.to_owned(), arity))
+                {
+                    continue;
+                }
+                let mut item = basic_item(
+                    contract.name,
+                    context.prefix,
+                    position,
+                    CompletionKind::Function,
+                );
+                item.detail = Some(format!(
+                    "{} /{arity} — generated BG3 engine catalog",
+                    osiris_contract_kind_label(contract.kind)
+                ));
+                if let Some(description) =
+                    bg3_index::osiris_callable_description(contract.name, arity)
+                {
+                    item.documentation = Some(description.to_owned());
+                }
+                if snippets {
+                    let parameters = contract
+                        .parameters
+                        .iter()
+                        .map(|parameter| {
+                            format!(
+                                "{} {} {}",
+                                osiris_parameter_direction(parameter.direction),
+                                parameter.type_name,
+                                parameter.name
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    item.new_text = osiris_call_snippet(contract.name, arity, &parameters);
+                    item.snippet = arity > 0;
+                }
+                items.push(item);
+            }
+
+            // Keep the small legacy event table discoverable for contracts
+            // that are not present in the generated story header. Generated
+            // entries win through the same completion key, while aliases
+            // that remain legacy-only still get a conservative event item.
+            for (name, aliases) in osiris_legacy_signatures() {
+                let arity = u16::try_from(aliases.len()).unwrap_or(u16::MAX);
+                if !starts_with_case_insensitive(name, context.prefix)
+                    || !osiris_callable_allowed(Some(OsirisContractKind::Event), context.position)
+                    || !seen.insert(("callable".into(), (*name).to_owned(), arity))
+                {
+                    continue;
+                }
+                let mut item = basic_item(name, context.prefix, position, CompletionKind::Function);
+                item.detail = Some(format!(
+                    "Osiris engine event /{arity} — legacy event catalog"
+                ));
+                if snippets {
+                    let parameters = aliases
+                        .iter()
+                        .map(|alias| (*alias).to_owned())
+                        .collect::<Vec<_>>();
+                    item.new_text = osiris_call_snippet(name, arity, &parameters);
+                    item.snippet = arity > 0;
+                }
+                items.push(item);
             }
         }
         items
@@ -1907,7 +2019,27 @@ impl WorkspaceSnapshot {
                         || contract.parameters.len() >= usize::from(needed))
             })
             .map(|contract| contract.parameters.len())
-            .min()?;
+            .min();
+        let Some(arity) = arity else {
+            let aliases = osiris_legacy_signatures()
+                .iter()
+                .filter(|(candidate, aliases)| {
+                    *candidate == name
+                        && (aliases.is_empty() || aliases.len() >= usize::from(needed))
+                })
+                .min_by_key(|(_, aliases)| aliases.len())
+                .map(|(_, aliases)| *aliases)?;
+            let parameters = aliases
+                .iter()
+                .map(|alias| (*alias).to_owned())
+                .collect::<Vec<_>>();
+            return Some(SignatureHelp {
+                label: format!("{name}({})", parameters.join(", ")),
+                documentation: "Verified against the curated legacy engine event catalog.".into(),
+                parameters,
+                active_parameter: argument,
+            });
+        };
         let contract = osiris_contract(OSIRIS_CONTRACTS, name, u16::try_from(arity).ok()?)?;
         let parameters = contract
             .parameters
@@ -1996,6 +2128,15 @@ enum CallParen {
 struct OsirisCompletionContext<'a> {
     prefix: &'a str,
     goals: bool,
+    position: OsirisCompletionPosition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OsirisCompletionPosition {
+    RuleHead,
+    Condition,
+    Action,
+    Declaration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2058,7 +2199,7 @@ fn split_parameters(parameters: &str) -> Vec<String> {
 
 /// Adds one logical Osiris declaration to a module-rank completion group.
 fn add_osiris_completion_candidate(
-    candidates: &mut BTreeMap<(String, String, u16), Definition>,
+    candidates: &mut BTreeMap<(String, String, u16), Vec<Definition>>,
     definition: &Definition,
     prefix: &str,
     goals: bool,
@@ -2067,10 +2208,10 @@ fn add_osiris_completion_candidate(
         if definition.kind == OSIRIS_GOAL_KIND
             && starts_with_case_insensitive(&definition.name, prefix)
         {
-            candidates.insert(
-                ("goal".into(), definition.name.clone(), 0),
-                definition.clone(),
-            );
+            candidates
+                .entry(("goal".into(), definition.name.clone(), 0))
+                .or_default()
+                .push(definition.clone());
         }
         return;
     }
@@ -2085,10 +2226,10 @@ fn add_osiris_completion_candidate(
     let Some(arity) = definition.arity else {
         return;
     };
-    candidates.insert(
-        (namespace.into(), definition.name.clone(), arity),
-        definition.clone(),
-    );
+    candidates
+        .entry((namespace.into(), definition.name.clone(), arity))
+        .or_default()
+        .push(definition.clone());
 }
 
 /// Selects one incomplete Osiris call name or parent-goal string.
@@ -2097,12 +2238,16 @@ fn osiris_completion_context<'a>(
     line: &'a str,
     line_number: u32,
 ) -> Option<OsirisCompletionContext<'a>> {
+    if osiris_prefix_is_in_comment(document, line_number, line) {
+        return None;
+    }
     let trimmed = line.trim_start();
     if let Some(prefix) = trimmed.strip_prefix("ParentTargetEdge") {
         let prefix = prefix.trim_start().strip_prefix('"')?;
         return (!prefix.contains('"')).then_some(OsirisCompletionContext {
             prefix,
             goals: true,
+            position: OsirisCompletionPosition::Declaration,
         });
     }
     if !inside_osiris_statement_section(document, line_number) {
@@ -2110,12 +2255,21 @@ fn osiris_completion_context<'a>(
     }
 
     let mut call = trimmed;
+    let mut position = None;
     loop {
         let previous = call;
         for keyword in ["IF", "PROC", "QRY", "AND", "THEN", "NOT"] {
             if let Some(rest) = call.strip_prefix(keyword)
                 && rest.chars().next().is_none_or(char::is_whitespace)
             {
+                position = match keyword {
+                    "IF" => Some(OsirisCompletionPosition::RuleHead),
+                    "PROC" | "QRY" => Some(OsirisCompletionPosition::Declaration),
+                    "AND" => Some(OsirisCompletionPosition::Condition),
+                    "THEN" => Some(OsirisCompletionPosition::Action),
+                    "NOT" => position,
+                    _ => None,
+                };
                 call = rest.trim_start();
                 break;
             }
@@ -2130,19 +2284,104 @@ fn osiris_completion_context<'a>(
     {
         return None;
     }
+    let position = position.or_else(|| osiris_completion_position_before(document, line_number))?;
     Some(OsirisCompletionContext {
         prefix: call,
         goals: false,
+        position,
     })
+}
+
+/// Finds the statement role established by the complete lines before the
+/// cursor. Osiris commonly puts each rule keyword on its own line, so the
+/// current line alone is not enough to distinguish a head from a condition
+/// or action.
+fn osiris_completion_position_before(
+    document: &str,
+    line_number: u32,
+) -> Option<OsirisCompletionPosition> {
+    let mut position = None;
+    let mut block_comment = false;
+    for line in document
+        .split('\n')
+        .take(usize::try_from(line_number).unwrap_or(usize::MAX))
+    {
+        let line = strip_osiris_comments(line, &mut block_comment);
+        match line.trim() {
+            "IF" => position = Some(OsirisCompletionPosition::RuleHead),
+            "PROC" | "QRY" => position = Some(OsirisCompletionPosition::Declaration),
+            "AND" => position = Some(OsirisCompletionPosition::Condition),
+            "THEN" | "INITSECTION" | "EXITSECTION" => {
+                position = Some(OsirisCompletionPosition::Action)
+            }
+            "KBSECTION" => position = Some(OsirisCompletionPosition::RuleHead),
+            "ENDEXITSECTION" => position = None,
+            _ => {}
+        }
+    }
+    position
+}
+
+/// Tests whether one callable contract is valid in the current statement
+/// role. Database facts are handled separately because they are valid as
+/// reads and writes, while engine and user callables have fixed roles.
+fn osiris_callable_allowed(
+    kind: Option<OsirisContractKind>,
+    position: OsirisCompletionPosition,
+) -> bool {
+    match (kind, position) {
+        (_, OsirisCompletionPosition::Declaration) => false,
+        (Some(OsirisContractKind::Event), OsirisCompletionPosition::RuleHead) => true,
+        (
+            Some(OsirisContractKind::Query | OsirisContractKind::Sysquery),
+            OsirisCompletionPosition::Condition,
+        ) => true,
+        (
+            Some(OsirisContractKind::Call | OsirisContractKind::Syscall),
+            OsirisCompletionPosition::Action,
+        ) => true,
+        (None, _) => true,
+        _ => false,
+    }
+}
+
+fn osiris_contract_kind_from_packaged_role(
+    role: PackagedOsirisCallableRole,
+) -> Option<OsirisContractKind> {
+    match role {
+        PackagedOsirisCallableRole::Procedure => Some(OsirisContractKind::Call),
+        PackagedOsirisCallableRole::Query => Some(OsirisContractKind::Query),
+        PackagedOsirisCallableRole::Unknown => None,
+    }
+}
+
+fn osiris_contract_kind_label(kind: OsirisContractKind) -> &'static str {
+    match kind {
+        OsirisContractKind::Call => "Osiris engine call",
+        OsirisContractKind::Event => "Osiris engine event",
+        OsirisContractKind::Query => "Osiris engine query",
+        OsirisContractKind::Syscall => "Osiris engine syscall",
+        OsirisContractKind::Sysquery => "Osiris engine sysquery",
+    }
+}
+
+fn osiris_parameter_direction(direction: bg3_index::OsirisParameterDirection) -> &'static str {
+    match direction {
+        bg3_index::OsirisParameterDirection::In => "[in]",
+        bg3_index::OsirisParameterDirection::InOut => "[inout]",
+        bg3_index::OsirisParameterDirection::Out => "[out]",
+    }
 }
 
 /// Tests whether the cursor follows an INIT, KB, or EXIT section marker.
 fn inside_osiris_statement_section(document: &str, line_number: u32) -> bool {
     let mut inside = false;
+    let mut block_comment = false;
     for line in document
-        .lines()
+        .split('\n')
         .take(usize::try_from(line_number).unwrap_or(usize::MAX))
     {
+        let line = strip_osiris_comments(line, &mut block_comment);
         match line.trim() {
             "INITSECTION" | "KBSECTION" | "EXITSECTION" => inside = true,
             "ENDEXITSECTION" => inside = false,
@@ -2620,7 +2859,71 @@ fn basic_item(
 
 /// Returns one zero-based source line without allocating.
 fn source_line(source: &str, line: u32) -> Option<&str> {
-    source.lines().nth(usize::try_from(line).ok()?)
+    source
+        .split('\n')
+        .nth(usize::try_from(line).ok()?)
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+}
+
+/// Tests whether the text before the cursor is inside an Osiris block
+/// comment. Completion must not treat comment contents as structural markers.
+fn osiris_prefix_is_in_comment(document: &str, line_number: u32, before: &str) -> bool {
+    let mut block_comment = false;
+    for line in document
+        .split('\n')
+        .take(usize::try_from(line_number).unwrap_or(usize::MAX))
+    {
+        strip_osiris_comments(line, &mut block_comment);
+    }
+    strip_osiris_comments(before, &mut block_comment);
+    block_comment
+}
+
+/// Removes Osiris line and block comments while retaining code on the same
+/// line. The state is carried across lines for the block-comment form.
+fn strip_osiris_comments(line: &str, block_comment: &mut bool) -> String {
+    let mut code = String::with_capacity(line.len());
+    let mut characters = line.chars().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    while let Some(character) = characters.next() {
+        if *block_comment {
+            if character == '*' && characters.peek() == Some(&'/') {
+                characters.next();
+                *block_comment = false;
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            code.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if character == '"' {
+            quote = Some(character);
+            code.push(character);
+            continue;
+        }
+        if character == '/' {
+            match characters.peek() {
+                Some('/') => break,
+                Some('*') => {
+                    characters.next();
+                    *block_comment = true;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        code.push(character);
+    }
+    code
 }
 
 /// Returns the incomplete identifier immediately before the cursor.
@@ -2848,7 +3151,6 @@ fn is_functor_statement_head(head: &str) -> bool {
         .chars()
         .all(|character| character.is_ascii_whitespace())
 }
-
 #[cfg(test)]
 mod tests {
     use super::{call_context, source_prefix};
@@ -2924,5 +3226,37 @@ mod tests {
             call_context(prefix),
             Some(super::CallContext { argument: 1, .. })
         ));
+    }
+}
+#[cfg(test)]
+mod osiris_comment_tests {
+    use super::strip_osiris_comments;
+
+    #[test]
+    fn osiris_comment_markers_inside_escaped_strings_are_preserved() {
+        let mut block_comment = false;
+        let line = r#"Call("url // /* escaped \" quote"); // trailing"#;
+        assert_eq!(
+            strip_osiris_comments(line, &mut block_comment),
+            r#"Call("url // /* escaped \" quote"); "#
+        );
+        assert!(!block_comment);
+    }
+
+    #[test]
+    fn osiris_block_comment_state_ignores_string_markers() {
+        let mut block_comment = false;
+        let line = r#"Call("/* escaped \" still string */"); /* block"#;
+        assert_eq!(
+            strip_osiris_comments(line, &mut block_comment),
+            r#"Call("/* escaped \" still string */"); "#
+        );
+        assert!(block_comment);
+
+        assert_eq!(
+            strip_osiris_comments("comment */ THEN", &mut block_comment),
+            " THEN"
+        );
+        assert!(!block_comment);
     }
 }
