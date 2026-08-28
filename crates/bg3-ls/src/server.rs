@@ -749,7 +749,7 @@ impl LanguageServer for Backend {
                 tags: None,
                 deprecated: None,
                 range: to_lsp_range(symbol.location.range, &source_text, encoding),
-                selection_range: to_lsp_range(symbol.location.range, &source_text, encoding),
+                selection_range: to_lsp_range(symbol.selection_range, &source_text, encoding),
                 children: None,
             })
             .collect();

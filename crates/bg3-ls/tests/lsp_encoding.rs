@@ -398,6 +398,58 @@ fn hover_returns_utf8_range_after_an_emoji() {
 }
 
 #[test]
+fn document_symbols_keep_full_ranges_and_encode_selection_ranges() {
+    let text = concat!(
+        "new entry \"😀WIRE\"\n",
+        "type \"PassiveData\"\n",
+        "data \"Enabled\" \"Yes\"\n",
+    );
+    let line = text.lines().next().expect("entry header");
+    let selection_start_utf8 = utf8_column(line, "😀WIRE");
+    let selection_end_utf8 =
+        selection_start_utf8 + u32::try_from("😀WIRE".len()).expect("selection range fits");
+    let selection_start_utf16 = utf16_column(line, "😀WIRE");
+    let selection_end_utf16 = selection_start_utf16
+        + u32::try_from("😀WIRE".encode_utf16().count()).expect("selection range fits");
+
+    for (encoding, selection_start, selection_end) in [
+        ("utf-8", selection_start_utf8, selection_end_utf8),
+        ("utf-16", selection_start_utf16, selection_end_utf16),
+    ] {
+        let (workspace, mut client, _) = initialized_client(Some(&[encoding]));
+        wait_for_index(&mut client);
+        open(&mut client, &workspace, 1, text);
+        let symbols = client
+            .request_result(
+                "textDocument/documentSymbol",
+                json!({ "textDocument": { "uri": document_uri(&workspace) } }),
+            )
+            .expect("document symbol request");
+        let symbol = symbols
+            .as_array()
+            .and_then(|symbols| symbols.iter().find(|symbol| symbol["name"] == "😀WIRE"))
+            .expect("WIRE document symbol");
+        assert_eq!(
+            symbol["range"],
+            json!({
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 3, "character": 0 }
+            })
+        );
+        assert_eq!(
+            symbol["selectionRange"],
+            json!({
+                "start": { "line": 0, "character": selection_start },
+                "end": { "line": 0, "character": selection_end }
+            })
+        );
+
+        client.shutdown().expect("shutdown");
+        assert_eq!(client.exit().expect("exit"), Some(0));
+    }
+}
+
+#[test]
 fn selects_utf16_when_the_client_offers_only_utf16() {
     let (workspace, mut client, initialize) = initialized_client(Some(&["utf-16"]));
     assert_eq!(initialize["capabilities"]["positionEncoding"], "utf-16");
@@ -751,6 +803,121 @@ fn tracks_osiris_head_variables_through_lsp_navigation() {
             }
         }])
     );
+
+    client.shutdown().expect("shutdown");
+    assert_eq!(client.exit().expect("exit"), Some(0));
+    drop(path);
+}
+
+#[test]
+fn document_symbols_use_identifier_selection_ranges_for_osiris_declarations() {
+    let (workspace, mut client, _) = initialized_client(Some(&["utf-16"]));
+    let (path, uri) = osiris_uri(&workspace);
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "DB_Tracked((CHARACTER)CHARACTERGUID_11111111-1111-1111-1111-111111111111, 1);\n",
+        "KBSECTION\n",
+        "PROC\n",
+        "DoWork((INTEGER)_Value)\n",
+        "THEN\n",
+        "DB_Tracked(_Value, 1);\n",
+        "QRY\n",
+        "ReadWork((INTEGER)_Value)\n",
+        "AND\n",
+        "DB_Tracked(_Value, 1)\n",
+        "THEN\n",
+        "DB_Tracked(_Value, 1);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    wait_for_index(&mut client);
+    client
+        .notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "bg3_osiris",
+                    "version": 1,
+                    "text": text
+                }
+            }),
+        )
+        .expect("open Osiris document");
+
+    let symbols = client
+        .request_result(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": uri } }),
+        )
+        .expect("Osiris document symbol request");
+    let symbols = symbols.as_array().expect("nested document symbols");
+    assert_eq!(
+        symbols
+            .iter()
+            .map(|symbol| symbol["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["Tracking", "DoWork", "ReadWork", "DB_Tracked"]
+    );
+
+    let goal = symbols
+        .iter()
+        .find(|symbol| symbol["name"] == "Tracking")
+        .expect("goal symbol");
+    assert_eq!(goal["range"]["start"], json!({ "line": 0, "character": 0 }));
+    assert_eq!(
+        goal["selectionRange"],
+        json!({
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 9 }
+        })
+    );
+    assert!(goal["range"]["end"]["line"].as_u64().unwrap() > 0);
+
+    let database = symbols
+        .iter()
+        .find(|symbol| symbol["name"] == "DB_Tracked")
+        .expect("database symbol");
+    assert_eq!(
+        database["range"]["start"],
+        json!({ "line": 3, "character": 0 })
+    );
+    assert_eq!(
+        database["selectionRange"],
+        json!({
+            "start": { "line": 3, "character": 0 },
+            "end": { "line": 3, "character": 10 }
+        })
+    );
+    assert!(database["range"]["end"]["character"].as_u64().unwrap() > 10);
+
+    let procedure = symbols
+        .iter()
+        .find(|symbol| symbol["name"] == "DoWork")
+        .expect("procedure symbol");
+    assert_eq!(
+        procedure["selectionRange"],
+        json!({
+            "start": { "line": 6, "character": 0 },
+            "end": { "line": 6, "character": 6 }
+        })
+    );
+    assert!(procedure["range"]["end"]["line"].as_u64().unwrap() > 6);
+
+    let query = symbols
+        .iter()
+        .find(|symbol| symbol["name"] == "ReadWork")
+        .expect("query symbol");
+    assert_eq!(
+        query["selectionRange"],
+        json!({
+            "start": { "line": 10, "character": 0 },
+            "end": { "line": 10, "character": 8 }
+        })
+    );
+    assert!(query["range"]["end"]["line"].as_u64().unwrap() > 10);
 
     client.shutdown().expect("shutdown");
     assert_eq!(client.exit().expect("exit"), Some(0));

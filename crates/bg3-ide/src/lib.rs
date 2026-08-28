@@ -219,6 +219,8 @@ pub struct Symbol {
     pub kind: String,
     pub module: String,
     pub location: SourceLocation,
+    /// The identifier span used by LSP document-symbol selection.
+    pub selection_range: TextRange,
 }
 
 /// A full open-document overlay that replaces one disk record.
@@ -1296,6 +1298,7 @@ impl WorkspaceSnapshot {
                     path: path.to_path_buf(),
                     range: definition.range,
                 },
+                selection_range: definition.selection_range,
             })
             .collect()
     }
@@ -1317,6 +1320,7 @@ impl WorkspaceSnapshot {
                             path: path.clone(),
                             range: definition.selection_range,
                         },
+                        selection_range: definition.selection_range,
                     });
                 }
             }
@@ -1338,6 +1342,7 @@ impl WorkspaceSnapshot {
                             path: record.path.as_ref().clone(),
                             range: record.definition().selection_range,
                         },
+                        selection_range: record.definition().selection_range,
                     });
                 }
             }
