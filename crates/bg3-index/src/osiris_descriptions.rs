@@ -29,6 +29,10 @@ pub fn osiris_callable_description(name: &str, arity: u16) -> Option<&'static st
         ),
         // https://docs.baldursgate3.game/index.php?title=Exists
         ("Exists", 2) => Some("Tests whether the specified object exists."),
+        // https://docs.baldursgate3.game/index.php?title=HasPassive
+        ("HasPassive", 3) => Some(
+            "Reports whether the specified entity has the named passive (0 for false, 1 for true).",
+        ),
         _ => None,
     }
 }
@@ -59,6 +63,11 @@ mod tests {
                 .expect("description")
                 .contains("exists")
         );
+        assert!(
+            osiris_callable_description("HasPassive", 3)
+                .expect("description")
+                .contains("named passive")
+        );
     }
 
     #[test]
@@ -68,5 +77,6 @@ mod tests {
             None
         );
         assert_eq!(osiris_callable_description("Missing", 4), None);
+        assert_eq!(osiris_callable_description("HasPassive", 2), None);
     }
 }
