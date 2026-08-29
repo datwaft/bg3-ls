@@ -119,6 +119,11 @@ the generated artifact. The normal language server uses only the checked-in
 catalog; it does not require an installed game or a mod-local
 `story_header.div`. Do not commit installed game files or extracted game data.
 
+Version 0.29.2 restores the curated description for the `HasPassive` Osiris
+engine query in hover, completion, and signature help. The release remains
+compatible with `tree-sitter-bg3` 0.7.2 and existing configuration; no
+migration is required.
+
 Version 0.29.1 reuses Osiris database schema analysis across hover requests.
 Immutable schemas are prepared once per workspace snapshot, and overlay-derived
 schemas are cached until an open document changes. Installed engine queries
