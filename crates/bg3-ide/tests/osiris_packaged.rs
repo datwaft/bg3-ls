@@ -280,6 +280,40 @@ fn installed_engine_query_keeps_curated_description_across_language_features() {
 }
 
 #[test]
+fn installed_has_passive_query_keeps_curated_hover_description() {
+    let catalog = Arc::new(
+        PackagedThothCatalog::from_sources([osiris_source(
+            "Shared",
+            &base_entry("HasPassiveQuery"),
+            "Shared.pak",
+            0,
+            &query_declaration(
+                "HasPassive((GUIDSTRING)_Entity, (STRING)_PassiveID, (INTEGER)_BoolHasPassive)",
+            ),
+        )])
+        .expect("catalog"),
+    );
+    let (workspace, caller_path) = workspace_with(None);
+    let workspace = workspace.with_packaged_osiris(index(catalog.as_ref()));
+    let caller = goal_text(
+        "IF\nTextEvent(\"go\")\nAND\nHasPassive(_Entity, \"SomePassive\", _HasPassive)\nTHEN\nDB_Noop(_HasPassive);",
+    );
+    let overlays = osiris_overlay(&workspace, &caller_path, &caller);
+
+    let hover = workspace
+        .hover(
+            &caller_path,
+            source_position(&caller, "HasPassive"),
+            &overlays,
+        )
+        .expect("installed HasPassive query hover");
+    assert!(
+        hover.contains("Reports whether the specified entity has the named passive"),
+        "{hover}"
+    );
+}
+
+#[test]
 fn legacy_engine_events_remain_completable_when_missing_from_generated_catalog() {
     let (workspace, caller_path) = workspace_with(None);
     for name in [
