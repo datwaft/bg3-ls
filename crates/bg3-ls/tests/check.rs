@@ -87,6 +87,23 @@ fn check(fixture: &Fixture, arguments: &[&str]) -> Output {
         .unwrap()
 }
 
+fn cache_stats(output: &Output) -> (usize, usize) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let summary = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("bg3-ls: workspace cache: "))
+        .expect("workspace cache summary");
+    let (hits, misses) = summary.split_once(" hits, ").expect("cache counters");
+    (
+        hits.parse().expect("cache hits"),
+        misses
+            .strip_suffix(" misses")
+            .expect("cache misses suffix")
+            .parse()
+            .expect("cache misses"),
+    )
+}
+
 #[test]
 fn emits_human_and_json_diagnostics_with_path_filters() {
     let fixture = fixture();
@@ -117,6 +134,43 @@ fn emits_human_and_json_diagnostics_with_path_filters() {
         serde_json::from_slice::<serde_json::Value>(&clean.stdout).unwrap(),
         serde_json::json!([])
     );
+}
+
+#[test]
+fn reuses_the_cli_packaged_osiris_cache_and_preserves_json_stdout() {
+    let fixture = fixture();
+    let arguments = [
+        fixture.clean_file.to_str().unwrap(),
+        "--format",
+        "json",
+        "--fail-on",
+        "never",
+    ];
+
+    let cold = check(&fixture, &arguments);
+    assert_eq!(cold.status.code(), Some(0));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&cold.stdout).unwrap(),
+        serde_json::json!([])
+    );
+    let cold_stats = cache_stats(&cold);
+    assert!(cold_stats.1 > 0, "{cold_stats:?}");
+    assert_eq!(
+        fs::read_dir(fixture.cache.join("osiris"))
+            .expect("Osiris cache directory")
+            .count(),
+        1
+    );
+
+    let warm = check(&fixture, &arguments);
+    assert_eq!(warm.status.code(), Some(0));
+    assert_eq!(warm.stdout, cold.stdout);
+    let warm_stats = cache_stats(&warm);
+    assert!(
+        warm_stats.0 > cold_stats.0,
+        "{cold_stats:?} -> {warm_stats:?}"
+    );
+    assert_eq!(warm_stats.1, 0, "{warm_stats:?}");
 }
 
 #[test]

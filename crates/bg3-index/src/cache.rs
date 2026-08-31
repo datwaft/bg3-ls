@@ -876,7 +876,7 @@ mod tests {
         fs::write(&package, package_marker(1)).expect("write package marker");
         let cache = CacheStore::new(directory.path().join("cache")).expect("cache");
         let modules = vec!["Example".to_owned()];
-        let candidates = vec![package];
+        let candidates = vec![package.clone()];
         let calls = Cell::new(0);
 
         let (thoth, hit) = cache
@@ -918,6 +918,100 @@ mod tests {
                 .expect("cached Osiris source")
                 .text(),
             "osiris"
+        );
+        assert_eq!(calls.get(), 2);
+
+        fs::write(&package, package_marker(2)).expect("change package marker");
+        let (changed, hit) = cache
+            .load_packaged_osiris(&modules, &candidates, || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("changed"))
+            })
+            .expect("changed Osiris catalog load");
+        assert!(!hit);
+        assert_eq!(
+            changed
+                .sources()
+                .next()
+                .expect("changed Osiris source")
+                .text(),
+            "changed"
+        );
+        assert_eq!(calls.get(), 3);
+
+        let cache_path = fs::read_dir(cache.root().join("osiris"))
+            .expect("Osiris cache directory")
+            .next()
+            .expect("Osiris cache entry")
+            .expect("read Osiris cache entry")
+            .path();
+        fs::write(cache_path, b"corrupt").expect("corrupt Osiris cache entry");
+        let (rebuilt, hit) = cache
+            .load_packaged_osiris(&modules, &candidates, || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("rebuilt"))
+            })
+            .expect("rebuilt Osiris catalog load");
+        assert!(!hit);
+        assert_eq!(
+            rebuilt
+                .sources()
+                .next()
+                .expect("rebuilt Osiris source")
+                .text(),
+            "rebuilt"
+        );
+        assert_eq!(calls.get(), 4);
+        let (cached, hit) = cache
+            .load_packaged_osiris(&modules, &candidates, || {
+                panic!("a rebuilt Osiris catalog must be cached")
+            })
+            .expect("cached rebuilt Osiris catalog load");
+        assert!(hit);
+        assert_eq!(
+            cached
+                .sources()
+                .next()
+                .expect("cached rebuilt Osiris source")
+                .text(),
+            "rebuilt"
+        );
+    }
+
+    #[test]
+    fn packaged_catalog_cache_is_extractor_versioned() {
+        let directory = tempdir().expect("temporary directory");
+        let package = directory.path().join("base.pak");
+        fs::write(&package, package_marker(1)).expect("write package marker");
+        let cache = CacheStore::new(directory.path().join("cache")).expect("cache");
+        let modules = vec!["Example".to_owned()];
+        let candidates = vec![package];
+        let calls = Cell::new(0);
+
+        let (_, hit) = cache
+            .load_packaged_catalog(&modules, &candidates, "osiris", "v1", || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("v1"))
+            })
+            .expect("first versioned load");
+        assert!(!hit);
+        let (_, hit) = cache
+            .load_packaged_catalog(&modules, &candidates, "osiris", "v1", || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("unexpected"))
+            })
+            .expect("cached versioned load");
+        assert!(hit);
+        let (changed, hit) = cache
+            .load_packaged_catalog(&modules, &candidates, "osiris", "v2", || {
+                calls.set(calls.get() + 1);
+                Ok(catalog("v2"))
+            })
+            .expect("changed extractor load");
+        assert!(!hit);
+        assert_eq!(
+            changed.sources().next().expect("versioned source").text(),
+            "v2"
         );
         assert_eq!(calls.get(), 2);
     }

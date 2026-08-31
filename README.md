@@ -806,6 +806,10 @@ Human output uses one-based lines and columns. JSON output uses zero-based
 Exit code 0 means no diagnostic met the threshold. Exit code 1 means at least
 one diagnostic met it. Exit code 2 identifies a configuration, index, or file
 analysis failure. Diagnostic data uses stdout, while progress uses stderr.
+After indexing, `check` also reports aggregate workspace cache hits and misses
+on stderr. Repeated runs reuse the packaged Osiris catalog and parsed facts;
+changed package inputs and corrupt or obsolete cache objects rebuild as cache
+misses. Diagnostic stdout and exit-code behavior do not change.
 
 Use `--cache-dir PATH` before the subcommand to override the cache in tests.
 Protocol traffic always uses stdout. Set `BG3_LS_LOG` to a tracing filter, such
