@@ -24,7 +24,7 @@ use crate::{Error, ModuleSpec};
 
 const CACHE_MAGIC: &[u8; 8] = b"BG3LSIDX";
 const CACHE_VERSION: u32 = 4;
-const EXTRACTOR_VERSION: &str = "bg3-ls-index-v11";
+const EXTRACTOR_VERSION: &str = "bg3-ls-index-v12";
 const LOCALIZATION_EXTRACTOR_VERSION: &str = "bg3-ls-localization-v1";
 const TOOLTIP_EXTRACTOR_VERSION: &str = "bg3-ls-tooltips-v1";
 const THOTH_EXTRACTOR_VERSION: &str = "bg3-ls-thoth-v3";

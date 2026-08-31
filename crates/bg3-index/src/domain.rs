@@ -189,6 +189,18 @@ pub struct OsirisVariableFact {
     pub occurrence_facts: Vec<OsirisVariableOccurrence>,
 }
 
+/// One verified type cast in an Osiris goal.
+///
+/// Casts are kept as Osiris facts instead of ordinary references because
+/// intrinsic and engine catalog types do not have source declarations to
+/// which navigation can resolve. Consumers can use the range for hover and
+/// classify the type name through the generated catalog.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OsirisTypeCast {
+    pub type_name: String,
+    pub range: TextRange,
+}
+
 /// Osiris-specific facts retained with one cacheable goal record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct OsirisFile {
@@ -196,6 +208,8 @@ pub struct OsirisFile {
     pub occurrences: Vec<OsirisDatabaseOccurrence>,
     #[serde(default)]
     pub variables: Vec<OsirisVariableFact>,
+    #[serde(default)]
+    pub casts: Vec<OsirisTypeCast>,
 }
 
 /// Cacheable semantic facts extracted from one Thoth source file.

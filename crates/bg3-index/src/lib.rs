@@ -46,7 +46,7 @@ pub use discovery::{
 pub use domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseBinding,
-    OsirisDatabaseOccurrence, OsirisEvidenceOrigin, OsirisFile, OsirisTypeEvidence,
+    OsirisDatabaseOccurrence, OsirisEvidenceOrigin, OsirisFile, OsirisTypeCast, OsirisTypeEvidence,
     OsirisVariableFact, OsirisVariableOccurrence, ParsedFile, Position, Reference, SourceFile,
     SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment,
     ThothBinaryOperator, ThothCall, ThothControlFlowFact, ThothDeclaration, ThothDeclarationOwner,
@@ -73,9 +73,9 @@ pub use osiris_catalog::{
     OSIRIS_CATALOG_SOURCE_HASH, OSIRIS_CATALOG_SOURCE_VERSION, OSIRIS_CONTRACTS,
     OSIRIS_GUID_ALIASES, OSIRIS_GUIDSTRING_TYPE, OsirisCatalog, OsirisCatalogMetadata,
     OsirisContract, OsirisContractKind, OsirisContractSpec, OsirisParameter,
-    OsirisParameterDirection, OsirisParameterSpec, generate_osiris_catalog, osiris_contract,
-    osiris_contract_by_kind, osiris_event_contract, osiris_type_compatibility, parse_story_header,
-    render_osiris_catalog,
+    OsirisParameterDirection, OsirisParameterSpec, OsirisTypeClass, generate_osiris_catalog,
+    osiris_argument_domain, osiris_contract, osiris_contract_by_kind, osiris_event_contract,
+    osiris_type_class, osiris_type_compatibility, parse_story_header, render_osiris_catalog,
 };
 pub use osiris_descriptions::{
     OSIRIS_DESCRIPTION_CATALOG_VERSION, OSIRIS_DESCRIPTION_RECORDS, OsirisDescriptionRecord,

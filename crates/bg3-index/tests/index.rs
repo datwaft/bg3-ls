@@ -2,13 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bg3_index::{
-    CacheStore, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND,
-    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole, OsirisEvidenceOrigin, SchemaCatalog,
-    SourceFile, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, ThothBinaryOperator,
-    ThothExpressionKind, ThothIfBranchKind, ThothLiteralKind, ThothMemberAccessKind,
-    ThothParameter, ThothScopeId, ThothUnaryOperator, discover_module, is_structural_stats_value,
-    parse_source, parse_thoth_file, parse_tooltip_catalog, read_base_localization_package,
-    read_base_tooltip_catalog, read_localization_package, source_kind_for_document,
+    CacheStore, Definition, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_DATABASE_KIND,
+    OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, OsirisCallRole,
+    OsirisEvidenceOrigin, ParsedFile, SchemaCatalog, SourceFile, SourceKind, SymbolTarget,
+    THOTH_FUNCTION_KIND, TextRange, ThothBinaryOperator, ThothExpressionKind, ThothIfBranchKind,
+    ThothLiteralKind, ThothMemberAccessKind, ThothParameter, ThothScopeId, ThothUnaryOperator,
+    discover_module, is_structural_stats_value, parse_source, parse_thoth_file,
+    parse_tooltip_catalog, read_base_localization_package, read_base_tooltip_catalog,
+    read_localization_package, source_kind_for_document,
 };
 
 fn fixtures() -> PathBuf {
@@ -34,6 +35,74 @@ fn load_schema(root: &Path) -> SchemaCatalog {
             .unwrap();
     }
     schema
+}
+
+fn synthetic_definition_file(kind: &str, name: &str, aliases: &[&str]) -> ParsedFile {
+    ParsedFile {
+        source: SourceFile {
+            path: PathBuf::from(format!("/synthetic/{kind}/{name}.txt")),
+            kind: SourceKind::PlainStats,
+        },
+        definitions: vec![Definition {
+            kind: kind.into(),
+            name: name.into(),
+            range: TextRange::default(),
+            selection_range: TextRange::default(),
+            fields: std::collections::BTreeMap::new(),
+            field_ranges: std::collections::BTreeMap::new(),
+            aliases: aliases.iter().map(|alias| (*alias).into()).collect(),
+            uuid: None,
+            parent: None,
+            schema_id: None,
+            arity: None,
+        }],
+        references: Vec::new(),
+        observed_functions: Vec::new(),
+        issues: Vec::new(),
+        osiris: None,
+        thoth: None,
+    }
+}
+
+#[test]
+fn typed_alias_resolution_requires_matching_canonical_kind() {
+    let index = ModuleIndex::new(
+        ModuleSpec {
+            name: "Synthetic".into(),
+            root: PathBuf::from("/synthetic"),
+            role: ModuleRole::Project,
+        },
+        vec![
+            synthetic_definition_file("Status", "StatusName", &["SharedAlias"]),
+            synthetic_definition_file("SpellData", "SpellName", &["SharedAlias"]),
+        ],
+    );
+
+    let status = index.resolve(&SymbolTarget::Named {
+        kind: Some("StatusData".into()),
+        name: "SharedAlias".into(),
+    });
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].definition().name, "StatusName");
+
+    let spell = index.resolve(&SymbolTarget::Named {
+        kind: Some("SpellData".into()),
+        name: "SharedAlias".into(),
+    });
+    assert_eq!(spell.len(), 1);
+    assert_eq!(spell[0].definition().name, "SpellName");
+
+    let untyped = index.resolve(&SymbolTarget::Named {
+        kind: None,
+        name: "SharedAlias".into(),
+    });
+    assert_eq!(untyped.len(), 2);
+
+    let passive = index.resolve(&SymbolTarget::Named {
+        kind: Some("PassiveData".into()),
+        name: "SharedAlias".into(),
+    });
+    assert!(passive.is_empty());
 }
 
 fn synthetic_loca(entries: &[(&str, u16, &str)]) -> Vec<u8> {
@@ -1363,6 +1432,101 @@ fn parses_osiris_goals_declarations_calls_and_database_evidence() {
                 .as_ref()
                 .is_some_and(|evidence| evidence.type_name == "CHARACTER")
     }));
+}
+
+#[test]
+fn indexes_verified_osiris_casts_and_resource_string_literals() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "StatusApplied((CHARACTER)_Object,L\"TEST_READY\",_Cause,1)\n",
+        "THEN\n",
+        "RemoveStatus((CHARACTER)_Object,L\"TEST_READY\",_Cause);\n",
+        "IF\n",
+        "TextEvent(\"ordinary text\")\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/Literals.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+    assert!(parsed.issues.is_empty(), "{:?}", parsed.issues);
+
+    let literal_references: Vec<_> = parsed
+        .references
+        .iter()
+        .filter(|reference| {
+            matches!(
+                &reference.target,
+                SymbolTarget::Named { kind: Some(kind), name }
+                    if kind == "StatusData" && name == "TEST_READY"
+            )
+        })
+        .collect();
+    assert_eq!(literal_references.len(), 2);
+    for reference in literal_references {
+        assert_eq!(reference.context, "osiris-string-literal");
+        assert_eq!(reference.range.start.line, reference.range.end.line);
+        let line = text
+            .lines()
+            .nth(reference.range.start.line as usize)
+            .unwrap();
+        assert_eq!(
+            &line[reference.range.start.character as usize..reference.range.end.character as usize],
+            "TEST_READY"
+        );
+    }
+    assert!(!parsed.references.iter().any(|reference| {
+        matches!(
+            &reference.target,
+            SymbolTarget::Named { name, .. } if name == "ordinary text"
+        )
+    }));
+
+    let casts = &parsed.osiris.as_ref().unwrap().casts;
+    assert_eq!(casts.len(), 2);
+    assert!(casts.iter().all(|cast| cast.type_name == "CHARACTER"));
+    assert!(casts.iter().all(|cast| {
+        let line = text.lines().nth(cast.range.start.line as usize).unwrap();
+        &line[cast.range.start.character as usize..cast.range.end.character as usize] == "CHARACTER"
+    }));
+}
+
+#[test]
+fn does_not_collect_osiris_literals_or_casts_from_incomplete_goals() {
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/IncompleteLiterals.txt"),
+            kind: SourceKind::Osiris,
+        },
+        concat!(
+            "Version 1\n",
+            "SubGoalCombiner SGC_AND\n",
+            "INITSECTION\n",
+            "KBSECTION\n",
+            "IF\nStatusApplied((CHARACTER)_Object,L\"TEST_READY\",_Cause,1)\n",
+            "THEN\n",
+        ),
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert!(parsed.definitions.is_empty());
+    assert!(parsed.references.is_empty());
+    assert!(parsed.osiris.is_none());
 }
 
 #[test]

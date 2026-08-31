@@ -17,7 +17,7 @@ use crate::catalog::{field_kind, function_spec, is_lsx_value_field, osiris_signa
 use crate::domain::{
     Definition, LineMap, OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND,
     OSIRIS_QUERY_KIND, ObservedFunction, OsirisArgument, OsirisCallRole, OsirisDatabaseBinding,
-    OsirisDatabaseOccurrence, OsirisEvidenceOrigin, OsirisFile, OsirisTypeEvidence,
+    OsirisDatabaseOccurrence, OsirisEvidenceOrigin, OsirisFile, OsirisTypeCast, OsirisTypeEvidence,
     OsirisVariableFact, OsirisVariableOccurrence, ParsedFile, Position, Reference, SourceFile,
     SourceIssue, SourceKind, SymbolTarget, THOTH_FUNCTION_KIND, TextRange, ThothAssignment,
     ThothBinaryOperator, ThothCall, ThothControlFlowFact, ThothDeclaration, ThothDeclarationOwner,
@@ -28,7 +28,8 @@ use crate::domain::{
 };
 use crate::localization::valid_handle;
 use crate::osiris_catalog::{
-    OSIRIS_CONTRACTS, OsirisContractKind, OsirisParameterDirection, osiris_contract,
+    OSIRIS_CONTRACTS, OsirisContractKind, OsirisParameterDirection, osiris_argument_domain,
+    osiris_contract, osiris_type_class,
 };
 use crate::schema::{SchemaCatalog, SchemaDefinition};
 use crate::xml::{attribute_range, attributes};
@@ -1643,6 +1644,7 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
     let mut references = Vec::new();
     let mut occurrences = Vec::new();
     let mut variables = Vec::new();
+    let casts = osiris_type_casts(goal_root, text)?;
     let mut cursor = goal_root.walk();
     for node in goal_root.named_children(&mut cursor) {
         match node.kind() {
@@ -1705,6 +1707,7 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
             goal,
             occurrences,
             variables,
+            casts,
         }),
         thoth: None,
     })
@@ -1953,6 +1956,33 @@ fn has_complete_osiris_goal_sections(node: Node<'_>) -> bool {
     .into_iter()
     .all(|kind| direct_child(node, kind).is_some())
 }
+
+/// Collects verified type casts from one complete Osiris goal.
+///
+/// A cast is source metadata for hover. It is not a normal reference because
+/// intrinsic and generated engine types have no source declaration target.
+fn osiris_type_casts(root: Node<'_>, text: &str) -> Result<Vec<OsirisTypeCast>, Error> {
+    let mut casts = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "type_cast"
+            && let Some(type_node) = field(node, "type")
+        {
+            let type_name = type_node.utf8_text(text.as_bytes())?.to_owned();
+            if osiris_type_class(&type_name).is_some() {
+                casts.push(OsirisTypeCast {
+                    type_name,
+                    range: node_range(type_node),
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    casts.sort_by_key(|cast| (cast.range.start.line, cast.range.start.character));
+    Ok(casts)
+}
+
 /// Extracts one complete rule and its rule-local explicit variable types.
 fn parse_osiris_rule(
     rule: Node<'_>,
@@ -2450,6 +2480,38 @@ fn collect_osiris_call(
         }
         .into(),
     });
+
+    let contract = osiris_contract(OSIRIS_CONTRACTS, &name, arity);
+    let mut argument_cursor = arguments_node.walk();
+    for (index, argument) in arguments_node
+        .named_children(&mut argument_cursor)
+        .enumerate()
+    {
+        let Some(contract) = contract else {
+            break;
+        };
+        let Some(domain) = osiris_argument_domain(contract.kind, &name, arity, index) else {
+            continue;
+        };
+        let Some(value) = field(argument, "value") else {
+            continue;
+        };
+        if value.kind() != "string_literal" {
+            continue;
+        }
+        let Some(content) = field(value, "content") else {
+            continue;
+        };
+        references.push(Reference {
+            target: SymbolTarget::Named {
+                kind: Some(domain.into()),
+                name: content.utf8_text(text.as_bytes())?.to_owned(),
+            },
+            range: node_range(content),
+            context: "osiris-string-literal".into(),
+        });
+    }
+
     if !name.starts_with("DB_") {
         return Ok(());
     }

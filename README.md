@@ -15,8 +15,9 @@ The server provides:
 - ordered Go to Definition results for complete override chains;
 - hover information for declarations, schema fields, Stats property names,
   enum values, functions, built-in Stats context properties, functor execution
-  prefixes, resources, localization, static game-text previews, and rule-local
-  Osiris variables;
+  prefixes, resources, localization, static game-text previews, Osiris casts,
+  exact contract-proven Osiris resource strings, and rule-local Osiris
+  variables;
 - references, document symbols, and workspace symbols;
 - schema-aware completion with snippet support;
 - verified signature help for Stats functions, Osiris engine callables, and
@@ -685,6 +686,19 @@ prose. Variable hover shows the proven type only; use go to definition or
 references for binding locations. Hover formats long engine signatures with
 one parameter per line. Signature help refreshes after commas and selects the
 parameter at the cursor throughout the call.
+
+Explicit casts in complete Osiris goals receive type hover when the cast names
+an intrinsic scalar, a GUID family, or an exact type from the generated
+contract catalog. The hover reports the type family and only the corresponding
+verified compatibility rule. A string literal is treated as a resource only
+when the generated catalog proves the callable kind, name, arity, and argument
+position. The reviewed mappings currently cover the `StatusData` arguments of
+the `StatusApplied` event and `RemoveStatus` call. These literals provide
+resource hover and definition navigation through the normal resource index;
+generic `STRING` arguments and unmapped positions remain unresolved. A
+packaged resource can provide hover and package-entry provenance, but it never
+produces a fabricated filesystem or editor location; definition navigation
+opens a loose declaration only when one is available.
 
 Osiris callable completion follows the statement role: engine events are
 offered for rule heads, queries for conditions, and calls for actions. User
