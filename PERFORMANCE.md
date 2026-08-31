@@ -264,3 +264,32 @@ Both builds used schema revision
 The cold p95 increase remains below the 20% limit, and the warm p95 increase
 remains below the 15% limit. Navigation also improves, so the issue passes the
 repository regression thresholds.
+
+## Version 0.30 CLI packaged Osiris cache verification
+
+Issue #163 routes standalone CLI indexing through the existing packaged
+Osiris catalog cache. The comparison used five cold and five warm trials on
+the same machine, data revision, configured modules, project, and source
+composition. Both builds used `tree-sitter-bg3` 0.7.2 with parser ABI 15. The
+index contained 3,451 documents and 88,014 definitions.
+
+| Metric | Main p50 | Main p95 | Issue #163 p50 | Issue #163 p95 | p95 change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold indexing | 7,147 ms | 7,329 ms | 7,332 ms | 7,401 ms | +1.0% |
+| Warm indexing | 2,018 ms | 2,089 ms | 1,832 ms | 1,922 ms | -8.0% |
+| Navigation | 1,250 ns | 1,583 ns | 1,250 ns | 1,375 ns | -13.1% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100% for both builds
+- Main repeated-trial RSS high-water mark: 2,202,681,344 bytes
+- Issue #163 repeated-trial RSS high-water mark: 2,286,485,504 bytes (+3.8%)
+- Main cache: 182,581,863 bytes in 3,463 files
+- Issue #163 cache: 207,172,052 bytes in 3,464 files (+13.5%)
+
+Both builds used schema revision
+`ab8dfe38b6547cba2bbf3897774f5437919193d4237892e4cc3c5306bb46177d`.
+The new cache object stores the validated packaged Osiris catalog and adds
+24,590,189 bytes. Cold p95 remains effectively flat and below the 20%
+regression limit. Warm p95 improves and remains below the 15% regression
+limit.

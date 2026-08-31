@@ -362,7 +362,7 @@ fn run_check(options: CheckOptions, cache: CacheStore) -> Result<ExitCode, Error
     let current_directory = env::current_dir()?;
     let config = ResolvedConfig::discover(&current_directory)?;
     eprintln!("bg3-ls: building the workspace index");
-    let (workspace, _) = build_workspace(
+    let (workspace, cache_stats) = build_workspace(
         &cache,
         &config.game_data,
         &config.modules,
@@ -371,6 +371,10 @@ fn run_check(options: CheckOptions, cache: CacheStore) -> Result<ExitCode, Error
         config.max_completion_items,
         &config.incomplete_kinds(),
     )?;
+    eprintln!(
+        "bg3-ls: workspace cache: {} hits, {} misses",
+        cache_stats.hits, cache_stats.misses
+    );
     let project_root = config
         .modules
         .iter()
@@ -829,7 +833,15 @@ fn build_workspace(
     } else {
         totals.misses += 1;
     }
-    let packaged_osiris_catalog = read_packaged_osiris_catalog(game_data, &base_modules)?;
+    let (packaged_osiris_catalog, osiris_catalog_hit) =
+        cache.load_packaged_osiris(&base_modules, &package_candidates, || {
+            read_packaged_osiris_catalog(game_data, &base_modules)
+        })?;
+    if osiris_catalog_hit {
+        totals.hits += 1;
+    } else {
+        totals.misses += 1;
+    }
     let (packaged_osiris_facts, osiris_hit) = cache.load_packaged_thoth_facts(
         &packaged_osiris_catalog,
         OSIRIS_FACTS_EXTRACTOR_VERSION,
