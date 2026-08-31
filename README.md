@@ -131,6 +131,15 @@ rejects duplicate, stale, or mismatched keys and incomplete provenance. Review
 wiki input explicitly and do not copy pages into the repository. The language
 server never fetches documentation at runtime.
 
+Version 0.31.0 expands the verified Osiris description catalog with reviewed,
+provenance-backed descriptions for additional engine callables. Hover,
+completion, and signature help show prose only when the exact callable kind,
+name, and arity are verified; undocumented callables remain signature-only.
+`bg3-ls catalog check-descriptions` audits the catalog offline. Existing
+configuration and caches remain compatible, runtime documentation access stays
+offline, and no migration or cache reset is required. The release remains
+compatible with `tree-sitter-bg3` 0.7.2.
+
 Version 0.30.0 caches the packaged Osiris catalog for standalone `check` runs
 and reports aggregate workspace cache hits and misses on stderr. Repeated
 checks avoid unchanged package extraction while diagnostic stdout, ordering,
