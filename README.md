@@ -119,6 +119,14 @@ the generated artifact. The normal language server uses only the checked-in
 catalog; it does not require an installed game or a mod-local
 `story_header.div`. Do not commit installed game files or extracted game data.
 
+Version 0.30.0 caches the packaged Osiris catalog for standalone `check` runs
+and reports aggregate workspace cache hits and misses on stderr. Repeated
+checks avoid unchanged package extraction while diagnostic stdout, ordering,
+failure thresholds, and exit codes remain compatible. Existing caches rebuild
+automatically when their inputs or versions change, so no cache clear or
+configuration migration is required. The release remains compatible with
+`tree-sitter-bg3` 0.7.2.
+
 Version 0.29.2 restores the curated description for the `HasPassive` Osiris
 engine query in hover, completion, and signature help. The release remains
 compatible with `tree-sitter-bg3` 0.7.2 and existing configuration; no
