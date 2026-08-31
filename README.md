@@ -112,12 +112,24 @@ bg3-ls catalog check \
   --input "/path/to/story_header.div" \
   --game-root "/path/to/Baldurs Gate 3" \
   --output crates/bg3-index/src/osiris_catalog/generated_osiris_catalog.rs
+
+bg3-ls catalog check-descriptions
 ```
 
 Generation records the exact game build metadata and the input header hash in
 the generated artifact. The normal language server uses only the checked-in
 catalog; it does not require an installed game or a mod-local
 `story_header.div`. Do not commit installed game files or extracted game data.
+
+Curated engine descriptions remain separate from generated contracts. Add only
+concise reviewed paraphrases from official BG3 Modding documentation. Each
+record must include the exact callable kind, name, and arity, its official
+source URL pinned to the recorded wiki revision ID, and the latest prose
+update and review date. Verify the URL and revision manually, keep the records
+sorted, then run `bg3-ls catalog check-descriptions`; the offline command
+rejects duplicate, stale, or mismatched keys and incomplete provenance. Review
+wiki input explicitly and do not copy pages into the repository. The language
+server never fetches documentation at runtime.
 
 Version 0.30.0 caches the packaged Osiris catalog for standalone `check` runs
 and reports aggregate workspace cache hits and misses on stderr. Repeated
@@ -657,12 +669,13 @@ Engine Osiris callables use the checked-in, generated contract catalog for
 signatures, parameter directions, and parameter types. Hover and signature
 help therefore work for calls such as `GetActionResourceValuePersonal` and
 `CastedSpell` even when their declarations are packed or unavailable as loose
-files. A small reviewed set of official descriptions is shown for documented
-callables; other catalogued callables still show their verified signature
-without invented prose. Variable hover shows the proven type only; use go to
-definition or references for binding locations. Hover formats long engine
-signatures with one parameter per line. Signature help refreshes after commas
-and selects the parameter at the cursor throughout the call.
+files. A versioned, provenance-backed overlay supplies reviewed official
+descriptions only when callable kind, name, and arity match exactly. Other
+catalogued callables still show their verified signature without invented
+prose. Variable hover shows the proven type only; use go to definition or
+references for binding locations. Hover formats long engine signatures with
+one parameter per line. Signature help refreshes after commas and selects the
+parameter at the cursor throughout the call.
 
 Osiris callable completion follows the statement role: engine events are
 offered for rule heads, queries for conditions, and calls for actions. User
