@@ -20,6 +20,26 @@ fn run(directory: &TempDir, arguments: &[&str]) -> Output {
 }
 
 #[test]
+fn validates_the_checked_in_description_catalog_offline() {
+    let directory = tempfile::tempdir().unwrap();
+    let checked = Command::new(env!("CARGO_BIN_EXE_bg3-ls"))
+        .current_dir(directory.path())
+        .args(["catalog", "check-descriptions"])
+        .output()
+        .unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(checked.stdout).unwrap(),
+        "description catalog is valid: 9 records (bg3-ls-osiris-descriptions-v1)\n"
+    );
+    assert!(checked.stderr.is_empty());
+}
+
+#[test]
 fn generates_and_checks_catalog_from_game_metadata() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir(directory.path().join("Contents")).unwrap();

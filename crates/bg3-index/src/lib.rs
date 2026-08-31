@@ -74,9 +74,14 @@ pub use osiris_catalog::{
     OSIRIS_GUID_ALIASES, OSIRIS_GUIDSTRING_TYPE, OsirisCatalog, OsirisCatalogMetadata,
     OsirisContract, OsirisContractKind, OsirisContractSpec, OsirisParameter,
     OsirisParameterDirection, OsirisParameterSpec, generate_osiris_catalog, osiris_contract,
-    osiris_event_contract, osiris_type_compatibility, parse_story_header, render_osiris_catalog,
+    osiris_contract_by_kind, osiris_event_contract, osiris_type_compatibility, parse_story_header,
+    render_osiris_catalog,
 };
-pub use osiris_descriptions::osiris_callable_description;
+pub use osiris_descriptions::{
+    OSIRIS_DESCRIPTION_CATALOG_VERSION, OSIRIS_DESCRIPTION_RECORDS, OsirisDescriptionRecord,
+    osiris_callable_description, osiris_callable_description_for_kind,
+    validate_osiris_descriptions,
+};
 pub use package::{PackageEntry, PackageHeader, PackageReader};
 pub use packaged_stats::{
     PackagedStatsCatalog, PackagedStatsDefinition, PackagedStatsResolution, PackagedStatsSource,

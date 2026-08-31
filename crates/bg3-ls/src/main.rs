@@ -72,6 +72,8 @@ enum CatalogCommand {
     Generate(CatalogOptions),
     /// Checks a generated catalog against the current game story header.
     Check(CatalogOptions),
+    /// Validates curated descriptions against the checked-in engine contracts.
+    CheckDescriptions,
 }
 
 /// Inputs shared by catalog generation and validation.
@@ -296,6 +298,19 @@ fn run_catalog(command: CatalogCommand) -> Result<ExitCode, Error> {
     let (options, check) = match command {
         CatalogCommand::Generate(options) => (options, false),
         CatalogCommand::Check(options) => (options, true),
+        CatalogCommand::CheckDescriptions => {
+            bg3_index::validate_osiris_descriptions(
+                bg3_index::OSIRIS_CONTRACTS,
+                bg3_index::OSIRIS_DESCRIPTION_RECORDS,
+            )
+            .map_err(|error| Error::Index(error.to_string()))?;
+            println!(
+                "description catalog is valid: {} records ({})",
+                bg3_index::OSIRIS_DESCRIPTION_RECORDS.len(),
+                bg3_index::OSIRIS_DESCRIPTION_CATALOG_VERSION
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
     };
     let source = fs::read_to_string(&options.input)?;
     let version = bg3_index::detect_game_build_version(&options.game_root)

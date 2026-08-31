@@ -365,9 +365,34 @@ pub fn osiris_contract<'a>(
     matches.next().is_none().then_some(contract)
 }
 
+/// Looks up a generated static contract by exact kind, name, and arity.
+pub fn osiris_contract_by_kind<'a>(
+    contracts: &'a [OsirisContractSpec],
+    kind: OsirisContractKind,
+    name: &str,
+    arity: u16,
+) -> Option<&'a OsirisContractSpec> {
+    let start = contracts.partition_point(|contract| contract.name < name);
+    let named = &contracts[start..];
+    let end = named.partition_point(|contract| contract.name == name);
+    let mut matches = named[..end]
+        .iter()
+        .filter(|contract| contract.kind == kind && contract.parameters.len() as u16 == arity);
+    let contract = matches.next()?;
+    matches.next().is_none().then_some(contract)
+}
+
 /// Looks up an engine event in the checked-in generated catalog.
 pub fn osiris_event_contract(name: &str, arity: u16) -> Option<&'static OsirisContractSpec> {
-    osiris_contract(OSIRIS_CONTRACTS, name, arity)
+    osiris_event_contract_in(OSIRIS_CONTRACTS, name, arity)
+}
+
+fn osiris_event_contract_in<'a>(
+    contracts: &'a [OsirisContractSpec],
+    name: &str,
+    arity: u16,
+) -> Option<&'a OsirisContractSpec> {
+    osiris_contract(contracts, name, arity)
         .filter(|contract| contract.kind == OsirisContractKind::Event)
 }
 
@@ -670,7 +695,18 @@ mod tests {
         assert!(osiris_contract(&contracts, "Missing", 0).is_none());
         assert!(osiris_contract(&contracts, "CastedSpell", 0).is_none());
         assert!(osiris_contract(&contracts, "CastedSpell", 1).is_none());
+        assert!(osiris_event_contract_in(&contracts, "CastedSpell", 1).is_none());
         assert!(osiris_contract(&contracts, "Omega", 0).is_some());
+        assert_eq!(
+            osiris_contract_by_kind(&contracts, OsirisContractKind::Event, "CastedSpell", 1,)
+                .unwrap()
+                .kind,
+            OsirisContractKind::Event
+        );
+        assert!(
+            osiris_contract_by_kind(&contracts, OsirisContractKind::Call, "CastedSpell", 1,)
+                .is_none()
+        );
     }
 
     #[test]

@@ -280,7 +280,7 @@ fn installed_engine_query_keeps_curated_description_across_language_features() {
 }
 
 #[test]
-fn installed_has_passive_query_keeps_curated_hover_description() {
+fn installed_has_passive_query_keeps_curated_description_across_language_features() {
     let catalog = Arc::new(
         PackagedThothCatalog::from_sources([osiris_source(
             "Shared",
@@ -310,6 +310,47 @@ fn installed_has_passive_query_keeps_curated_hover_description() {
     assert!(
         hover.contains("Reports whether the specified entity has the named passive"),
         "{hover}"
+    );
+
+    let (line, column) = call_position(&caller, "HasPassive");
+    let signature = workspace
+        .signature_help(
+            &caller_path,
+            Position {
+                line,
+                character: column,
+            },
+            &overlays,
+        )
+        .expect("installed HasPassive signature help");
+    assert!(
+        signature
+            .documentation
+            .contains("Reports whether the specified entity has the named passive")
+    );
+
+    let completion_text = goal_text("IF\nTextEvent(\"go\")\nAND\nHasP\nTHEN\nGoalCompleted;");
+    let completion_overlays = osiris_overlay(&workspace, &caller_path, &completion_text);
+    let prefix = source_position(&completion_text, "HasP");
+    let completion = workspace.completion(
+        &caller_path,
+        Position {
+            line: prefix.line,
+            character: prefix.character + 4,
+        },
+        &completion_overlays,
+        false,
+    );
+    let item = completion
+        .items
+        .iter()
+        .find(|item| item.label == "HasPassive")
+        .expect("installed HasPassive completion");
+    assert_eq!(
+        item.documentation.as_deref(),
+        Some(
+            "Reports whether the specified entity has the named passive (0 for false, 1 for true)."
+        )
     );
 }
 
@@ -436,6 +477,129 @@ const GENERATED_SHORT_CALLER: &str = concat!(
     "EXITSECTION\n",
     "ENDEXITSECTION\n"
 );
+
+const GENERATED_UNDOCUMENTED_CALLER: &str = concat!(
+    "Version 1\n",
+    "SubGoalCombiner SGC_AND\n",
+    "INITSECTION\n",
+    "KBSECTION\n",
+    "IF\n",
+    "TextEvent(\"go\")\n",
+    "THEN\n",
+    "AutoSave();\n",
+    "EXITSECTION\n",
+    "ENDEXITSECTION\n"
+);
+
+const GENERATED_ADD_PASSIVE_CALLER: &str = concat!(
+    "Version 1\n",
+    "SubGoalCombiner SGC_AND\n",
+    "INITSECTION\n",
+    "KBSECTION\n",
+    "IF\n",
+    "TextEvent(\"go\")\n",
+    "THEN\n",
+    "AddPassive(_Entity, \"SomePassive\");\n",
+    "EXITSECTION\n",
+    "ENDEXITSECTION\n"
+);
+
+#[test]
+fn expanded_description_catalog_is_used_by_language_features() {
+    let (workspace, caller_path) = workspace_with(None);
+    let overlays = osiris_overlay(&workspace, &caller_path, GENERATED_ADD_PASSIVE_CALLER);
+
+    let hover = workspace
+        .hover(
+            &caller_path,
+            source_position(GENERATED_ADD_PASSIVE_CALLER, "AddPassive"),
+            &overlays,
+        )
+        .expect("generated AddPassive hover");
+    assert!(
+        hover.contains("Adds the named passive to the specified entity."),
+        "{hover}"
+    );
+
+    let (line, column) = call_position(GENERATED_ADD_PASSIVE_CALLER, "AddPassive");
+    let signature = workspace
+        .signature_help(
+            &caller_path,
+            Position {
+                line,
+                character: column,
+            },
+            &overlays,
+        )
+        .expect("generated AddPassive signature help");
+    assert!(
+        signature
+            .documentation
+            .contains("Adds the named passive to the specified entity.")
+    );
+
+    let completion_text = goal_text("IF\nTextEvent(\"go\")\nTHEN\nAddP");
+    let completion_overlays = osiris_overlay(&workspace, &caller_path, &completion_text);
+    let prefix = source_position(&completion_text, "AddP");
+    let completion = workspace.completion(
+        &caller_path,
+        Position {
+            line: prefix.line,
+            character: prefix.character + 4,
+        },
+        &completion_overlays,
+        false,
+    );
+    let item = completion
+        .items
+        .iter()
+        .find(|item| item.label == "AddPassive")
+        .expect("generated AddPassive completion");
+    assert_eq!(
+        item.documentation.as_deref(),
+        Some("Adds the named passive to the specified entity.")
+    );
+}
+
+#[test]
+fn undocumented_generated_callable_keeps_verified_signature_only_help() {
+    let (workspace, caller_path) = workspace_with(None);
+    let overlays = osiris_overlay(&workspace, &caller_path, GENERATED_UNDOCUMENTED_CALLER);
+
+    let hover = workspace
+        .hover(
+            &caller_path,
+            source_position(GENERATED_UNDOCUMENTED_CALLER, "AutoSave"),
+            &overlays,
+        )
+        .expect("generated undocumented hover");
+    assert!(
+        hover.contains("**Osiris engine call** `AutoSave/0`"),
+        "{hover}"
+    );
+    assert!(hover.contains("```bg3_osiris\nAutoSave()\n```"), "{hover}");
+    assert!(
+        hover.contains("**Catalog:** BG3 build `4.1.1.7398727`"),
+        "{hover}"
+    );
+
+    let call = source_position(GENERATED_UNDOCUMENTED_CALLER, "AutoSave");
+    let signature = workspace
+        .signature_help(
+            &caller_path,
+            Position {
+                line: call.line,
+                character: call.character + u32::try_from("AutoSave(".len()).unwrap(),
+            },
+            &overlays,
+        )
+        .expect("generated undocumented signature help");
+    assert_eq!(signature.label, "AutoSave()");
+    assert_eq!(
+        signature.documentation,
+        "Verified against the generated BG3 engine contract catalog (build `4.1.1.7398727`)."
+    );
+}
 
 #[test]
 fn generated_engine_callable_hover_uses_compact_code_for_short_signatures() {

@@ -1402,9 +1402,11 @@ impl WorkspaceSnapshot {
                     "{} /{arity} — generated BG3 engine catalog",
                     osiris_contract_kind_label(contract.kind)
                 ));
-                if let Some(description) =
-                    bg3_index::osiris_callable_description(contract.name, arity)
-                {
+                if let Some(description) = bg3_index::osiris_callable_description_for_kind(
+                    contract.kind,
+                    contract.name,
+                    arity,
+                ) {
                     item.documentation = Some(description.to_owned());
                 }
                 if snippets {
@@ -2070,7 +2072,9 @@ impl WorkspaceSnapshot {
             "Verified against the generated BG3 engine contract catalog (build `{}`).",
             bg3_index::OSIRIS_CATALOG_SOURCE_VERSION
         );
-        if let Some(description) = bg3_index::osiris_callable_description(name, arity as u16) {
+        if let Some(description) =
+            bg3_index::osiris_callable_description_for_kind(contract.kind, name, arity as u16)
+        {
             documentation = format!("{description}\n\n{documentation}");
         }
         Some(SignatureHelp {

@@ -18,8 +18,8 @@ use bg3_index::{
     PackagedStatsCatalog, PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts,
     ParsedFile, Position, Reference, SchemaCatalog, SourceKind, SymbolTarget,
     THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile,
-    TooltipCatalog, canonical_kind, osiris_contract, osiris_type_compatibility,
-    parse_packaged_thoth_facts,
+    TooltipCatalog, canonical_kind, osiris_contract, osiris_contract_by_kind,
+    osiris_type_compatibility, parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -817,7 +817,9 @@ impl WorkspaceSnapshot {
             &format!("{name}/{arity}"),
         )
         .markdown(&osiris_contract_signature_markdown(name, contract));
-        if let Some(description) = bg3_index::osiris_callable_description(name, arity) {
+        if let Some(description) =
+            bg3_index::osiris_callable_description_for_kind(contract.kind, name, arity)
+        {
             markdown = markdown.prose(description);
         }
         markdown = markdown.markdown(&format!(
@@ -2317,9 +2319,8 @@ pub(crate) fn packaged_osiris_description(
     arity: u16,
     kind: OsirisContractKind,
 ) -> Option<&'static str> {
-    osiris_contract(OSIRIS_CONTRACTS, name, arity)
-        .filter(|contract| contract.kind == kind)
-        .and_then(|_| bg3_index::osiris_callable_description(name, arity))
+    osiris_contract_by_kind(OSIRIS_CONTRACTS, kind, name, arity)
+        .and_then(|_| bg3_index::osiris_callable_description_for_kind(kind, name, arity))
 }
 
 fn osiris_contract_signature_markdown(
@@ -2638,6 +2639,23 @@ mod tests {
         assert_eq!(
             abbreviate_home(Path::new("/Users/td/a.txt"), None),
             "/Users/td/a.txt"
+        );
+    }
+
+    #[test]
+    fn packaged_osiris_description_requires_exact_name_arity_and_kind() {
+        assert!(packaged_osiris_description("HasPassive", 3, OsirisContractKind::Query).is_some());
+        assert_eq!(
+            packaged_osiris_description("HasPassive", 3, OsirisContractKind::Call),
+            None
+        );
+        assert_eq!(
+            packaged_osiris_description("HasPassive", 2, OsirisContractKind::Query),
+            None
+        );
+        assert_eq!(
+            packaged_osiris_description("Missing", 3, OsirisContractKind::Query),
+            None
         );
     }
 
