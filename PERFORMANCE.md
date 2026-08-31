@@ -265,7 +265,7 @@ The cold p95 increase remains below the 20% limit, and the warm p95 increase
 remains below the 15% limit. Navigation also improves, so the issue passes the
 repository regression thresholds.
 
-## Version 0.30 CLI packaged Osiris cache verification
+## Version 0.30.0 CLI packaged Osiris cache verification
 
 Issue #163 routes standalone CLI indexing through the existing packaged
 Osiris catalog cache. The comparison used five cold and five warm trials on
