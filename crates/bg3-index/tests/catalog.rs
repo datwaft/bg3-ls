@@ -1,8 +1,54 @@
 use bg3_index::{
-    context_member, context_members, context_properties, context_property, context_side,
-    enum_value, field_documentation, function_spec, functor_prefix, functor_prefixes,
-    member_enumeration, osiris_signature, osiris_type_compatibility,
+    OsirisContractKind, OsirisTypeClass, context_member, context_members, context_properties,
+    context_property, context_side, enum_value, field_documentation, function_spec, functor_prefix,
+    functor_prefixes, member_enumeration, osiris_argument_domain, osiris_signature,
+    osiris_type_class, osiris_type_compatibility,
 };
+
+#[test]
+fn classifies_only_verified_osiris_type_spellings() {
+    assert_eq!(
+        osiris_type_class("INTEGER"),
+        Some(OsirisTypeClass::IntrinsicScalar)
+    );
+    assert_eq!(
+        osiris_type_class("GUIDSTRING"),
+        Some(OsirisTypeClass::GenericGuidString)
+    );
+    assert_eq!(
+        osiris_type_class("CHARACTER"),
+        Some(OsirisTypeClass::SpecializedGuidAlias)
+    );
+    assert_eq!(
+        osiris_type_class("ARMOURSET"),
+        Some(OsirisTypeClass::ExactCatalogType)
+    );
+    assert_eq!(osiris_type_class("NOT_A_TYPE"), None);
+}
+
+#[test]
+fn maps_only_reviewed_generated_osiris_string_domains() {
+    assert_eq!(
+        osiris_argument_domain(OsirisContractKind::Event, "StatusApplied", 4, 1),
+        Some("StatusData")
+    );
+    assert_eq!(
+        osiris_argument_domain(OsirisContractKind::Call, "RemoveStatus", 3, 1),
+        Some("StatusData")
+    );
+    assert_eq!(
+        osiris_argument_domain(OsirisContractKind::Event, "StatusApplied", 4, 0),
+        None
+    );
+    assert_eq!(
+        osiris_argument_domain(OsirisContractKind::Event, "StatusApplied", 4, 2),
+        None
+    );
+    assert_eq!(
+        osiris_argument_domain(OsirisContractKind::Call, "StatusApplied", 4, 1),
+        None
+    );
+}
 
 #[test]
 fn models_verified_bg3_guid_family_compatibility() {

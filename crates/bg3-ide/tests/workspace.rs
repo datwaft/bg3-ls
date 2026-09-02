@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use bg3_ide::{DiagnosticSeverity, OverlayDocument, OverlaySet, WorkspaceSnapshot};
 use bg3_index::{
-    LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, PackagedStatsCatalog,
-    PackagedStatsSource, PackagedThothCatalog, PackagedThothSource, Position, SchemaCatalog,
-    SourceFile, SourceKind, SymbolTarget, discover_module, parse_packaged_thoth_facts,
-    parse_source, parse_thoth_file, parse_tooltip_catalog,
+    Definition, LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, PackagedStatsCatalog,
+    PackagedStatsSource, PackagedThothCatalog, PackagedThothSource, ParsedFile, Position,
+    SchemaCatalog, SourceFile, SourceKind, SymbolTarget, TextRange, discover_module,
+    parse_packaged_thoth_facts, parse_source, parse_thoth_file, parse_tooltip_catalog,
 };
 
 fn fixtures() -> PathBuf {
@@ -114,6 +114,107 @@ fn overlay(workspace: &WorkspaceSnapshot, path: &Path, text: &str) -> OverlaySet
     overlays
 }
 
+#[test]
+fn typed_overlay_alias_resolution_requires_matching_canonical_kind() {
+    let schema = Arc::new(SchemaCatalog::default());
+    let module = Arc::new(ModuleIndex::new(
+        ModuleSpec {
+            name: "Synthetic".into(),
+            root: PathBuf::from("/synthetic"),
+            role: ModuleRole::Project,
+        },
+        Vec::new(),
+    ));
+    let workspace = WorkspaceSnapshot::new(schema, vec![module], 1, 200, 200);
+    let path = PathBuf::from("/synthetic/overlay.txt");
+    let mut overlays = OverlaySet::default();
+    overlays.insert(
+        path.clone(),
+        OverlayDocument {
+            module: "Synthetic".into(),
+            version: 1,
+            text: String::new(),
+            parsed: Arc::new(ParsedFile {
+                source: SourceFile {
+                    path,
+                    kind: SourceKind::PlainStats,
+                },
+                definitions: vec![
+                    Definition {
+                        kind: "Status".into(),
+                        name: "StatusName".into(),
+                        range: TextRange::default(),
+                        selection_range: TextRange::default(),
+                        fields: Default::default(),
+                        field_ranges: Default::default(),
+                        aliases: vec!["SharedAlias".into()],
+                        uuid: None,
+                        parent: None,
+                        schema_id: None,
+                        arity: None,
+                    },
+                    Definition {
+                        kind: "SpellData".into(),
+                        name: "SpellName".into(),
+                        range: TextRange::default(),
+                        selection_range: TextRange::default(),
+                        fields: Default::default(),
+                        field_ranges: Default::default(),
+                        aliases: vec!["SharedAlias".into()],
+                        uuid: None,
+                        parent: None,
+                        schema_id: None,
+                        arity: None,
+                    },
+                ],
+                references: Vec::new(),
+                observed_functions: Vec::new(),
+                issues: Vec::new(),
+                osiris: None,
+                thoth: None,
+            }),
+        },
+    );
+
+    let status = workspace.resolve(
+        &SymbolTarget::Named {
+            kind: Some("StatusData".into()),
+            name: "SharedAlias".into(),
+        },
+        &overlays,
+    );
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].definition.name, "StatusName");
+
+    let spell = workspace.resolve(
+        &SymbolTarget::Named {
+            kind: Some("SpellData".into()),
+            name: "SharedAlias".into(),
+        },
+        &overlays,
+    );
+    assert_eq!(spell.len(), 1);
+    assert_eq!(spell[0].definition.name, "SpellName");
+
+    let untyped = workspace.resolve(
+        &SymbolTarget::Named {
+            kind: None,
+            name: "SharedAlias".into(),
+        },
+        &overlays,
+    );
+    assert_eq!(untyped.len(), 2);
+
+    let passive = workspace.resolve(
+        &SymbolTarget::Named {
+            kind: Some("PassiveData".into()),
+            name: "SharedAlias".into(),
+        },
+        &overlays,
+    );
+    assert!(passive.is_empty());
+}
+
 fn synthetic_osiris_workspace(
     sources: &[(&str, &str, ModuleRole, &str)],
 ) -> (WorkspaceSnapshot, Vec<PathBuf>) {
@@ -145,6 +246,225 @@ fn synthetic_osiris_workspace(
         })
         .collect();
     (WorkspaceSnapshot::new(schema, layers, 1, 200, 200), paths)
+}
+
+fn synthetic_module(
+    schema: &SchemaCatalog,
+    name: &str,
+    role: ModuleRole,
+    files: &[(&str, SourceKind, &str)],
+) -> Arc<ModuleIndex> {
+    let parsed = files
+        .iter()
+        .map(|(relative, kind, text)| {
+            let path = PathBuf::from(format!("/synthetic/{name}/{relative}"));
+            parse_source(SourceFile { path, kind: *kind }, text, schema, "English")
+                .expect("synthetic source")
+        })
+        .collect();
+    Arc::new(ModuleIndex::new(
+        ModuleSpec {
+            name: name.into(),
+            root: PathBuf::from(format!("/synthetic/{name}")),
+            role,
+        },
+        parsed,
+    ))
+}
+
+#[test]
+fn osiris_status_literals_navigate_loose_data_and_keep_generic_strings_unresolved() {
+    let schema = SchemaCatalog::default();
+    let status_name = "READY_é";
+    let status_text = format!(
+        "new entry \"{status_name}\"\ntype \"StatusData\"\ndata \"StatusType\" \"BOOST\"\n"
+    );
+    let story_text = format!(
+        concat!(
+            "Version 1\n",
+            "SubGoalCombiner SGC_AND\n",
+            "INITSECTION\n",
+            "KBSECTION\n",
+            "IF\n",
+            "StatusApplied((CHARACTER)_Object,L\"{status_name}\",_Cause,1)\n",
+            "THEN\n",
+            "RemoveStatus((CHARACTER)_Object,L\"{status_name}\",_Cause);\n",
+            "IF\n",
+            "TextEvent(\"ordinary text\")\n",
+            "THEN\n",
+            "TextEvent((STRING)_Text)\n",
+            "EXITSECTION\n",
+            "ENDEXITSECTION\n",
+        ),
+        status_name = status_name,
+    );
+    let status_relative = "Stats/Status_READY.txt";
+    let story_relative = "Story/RawFiles/Goals/Literals.txt";
+    let module = synthetic_module(
+        &schema,
+        "Project",
+        ModuleRole::Project,
+        &[
+            (status_relative, SourceKind::PlainStats, &status_text),
+            (story_relative, SourceKind::Osiris, &story_text),
+        ],
+    );
+    let workspace = WorkspaceSnapshot::new(Arc::new(schema), vec![module], 1, 200, 200);
+    let status_path = PathBuf::from(format!("/synthetic/Project/{status_relative}"));
+    let story_path = PathBuf::from(format!("/synthetic/Project/{story_relative}"));
+
+    let status_literal = source_position_nth(&story_text, status_name, 0);
+    let status_definitions =
+        workspace.definitions_at(&story_path, status_literal, &OverlaySet::default());
+    assert_eq!(status_definitions.len(), 1);
+    assert_eq!(status_definitions[0].module, "Project");
+    assert_eq!(status_definitions[0].path, status_path);
+    assert!(!status_definitions[0].ambiguous);
+
+    let status_locations =
+        workspace.definition_locations_at(&story_path, status_literal, &OverlaySet::default());
+    assert_eq!(status_locations.len(), 1);
+    assert_eq!(status_locations[0].path, status_path);
+    let status_definition_start = source_position(&status_text, status_name);
+    assert_eq!(
+        status_locations[0].range,
+        TextRange {
+            start: status_definition_start,
+            end: Position {
+                line: status_definition_start.line,
+                character: status_definition_start.character + status_name.len() as u32,
+            },
+        }
+    );
+
+    let status_references =
+        workspace.references_at(&story_path, status_literal, false, &OverlaySet::default());
+    assert_eq!(status_references.len(), 2);
+    assert!(
+        status_references
+            .iter()
+            .all(|location| location.path == story_path)
+    );
+    let status_references_with_declaration =
+        workspace.references_at(&story_path, status_literal, true, &OverlaySet::default());
+    assert_eq!(status_references_with_declaration.len(), 3);
+
+    let status_hover = workspace
+        .hover(&story_path, status_literal, &OverlaySet::default())
+        .expect("loose StatusData hover");
+    assert!(
+        status_hover.contains("**StatusData** `READY_é`"),
+        "{status_hover}"
+    );
+    assert!(
+        status_hover.contains("new entry \"READY_é\""),
+        "{status_hover}"
+    );
+    assert_eq!(
+        status_hover.range,
+        Some(TextRange {
+            start: status_literal,
+            end: Position {
+                line: status_literal.line,
+                character: status_literal.character + status_name.len() as u32,
+            },
+        })
+    );
+
+    let generic_string = source_position(&story_text, "ordinary text");
+    assert!(
+        workspace
+            .definitions_at(&story_path, generic_string, &OverlaySet::default())
+            .is_empty()
+    );
+    assert!(
+        workspace
+            .references_at(&story_path, generic_string, false, &OverlaySet::default())
+            .is_empty()
+    );
+    assert!(
+        workspace
+            .hover(&story_path, generic_string, &OverlaySet::default())
+            .is_none()
+    );
+
+    for type_name in ["CHARACTER", "STRING"] {
+        let cast_position = source_position(&story_text, type_name);
+        let cast_hover = workspace
+            .hover(&story_path, cast_position, &OverlaySet::default())
+            .expect("Osiris cast hover");
+        assert!(
+            cast_hover.contains(&format!("**Osiris type** `{type_name}`")),
+            "{cast_hover}"
+        );
+        assert_eq!(
+            cast_hover.range,
+            Some(TextRange {
+                start: cast_position,
+                end: Position {
+                    line: cast_position.line,
+                    character: cast_position.character + type_name.len() as u32,
+                },
+            })
+        );
+        assert!(
+            workspace
+                .definitions_at(&story_path, cast_position, &OverlaySet::default())
+                .is_empty()
+        );
+        assert!(
+            workspace
+                .definition_locations_at(&story_path, cast_position, &OverlaySet::default())
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn same_rank_loose_status_declarations_remain_ambiguous() {
+    let schema = SchemaCatalog::default();
+    let status_a = "new entry \"DUPLICATE_STATUS\"\ntype \"StatusData\"\n";
+    let status_b = "new entry \"DUPLICATE_STATUS\"\ntype \"StatusData\"\n";
+    let story = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "StatusApplied((CHARACTER)_Object,L\"DUPLICATE_STATUS\",_Cause,1)\n",
+        "THEN\n",
+        "GoalCompleted;\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let module = synthetic_module(
+        &schema,
+        "Project",
+        ModuleRole::Project,
+        &[
+            ("Stats/A_Status.txt", SourceKind::PlainStats, status_a),
+            ("Stats/B_Status.txt", SourceKind::PlainStats, status_b),
+            (
+                "Story/RawFiles/Goals/Consumer.txt",
+                SourceKind::Osiris,
+                story,
+            ),
+        ],
+    );
+    let workspace = WorkspaceSnapshot::new(Arc::new(schema), vec![module], 1, 200, 200);
+    let story_path = PathBuf::from("/synthetic/Project/Story/RawFiles/Goals/Consumer.txt");
+    let position = source_position(story, "DUPLICATE_STATUS");
+
+    let definitions = workspace.definitions_at(&story_path, position, &OverlaySet::default());
+    assert_eq!(definitions.len(), 2);
+    assert!(definitions.iter().all(|definition| definition.ambiguous));
+    let hover = workspace
+        .hover(&story_path, position, &OverlaySet::default())
+        .expect("ambiguous StatusData hover");
+    assert!(hover.contains("same-rank ambiguity"), "{hover}");
+    let locations =
+        workspace.definition_locations_at(&story_path, position, &OverlaySet::default());
+    assert_eq!(locations.len(), 2);
 }
 
 fn synthetic_osiris_overlay(

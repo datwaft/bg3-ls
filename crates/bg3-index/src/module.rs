@@ -187,14 +187,28 @@ impl ModuleIndex {
 
     /// Resolves a semantic target inside this module only.
     pub fn resolve(&self, target: &SymbolTarget) -> Vec<&DefinitionRecord> {
+        if let SymbolTarget::Named {
+            kind: Some(kind),
+            name,
+        } = target
+        {
+            let canonical = canonical_kind(kind);
+            if let Some(ids) = self.by_kind_name.get(&(canonical.to_owned(), name.clone())) {
+                return ids.iter().map(|id| &self.definitions[*id]).collect();
+            }
+            return self
+                .by_alias
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|id| canonical_kind(&self.definitions[**id].definition().kind) == canonical)
+                .map(|id| &self.definitions[*id])
+                .collect();
+        }
         let ids = match target {
-            SymbolTarget::Named {
-                kind: Some(kind),
-                name,
-            } => self
-                .by_kind_name
-                .get(&(canonical_kind(kind).to_owned(), name.clone()))
-                .or_else(|| self.by_alias.get(name)),
+            SymbolTarget::Named { kind: Some(_), .. } => {
+                unreachable!("typed named targets are handled above")
+            }
             SymbolTarget::Named { kind: None, name } => {
                 self.by_name.get(name).or_else(|| self.by_alias.get(name))
             }

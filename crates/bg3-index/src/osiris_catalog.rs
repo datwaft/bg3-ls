@@ -58,6 +58,39 @@ pub const OSIRIS_GUID_ALIASES: &[&str] = &[
 
 const OSIRIS_INTRINSIC_TYPES: &[&str] = &["INTEGER", "INTEGER64", "REAL", "STRING"];
 
+/// The verified class of one Osiris type name.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum OsirisTypeClass {
+    /// One of the scalar types defined by the Osiris language.
+    IntrinsicScalar,
+    /// The generic GUID value type accepted by all verified GUID aliases.
+    GenericGuidString,
+    /// A verified specialized GUID alias such as `CHARACTER` or `ITEM`.
+    SpecializedGuidAlias,
+    /// A type name present in a generated contract but not otherwise curated.
+    ExactCatalogType,
+}
+
+/// Classifies an exact, verified Osiris type spelling.
+pub fn osiris_type_class(type_name: &str) -> Option<OsirisTypeClass> {
+    if OSIRIS_INTRINSIC_TYPES.contains(&type_name) {
+        Some(OsirisTypeClass::IntrinsicScalar)
+    } else if type_name == OSIRIS_GUIDSTRING_TYPE {
+        Some(OsirisTypeClass::GenericGuidString)
+    } else if OSIRIS_GUID_ALIASES.contains(&type_name) {
+        Some(OsirisTypeClass::SpecializedGuidAlias)
+    } else if OSIRIS_CONTRACTS.iter().any(|contract| {
+        contract
+            .parameters
+            .iter()
+            .any(|parameter| parameter.type_name == type_name)
+    }) {
+        Some(OsirisTypeClass::ExactCatalogType)
+    } else {
+        None
+    }
+}
+
 /// Returns whether two proven Osiris type names are compatible for a
 /// database argument.
 ///
@@ -90,15 +123,7 @@ pub fn osiris_type_compatibility(left: &str, right: &str) -> Option<bool> {
 }
 
 fn is_known_osiris_type(type_name: &str) -> bool {
-    OSIRIS_INTRINSIC_TYPES.contains(&type_name)
-        || type_name == OSIRIS_GUIDSTRING_TYPE
-        || OSIRIS_GUID_ALIASES.contains(&type_name)
-        || OSIRIS_CONTRACTS.iter().any(|contract| {
-            contract
-                .parameters
-                .iter()
-                .any(|parameter| parameter.type_name == type_name)
-        })
+    osiris_type_class(type_name).is_some()
 }
 
 /// The direction of one Osiris query parameter.
@@ -363,6 +388,60 @@ pub fn osiris_contract<'a>(
         .filter(|contract| contract.parameters.len() as u16 == arity);
     let contract = matches.next()?;
     matches.next().is_none().then_some(contract)
+}
+
+/// Reviewed resource domains for generated-contract string parameters.
+///
+/// The generated header records many semantically different values as
+/// `STRING`, so parameter names are not enough to establish a resource kind.
+/// Keep this overlay keyed by the complete contract identity and argument
+/// position. Generic strings, status groups, status types, and other
+/// unreviewed positions remain unmapped.
+const OSIRIS_ARGUMENT_DOMAINS: &[(OsirisContractKind, &str, u16, usize, &str)] = &[
+    (
+        OsirisContractKind::Event,
+        "StatusApplied",
+        4,
+        1,
+        "StatusData",
+    ),
+    (OsirisContractKind::Call, "RemoveStatus", 3, 1, "StatusData"),
+];
+
+/// Returns the verified resource domain of one generated-contract argument.
+///
+/// The contract kind is part of the lookup key. This preserves same-name,
+/// same-arity declarations with different roles instead of selecting one by
+/// catalog order. Callers should first resolve the contract with
+/// [`osiris_contract`], which rejects an ambiguous name/arity pair.
+pub fn osiris_argument_domain(
+    kind: OsirisContractKind,
+    name: &str,
+    arity: u16,
+    index: usize,
+) -> Option<&'static str> {
+    let contract = osiris_contract_by_kind(OSIRIS_CONTRACTS, kind, name, arity)?;
+    let parameter = contract.parameters.get(index)?;
+    if parameter.type_name != "STRING"
+        || !matches!(
+            parameter.direction,
+            OsirisParameterDirection::In | OsirisParameterDirection::InOut
+        )
+    {
+        return None;
+    }
+
+    OSIRIS_ARGUMENT_DOMAINS
+        .iter()
+        .find(
+            |(candidate_kind, candidate_name, candidate_arity, candidate_index, _)| {
+                *candidate_kind == kind
+                    && *candidate_name == name
+                    && *candidate_arity == arity
+                    && *candidate_index == index
+            },
+        )
+        .map(|(_, _, _, _, domain)| *domain)
 }
 
 /// Looks up a generated static contract by exact kind, name, and arity.

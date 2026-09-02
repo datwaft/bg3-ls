@@ -14,12 +14,13 @@ use bg3_index::{
     Definition, LocalizationCatalog, ModuleIndex, ModuleRole, ModuleSpec, OSIRIS_CONTRACTS,
     OSIRIS_DATABASE_KIND, OSIRIS_GOAL_KIND, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND,
     OsirisCallRole, OsirisContractKind, OsirisDatabaseBinding, OsirisParameterDirection,
-    OsirisVariableFact, OsirisVariableOccurrence, PackagedOsirisIndex, PackagedOsirisResolution,
-    PackagedStatsCatalog, PackagedThothApiIndex, PackagedThothCatalog, PackagedThothFacts,
-    ParsedFile, Position, Reference, SchemaCatalog, SourceKind, SymbolTarget,
-    THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange, ThothExpressionKind, ThothFile,
-    TooltipCatalog, canonical_kind, osiris_contract, osiris_contract_by_kind,
-    osiris_type_compatibility, parse_packaged_thoth_facts,
+    OsirisTypeCast, OsirisTypeClass, OsirisVariableFact, OsirisVariableOccurrence,
+    PackagedOsirisIndex, PackagedOsirisResolution, PackagedStatsCatalog, PackagedThothApiIndex,
+    PackagedThothCatalog, PackagedThothFacts, ParsedFile, Position, Reference, SchemaCatalog,
+    SourceKind, SymbolTarget, THOTH_FACTS_EXTRACTOR_VERSION, THOTH_FUNCTION_KIND, TextRange,
+    ThothExpressionKind, ThothFile, TooltipCatalog, canonical_kind, osiris_contract,
+    osiris_contract_by_kind, osiris_type_class, osiris_type_compatibility,
+    parse_packaged_thoth_facts,
 };
 
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
@@ -680,6 +681,9 @@ impl WorkspaceSnapshot {
         if let Some(variable) = self.osiris_variable_at(path, position, overlays) {
             return Some(self.osiris_variable_hover(variable, overlays));
         }
+        if let Some(type_cast) = self.osiris_type_cast_at(path, position, overlays) {
+            return Some(self.osiris_type_cast_hover(type_cast));
+        }
         let target = self.target_at(path, position, overlays)?;
         if let SymbolTarget::Named {
             kind: Some(kind),
@@ -900,6 +904,7 @@ impl WorkspaceSnapshot {
                     .iter()
                     .flat_map(|variable| variable.occurrences.iter().copied()),
             );
+            candidates.extend(osiris.casts.iter().map(|type_cast| type_cast.range));
         }
         let semantic = candidates
             .into_iter()
@@ -1479,6 +1484,45 @@ impl WorkspaceSnapshot {
                     },
                 )
         })
+    }
+
+    /// Returns the explicit Osiris type cast under one source position.
+    fn osiris_type_cast_at<'a>(
+        &'a self,
+        path: &Path,
+        position: Position,
+        overlays: &'a OverlaySet,
+    ) -> Option<&'a OsirisTypeCast> {
+        let (_, file) = self.file(path, overlays)?;
+        file.osiris
+            .as_ref()?
+            .casts
+            .iter()
+            .find(|type_cast| range_contains(type_cast.range, position))
+    }
+
+    /// Renders the built-in type family and conservative compatibility facts
+    /// for one explicit Osiris cast.
+    fn osiris_type_cast_hover(&self, type_cast: &OsirisTypeCast) -> String {
+        let (family, compatibility) = match osiris_type_class(&type_cast.type_name) {
+            Some(OsirisTypeClass::IntrinsicScalar) => {
+                ("scalar", "Compatible only with the same scalar type")
+            }
+            Some(OsirisTypeClass::GenericGuidString) => {
+                ("GUID", "Compatible with verified GUID aliases")
+            }
+            Some(OsirisTypeClass::SpecializedGuidAlias) => {
+                ("GUID", "Compatible with GUIDSTRING and the same alias")
+            }
+            Some(OsirisTypeClass::ExactCatalogType) => {
+                ("catalog", "Compatibility is exact and contract-defined")
+            }
+            None => ("unknown", "Compatibility unknown"),
+        };
+        HoverMarkup::new("Osiris type", &type_cast.type_name)
+            .fact("Family", family)
+            .fact("Compatibility", compatibility)
+            .finish()
     }
 
     /// Renders one rule-local Osiris variable without claiming a declaration.
@@ -2183,8 +2227,8 @@ fn definition_matches(definition: &Definition, target: &SymbolTarget) -> bool {
             kind: Some(kind),
             name,
         } => {
-            (canonical_kind(&definition.kind) == canonical_kind(kind) && definition.name == *name)
-                || definition.aliases.contains(name)
+            canonical_kind(&definition.kind) == canonical_kind(kind)
+                && (definition.name == *name || definition.aliases.contains(name))
         }
         SymbolTarget::Named { kind: None, name } => {
             definition.name == *name || definition.aliases.contains(name)
