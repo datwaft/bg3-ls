@@ -293,3 +293,33 @@ The new cache object stores the validated packaged Osiris catalog and adds
 24,590,189 bytes. Cold p95 remains effectively flat and below the 20%
 regression limit. Warm p95 improves and remains below the 15% regression
 limit.
+
+## Issue #203 Osiris argument-domain registry verification
+
+Issue #203 adds an exhaustive reviewed disposition ledger for all 518 input
+`STRING` positions in the generated Osiris catalog. The comparison used five
+cold and five warm trials on the same machine, data revision, configured
+modules, project, and source composition. Both builds used `tree-sitter-bg3`
+0.7.2 with parser ABI 15. The index contained 3,451 documents and 88,014
+definitions.
+
+| Metric | Main p50 | Main p95 | Issue #203 p50 | Issue #203 p95 | p95 change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold indexing | 7,725 ms | 7,892 ms | 8,205 ms | 8,231 ms | +4.3% |
+| Warm indexing | 2,046 ms | 2,141 ms | 1,996 ms | 2,291 ms | +7.0% |
+| Navigation | 1,167 ns | 1,250 ns | 1,167 ns | 1,250 ns | 0.0% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100% for both builds
+- Main repeated-trial RSS high-water mark: 1,988,149,248 bytes
+- Issue #203 repeated-trial RSS high-water mark: 2,032,910,336 bytes (+2.3%)
+- Main cache: 210,342,782 bytes in 3,464 files
+- Issue #203 cache: 210,342,986 bytes in 3,464 files (+204 bytes)
+
+Both builds used schema revision
+`ab8dfe38b6547cba2bbf3897774f5437919193d4237892e4cc3c5306bb46177d`.
+The candidate keeps only the two existing `StatusData` mappings active; all
+newly reviewed resource domains remain deferred until their supporting index
+issues are implemented. Cold and warm p95 remain below the 20% and 15%
+regression limits.

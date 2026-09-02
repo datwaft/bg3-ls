@@ -40,6 +40,26 @@ fn validates_the_checked_in_description_catalog_offline() {
 }
 
 #[test]
+fn validates_the_checked_in_argument_domain_catalog_offline() {
+    let directory = tempfile::tempdir().unwrap();
+    let checked = Command::new(env!("CARGO_BIN_EXE_bg3-ls"))
+        .current_dir(directory.path())
+        .args(["catalog", "check-domains"])
+        .output()
+        .unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(checked.stdout).unwrap(),
+        "argument domain catalog is valid: total=518 reviewed=518 resource=2 deferred-resource=112 runtime-id=232 enumeration=67 expression=29 free-text=29 unresolved=47 unreviewed=0 (bg3-ls-osiris-argument-domains-v1)\n"
+    );
+    assert!(checked.stderr.is_empty());
+}
+
+#[test]
 fn generates_and_checks_catalog_from_game_metadata() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir(directory.path().join("Contents")).unwrap();

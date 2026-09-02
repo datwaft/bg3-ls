@@ -11,6 +11,8 @@ mod module;
 mod osiris_api;
 mod osiris_catalog;
 mod osiris_descriptions;
+mod osiris_domain_records;
+mod osiris_domains;
 mod package;
 mod packaged_stats;
 mod parser;
@@ -66,7 +68,7 @@ pub use module::{DefinitionRecord, ModuleIndex, ReferenceRecord};
 pub use osiris_api::{
     OSIRIS_FACTS_EXTRACTOR_VERSION, PackagedOsirisCallable, PackagedOsirisCallableRole,
     PackagedOsirisCandidate, PackagedOsirisIndex, PackagedOsirisResolution,
-    parse_osiris_goal_source,
+    osiris_catalog_cache_identity, osiris_facts_cache_identity, parse_osiris_goal_source,
 };
 pub use osiris_catalog::{
     GENERATED_OSIRIS_CATALOG_GENERATOR_VERSION, OSIRIS_CATALOG_GENERATOR_VERSION,
@@ -81,6 +83,16 @@ pub use osiris_descriptions::{
     OSIRIS_DESCRIPTION_CATALOG_VERSION, OSIRIS_DESCRIPTION_RECORDS, OsirisDescriptionRecord,
     osiris_callable_description, osiris_callable_description_for_kind,
     validate_osiris_descriptions,
+};
+pub use osiris_domains::{
+    CURRENT_OSIRIS_CATALOG_PROVENANCE, OSIRIS_ARGUMENT_DOMAIN_CATALOG_VERSION,
+    OSIRIS_ARGUMENT_DOMAIN_RECORDS, OsirisArgumentDisposition, OsirisArgumentDomainCoverage,
+    OsirisArgumentDomainRecord, OsirisCatalogProvenance, OsirisResourceDomain,
+    osiris_argument_disposition, osiris_argument_disposition_in, osiris_argument_domain_coverage,
+    osiris_argument_domain_coverage_against, osiris_argument_domain_in,
+    osiris_argument_domain_record, osiris_argument_domain_record_in,
+    validate_osiris_argument_domains, validate_osiris_argument_domains_against,
+    validate_osiris_argument_domains_complete,
 };
 pub use package::{PackageEntry, PackageHeader, PackageReader};
 pub use packaged_stats::{
