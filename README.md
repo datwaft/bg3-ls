@@ -132,6 +132,15 @@ rejects duplicate, stale, or mismatched keys and incomplete provenance. Review
 wiki input explicitly and do not copy pages into the repository. The language
 server never fetches documentation at runtime.
 
+Version 0.32.0 adds context-aware hover for complete Osiris type casts and
+definition navigation for exact, contract-proven `StatusData` resource strings.
+Cast hover reports the verified type family and compatibility rule. The reviewed
+resource mappings currently cover the `StatusData` arguments of the
+`StatusApplied` event and `RemoveStatus` call; generic string arguments and
+unmapped positions remain unresolved. Existing configuration and caches remain
+compatible, no migration or cache reset is required, and the release remains
+compatible with `tree-sitter-bg3` 0.7.2.
+
 Version 0.31.0 expands the verified Osiris description catalog with reviewed,
 provenance-backed descriptions for additional engine callables. Hover,
 completion, and signature help show prose only when the exact callable kind,
