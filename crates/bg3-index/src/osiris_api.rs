@@ -1,15 +1,90 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND, PackagedThothCatalog, PackagedThothFacts,
-    PackagedThothResolution, PackagedThothSource, ParsedFile, SchemaCatalog, SourceKind,
+    CURRENT_OSIRIS_CATALOG_PROVENANCE, OSIRIS_ARGUMENT_DOMAIN_CATALOG_VERSION,
+    OSIRIS_ARGUMENT_DOMAIN_RECORDS, OSIRIS_PROCEDURE_KIND, OSIRIS_QUERY_KIND,
+    OsirisArgumentDomainRecord, PackagedThothCatalog, PackagedThothFacts, PackagedThothResolution,
+    PackagedThothSource, ParsedFile, SchemaCatalog, SourceKind,
 };
 
 /// Invalidates cached packaged Osiris goal facts when their shape changes.
 pub const OSIRIS_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-osiris-facts-v9";
+
+/// Returns the generated and reviewed Osiris catalog identity components.
+pub fn osiris_catalog_cache_identity() -> String {
+    static IDENTITY: OnceLock<String> = OnceLock::new();
+    IDENTITY
+        .get_or_init(|| osiris_catalog_cache_identity_for(OSIRIS_ARGUMENT_DOMAIN_RECORDS))
+        .clone()
+}
+
+fn osiris_catalog_cache_identity_for(records: &[OsirisArgumentDomainRecord]) -> String {
+    let provenance = CURRENT_OSIRIS_CATALOG_PROVENANCE;
+    let mut content = blake3::Hasher::new();
+    for record in records {
+        hash_identity_component(&mut content, format!("{:?}", record.kind));
+        hash_identity_component(&mut content, record.name);
+        hash_identity_component(&mut content, record.arity.to_le_bytes());
+        hash_identity_component(&mut content, (record.index as u64).to_le_bytes());
+        hash_identity_component(&mut content, record.parameter_name);
+        hash_identity_component(&mut content, record.parameter_type);
+        hash_identity_component(&mut content, format!("{:?}", record.direction));
+        hash_identity_component(&mut content, format!("{:?}", record.disposition));
+        hash_identity_component(&mut content, record.source_url.unwrap_or_default());
+        hash_identity_component(
+            &mut content,
+            record.source_revision.unwrap_or_default().to_le_bytes(),
+        );
+        hash_identity_component(&mut content, record.reviewed_on);
+        hash_identity_component(&mut content, record.catalog_source_version);
+        hash_identity_component(&mut content, record.catalog_source_hash);
+        hash_identity_component(&mut content, record.catalog_generator_version);
+    }
+    let content_hash = content.finalize().to_hex().to_string();
+    [
+        OSIRIS_ARGUMENT_DOMAIN_CATALOG_VERSION,
+        provenance.source_version,
+        provenance.source_hash,
+        provenance.generator_version,
+        &content_hash,
+    ]
+    .join("\0")
+}
+
+fn hash_identity_component(hash: &mut blake3::Hasher, value: impl AsRef<[u8]>) {
+    let value = value.as_ref();
+    hash.update(&(value.len() as u64).to_le_bytes());
+    hash.update(value);
+}
+
+#[cfg(test)]
+mod cache_identity_tests {
+    use super::*;
+    use crate::OsirisArgumentDisposition;
+
+    #[test]
+    fn domain_record_content_changes_the_cache_identity() {
+        let baseline = osiris_catalog_cache_identity_for(OSIRIS_ARGUMENT_DOMAIN_RECORDS);
+        let mut changed = OSIRIS_ARGUMENT_DOMAIN_RECORDS.to_vec();
+        changed[0].disposition = OsirisArgumentDisposition::FreeText;
+        assert_ne!(baseline, osiris_catalog_cache_identity_for(&changed));
+    }
+}
+
+/// Returns the complete semantic identity for packaged Osiris facts.
+///
+/// Packaged Osiris facts include parsed source records that are consumed with
+/// the generated and reviewed Osiris argument contracts. Keep this identity
+/// separate from the generic Thoth facts identity so updates to those
+/// contracts invalidate only Osiris facts. The NUL separators make each
+/// component unambiguous without reading any source or package files.
+pub fn osiris_facts_cache_identity(extractor_version: &str) -> String {
+    format!("{extractor_version}\0{}", osiris_catalog_cache_identity())
+}
 
 /// Parses one complete, syntax-valid packaged Osiris goal into cacheable facts.
 ///

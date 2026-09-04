@@ -437,18 +437,69 @@ impl CacheStore {
         F: CachedThothFacts,
         Parse: Fn(&crate::PackagedThothSource) -> Result<F, Error>,
     {
+        self.load_packaged_facts(
+            "thoth",
+            "facts",
+            catalog,
+            extractor_version,
+            extractor_version,
+            parse,
+        )
+    }
+
+    /// Loads parsed facts for the packaged Osiris catalog.
+    ///
+    /// Osiris facts share the Thoth cache directory with a distinct filename
+    /// prefix and include the reviewed argument-domain catalog plus the
+    /// generated engine-catalog provenance in their identity. Changes to those
+    /// contracts therefore invalidate only Osiris facts; packaged Thoth facts
+    /// keep their existing cache identity.
+    pub fn load_packaged_osiris_facts<F, Parse>(
+        &self,
+        catalog: &PackagedThothCatalog,
+        extractor_version: &str,
+        parse: Parse,
+    ) -> Result<(PackagedThothFacts<F>, bool), Error>
+    where
+        F: CachedThothFacts,
+        Parse: Fn(&crate::PackagedThothSource) -> Result<F, Error>,
+    {
+        let cache_identity = crate::osiris_facts_cache_identity(extractor_version);
+        self.load_packaged_facts(
+            "thoth",
+            "osiris-facts",
+            catalog,
+            extractor_version,
+            &cache_identity,
+            parse,
+        )
+    }
+
+    fn load_packaged_facts<F, Parse>(
+        &self,
+        cache_namespace: &str,
+        filename_prefix: &str,
+        catalog: &PackagedThothCatalog,
+        extractor_version: &str,
+        cache_identity: &str,
+        parse: Parse,
+    ) -> Result<(PackagedThothFacts<F>, bool), Error>
+    where
+        F: CachedThothFacts,
+        Parse: Fn(&crate::PackagedThothSource) -> Result<F, Error>,
+    {
         let catalog_bytes = postcard::to_stdvec(catalog)?;
         let mut identity = blake3::Hasher::new();
-        identity.update(extractor_version.as_bytes());
+        identity.update(cache_identity.as_bytes());
         identity.update(&catalog_bytes);
         let digest = identity.finalize().to_hex().to_string();
         let cache_path = self
             .root
-            .join("thoth")
-            .join(format!("facts-{digest}.cache"));
+            .join(cache_namespace)
+            .join(format!("{filename_prefix}-{digest}.cache"));
 
         if let Ok(cached) = self.read_envelope::<CachedPackagedThothFacts<F>>(&cache_path)
-            && cached.extractor_version == extractor_version
+            && cached.extractor_version == cache_identity
             && cached.catalog_digest == digest
         {
             return Ok((cached.facts, true));
@@ -458,7 +509,7 @@ impl CacheStore {
         self.write_envelope(
             &cache_path,
             &CachedPackagedThothFacts {
-                extractor_version: extractor_version.to_owned(),
+                extractor_version: cache_identity.to_owned(),
                 catalog_digest: digest,
                 facts: facts.clone(),
             },
@@ -778,6 +829,22 @@ fn object_key(source: &SourceFile, content_hash: &str, fingerprint: &str) -> Str
 
 /// Fingerprints parser, schema, format, and localization inputs without reading source content.
 fn context_fingerprint(kind: crate::SourceKind, schema: &str, language: &str) -> String {
+    let osiris_identity =
+        (kind == crate::SourceKind::Osiris).then(crate::osiris_catalog_cache_identity);
+    context_fingerprint_with_osiris_identity(kind, schema, language, osiris_identity.as_deref())
+}
+
+/// Fingerprints parser inputs and an optional Osiris-only catalog identity.
+///
+/// Keeping the identity as an explicit input makes the source-kind boundary
+/// testable: non-Osiris files must not acquire cache invalidations when the
+/// Osiris contract catalog changes.
+fn context_fingerprint_with_osiris_identity(
+    kind: crate::SourceKind,
+    schema: &str,
+    language: &str,
+    osiris_identity: Option<&str>,
+) -> String {
     let stats_abi = tree_sitter::Language::from(tree_sitter_bg3::BG3_STATS_LANGUAGE).abi_version();
     let value_abi =
         tree_sitter::Language::from(tree_sitter_bg3::BG3_STATS_VALUE_LANGUAGE).abi_version();
@@ -795,6 +862,11 @@ fn context_fingerprint(kind: crate::SourceKind, schema: &str, language: &str) ->
     hash.update(format!("{kind:?}").as_bytes());
     hash.update(schema.as_bytes());
     hash.update(language.as_bytes());
+    if kind == crate::SourceKind::Osiris
+        && let Some(osiris_identity) = osiris_identity
+    {
+        hash.update(osiris_identity.as_bytes());
+    }
     hash.finalize().to_hex().to_string()
 }
 
@@ -1184,5 +1256,99 @@ mod tests {
         assert_eq!(cached.len(), 1);
         assert_eq!(cached.rejected_count(), 1);
         assert_eq!(cached.relevant_rejected_count(), 1);
+    }
+
+    #[test]
+    fn osiris_context_identity_invalidates_only_osiris_fingerprints() {
+        let identity = crate::osiris_catalog_cache_identity();
+        let changed_identity = format!("{identity}\0changed");
+        let osiris = context_fingerprint_with_osiris_identity(
+            SourceKind::Osiris,
+            "schema",
+            "English",
+            Some(&identity),
+        );
+        let changed_osiris = context_fingerprint_with_osiris_identity(
+            SourceKind::Osiris,
+            "schema",
+            "English",
+            Some(&changed_identity),
+        );
+        assert_ne!(osiris, changed_osiris);
+
+        let thoth = context_fingerprint_with_osiris_identity(
+            SourceKind::Thoth,
+            "schema",
+            "English",
+            Some(&identity),
+        );
+        let changed_thoth = context_fingerprint_with_osiris_identity(
+            SourceKind::Thoth,
+            "schema",
+            "English",
+            Some(&changed_identity),
+        );
+        assert_eq!(thoth, changed_thoth);
+    }
+
+    #[test]
+    fn packaged_osiris_facts_use_a_composite_identity_and_namespace() {
+        let directory = tempdir().expect("temporary directory");
+        let cache = CacheStore::new(directory.path().join("cache")).expect("cache");
+        let catalog = catalog("same catalog");
+        let calls = Cell::new(0);
+
+        let (facts, hit) = cache
+            .load_packaged_osiris_facts(&catalog, "facts-v1", |source| {
+                calls.set(calls.get() + 1);
+                Ok::<_, Error>(source.text().to_owned())
+            })
+            .expect("first Osiris facts load");
+        assert!(!hit);
+        assert_eq!(facts.extractor_version(), "facts-v1");
+
+        let (_, hit) = cache
+            .load_packaged_osiris_facts(&catalog, "facts-v1", |_| {
+                calls.set(calls.get() + 1);
+                Ok::<_, Error>("unexpected".to_owned())
+            })
+            .expect("cached Osiris facts load");
+        assert!(hit);
+
+        let (_, hit) = cache
+            .load_packaged_osiris_facts(&catalog, "facts-v2", |source| {
+                calls.set(calls.get() + 1);
+                Ok::<_, Error>(source.text().to_owned())
+            })
+            .expect("changed Osiris facts load");
+        assert!(!hit);
+
+        let (_, hit) = cache
+            .load_packaged_thoth_facts(&catalog, "facts-v1", |_| {
+                calls.set(calls.get() + 1);
+                Ok::<_, Error>("thoth".to_owned())
+            })
+            .expect("separate Thoth facts load");
+        assert!(!hit);
+        assert_eq!(calls.get(), 3);
+        let entries = fs::read_dir(cache.root().join("thoth"))
+            .expect("packaged facts cache directory")
+            .map(|entry| entry.expect("cache entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|name| name.to_string_lossy().starts_with("facts-"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|name| name.to_string_lossy().starts_with("osiris-facts-"))
+                .count(),
+            2
+        );
     }
 }

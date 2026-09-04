@@ -74,6 +74,8 @@ enum CatalogCommand {
     Check(CatalogOptions),
     /// Validates curated descriptions against the checked-in engine contracts.
     CheckDescriptions,
+    /// Validates reviewed domains for string-valued Osiris arguments.
+    CheckDomains,
 }
 
 /// Inputs shared by catalog generation and validation.
@@ -308,6 +310,33 @@ fn run_catalog(command: CatalogCommand) -> Result<ExitCode, Error> {
                 "description catalog is valid: {} records ({})",
                 bg3_index::OSIRIS_DESCRIPTION_RECORDS.len(),
                 bg3_index::OSIRIS_DESCRIPTION_CATALOG_VERSION
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        CatalogCommand::CheckDomains => {
+            bg3_index::validate_osiris_argument_domains_complete(
+                bg3_index::OSIRIS_CONTRACTS,
+                bg3_index::OSIRIS_ARGUMENT_DOMAIN_RECORDS,
+            )
+            .map_err(|error| Error::Index(error.to_string()))?;
+            let coverage = bg3_index::osiris_argument_domain_coverage(
+                bg3_index::OSIRIS_CONTRACTS,
+                bg3_index::OSIRIS_ARGUMENT_DOMAIN_RECORDS,
+            )
+            .map_err(|error| Error::Index(error.to_string()))?;
+            let reviewed = coverage.input_string - coverage.unreviewed;
+            println!(
+                "argument domain catalog is valid: total={} reviewed={reviewed} resource={} deferred-resource={} runtime-id={} enumeration={} expression={} free-text={} unresolved={} unreviewed={} ({})",
+                coverage.input_string,
+                coverage.active_resources,
+                coverage.deferred_resources,
+                coverage.runtime_identifiers,
+                coverage.enumerations,
+                coverage.expressions,
+                coverage.free_text,
+                coverage.deferred_semantic_review,
+                coverage.unreviewed,
+                bg3_index::OSIRIS_ARGUMENT_DOMAIN_CATALOG_VERSION
             );
             return Ok(ExitCode::SUCCESS);
         }
@@ -857,7 +886,7 @@ fn build_workspace(
     } else {
         totals.misses += 1;
     }
-    let (packaged_osiris_facts, osiris_hit) = cache.load_packaged_thoth_facts(
+    let (packaged_osiris_facts, osiris_hit) = cache.load_packaged_osiris_facts(
         &packaged_osiris_catalog,
         OSIRIS_FACTS_EXTRACTOR_VERSION,
         parse_osiris_goal_source,

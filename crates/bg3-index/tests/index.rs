@@ -1505,6 +1505,47 @@ fn indexes_verified_osiris_casts_and_resource_string_literals() {
 }
 
 #[test]
+fn does_not_index_resource_literals_in_invalid_engine_callable_roles() {
+    let text = concat!(
+        "Version 1\n",
+        "SubGoalCombiner SGC_AND\n",
+        "INITSECTION\n",
+        "KBSECTION\n",
+        "IF\n",
+        "RemoveStatus((CHARACTER)_Object,L\"WRONG_HEAD\",_Cause)\n",
+        "THEN\n",
+        "StatusApplied((CHARACTER)_Object,L\"WRONG_ACTION\",_Cause,1);\n",
+        "EXITSECTION\n",
+        "ENDEXITSECTION\n",
+    );
+    let parsed = parse_source(
+        SourceFile {
+            path: PathBuf::from("Mods/MyMod/Story/RawFiles/Goals/WrongRoles.txt"),
+            kind: SourceKind::Osiris,
+        },
+        text,
+        &SchemaCatalog::default(),
+        "English",
+    )
+    .unwrap();
+
+    assert!(
+        parsed
+            .issues
+            .iter()
+            .all(|issue| issue.code == "osiris-invalid-callable-role")
+    );
+    assert_eq!(parsed.issues.len(), 2);
+    assert!(!parsed.references.iter().any(|reference| {
+        matches!(
+            &reference.target,
+            SymbolTarget::Named { name, .. }
+                if name == "WRONG_HEAD" || name == "WRONG_ACTION"
+        )
+    }));
+}
+
+#[test]
 fn does_not_collect_osiris_literals_or_casts_from_incomplete_goals() {
     let parsed = parse_source(
         SourceFile {

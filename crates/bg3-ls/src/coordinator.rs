@@ -461,7 +461,7 @@ impl Coordinator {
                     thoth_cache.load_packaged_osiris(&base_modules, &candidates, || {
                         read_packaged_osiris_catalog(&game_data, &base_modules)
                     })?;
-                let (osiris_facts, osiris_facts_hit) = thoth_cache.load_packaged_thoth_facts(
+                let (osiris_facts, osiris_facts_hit) = thoth_cache.load_packaged_osiris_facts(
                     &osiris_catalog,
                     OSIRIS_FACTS_EXTRACTOR_VERSION,
                     parse_osiris_goal_source,

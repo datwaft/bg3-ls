@@ -390,24 +390,6 @@ pub fn osiris_contract<'a>(
     matches.next().is_none().then_some(contract)
 }
 
-/// Reviewed resource domains for generated-contract string parameters.
-///
-/// The generated header records many semantically different values as
-/// `STRING`, so parameter names are not enough to establish a resource kind.
-/// Keep this overlay keyed by the complete contract identity and argument
-/// position. Generic strings, status groups, status types, and other
-/// unreviewed positions remain unmapped.
-const OSIRIS_ARGUMENT_DOMAINS: &[(OsirisContractKind, &str, u16, usize, &str)] = &[
-    (
-        OsirisContractKind::Event,
-        "StatusApplied",
-        4,
-        1,
-        "StatusData",
-    ),
-    (OsirisContractKind::Call, "RemoveStatus", 3, 1, "StatusData"),
-];
-
 /// Returns the verified resource domain of one generated-contract argument.
 ///
 /// The contract kind is part of the lookup key. This preserves same-name,
@@ -420,28 +402,8 @@ pub fn osiris_argument_domain(
     arity: u16,
     index: usize,
 ) -> Option<&'static str> {
-    let contract = osiris_contract_by_kind(OSIRIS_CONTRACTS, kind, name, arity)?;
-    let parameter = contract.parameters.get(index)?;
-    if parameter.type_name != "STRING"
-        || !matches!(
-            parameter.direction,
-            OsirisParameterDirection::In | OsirisParameterDirection::InOut
-        )
-    {
-        return None;
-    }
-
-    OSIRIS_ARGUMENT_DOMAINS
-        .iter()
-        .find(
-            |(candidate_kind, candidate_name, candidate_arity, candidate_index, _)| {
-                *candidate_kind == kind
-                    && *candidate_name == name
-                    && *candidate_arity == arity
-                    && *candidate_index == index
-            },
-        )
-        .map(|(_, _, _, _, domain)| *domain)
+    crate::osiris_domains::osiris_argument_domain_record(kind, name, arity, index)
+        .and_then(|record| record.disposition.resource_domain())
 }
 
 /// Looks up a generated static contract by exact kind, name, and arity.

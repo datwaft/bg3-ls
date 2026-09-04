@@ -115,6 +115,8 @@ bg3-ls catalog check \
   --output crates/bg3-index/src/osiris_catalog/generated_osiris_catalog.rs
 
 bg3-ls catalog check-descriptions
+
+bg3-ls catalog check-domains
 ```
 
 Generation records the exact game build metadata and the input header hash in
@@ -131,6 +133,19 @@ sorted, then run `bg3-ls catalog check-descriptions`; the offline command
 rejects duplicate, stale, or mismatched keys and incomplete provenance. Review
 wiki input explicitly and do not copy pages into the repository. The language
 server never fetches documentation at runtime.
+
+`catalog check-domains` is an offline maintainer check for the reviewed
+interpretation of Osiris `STRING` arguments. It validates each record against
+the generated callable kind, name, arity, parameter metadata, and catalog
+provenance, then reports the total input-string positions and the reviewed,
+resource, deferred-resource, non-resource, unresolved, and unreviewed counts.
+An unresolved row records a completed conservative review where published
+evidence does not prove a narrower class; it never creates a resource
+reference. The command does not require a game installation or use the cache.
+It exits with code 2 when the checked-in registry is inconsistent.
+Resource and deferred-resource rows require a pinned official documentation
+revision. Non-resource and unresolved rows retain the generated engine-catalog
+build, hash, review date, and exact parameter metadata as their audit trail.
 
 Version 0.32.0 adds context-aware hover for complete Osiris type casts and
 definition navigation for exact, contract-proven `StatusData` resource strings.

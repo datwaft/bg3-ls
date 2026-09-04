@@ -1659,6 +1659,7 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
                             call,
                             text,
                             role,
+                            OsirisCallPlacement::InitExitAction,
                             &HashMap::new(),
                             &mut references,
                             &mut occurrences,
@@ -1869,19 +1870,7 @@ fn validate_osiris_callable_placement(
         });
     }
 
-    let valid = match placement {
-        OsirisCallPlacement::IfHead => kind == OsirisContractKind::Event,
-        OsirisCallPlacement::ProcedureHead | OsirisCallPlacement::QueryHead => false,
-        OsirisCallPlacement::Condition => {
-            matches!(
-                kind,
-                OsirisContractKind::Query | OsirisContractKind::Sysquery
-            )
-        }
-        OsirisCallPlacement::RuleAction | OsirisCallPlacement::InitExitAction => {
-            matches!(kind, OsirisContractKind::Call | OsirisContractKind::Syscall)
-        }
-    };
+    let valid = osiris_contract_allowed_at(kind, placement);
     if valid {
         return Ok(());
     }
@@ -1914,6 +1903,22 @@ fn validate_osiris_callable_placement(
         range: node_range(name_node),
     });
     Ok(())
+}
+
+fn osiris_contract_allowed_at(kind: OsirisContractKind, placement: OsirisCallPlacement) -> bool {
+    match placement {
+        OsirisCallPlacement::IfHead => kind == OsirisContractKind::Event,
+        OsirisCallPlacement::ProcedureHead | OsirisCallPlacement::QueryHead => false,
+        OsirisCallPlacement::Condition => {
+            matches!(
+                kind,
+                OsirisContractKind::Query | OsirisContractKind::Sysquery
+            )
+        }
+        OsirisCallPlacement::RuleAction | OsirisCallPlacement::InitExitAction => {
+            matches!(kind, OsirisContractKind::Call | OsirisContractKind::Syscall)
+        }
+    }
 }
 
 fn osiris_contract_kind_name(kind: OsirisContractKind) -> &'static str {
@@ -2051,6 +2056,7 @@ fn parse_osiris_rule(
             head,
             text,
             OsirisCallRole::Read,
+            OsirisCallPlacement::IfHead,
             &variable_analysis.occurrence_types,
             references,
             occurrences,
@@ -2068,6 +2074,7 @@ fn parse_osiris_rule(
                         call,
                         text,
                         OsirisCallRole::Read,
+                        OsirisCallPlacement::Condition,
                         &variable_analysis.occurrence_types,
                         references,
                         occurrences,
@@ -2081,6 +2088,7 @@ fn parse_osiris_rule(
                         call,
                         text,
                         role,
+                        OsirisCallPlacement::RuleAction,
                         &variable_analysis.occurrence_types,
                         references,
                         occurrences,
@@ -2447,6 +2455,7 @@ fn collect_osiris_call(
     call: Node<'_>,
     text: &str,
     role: OsirisCallRole,
+    placement: OsirisCallPlacement,
     occurrence_types: &HashMap<TextRange, OsirisTypeEvidence>,
     references: &mut Vec<Reference>,
     occurrences: &mut Vec<OsirisDatabaseOccurrence>,
@@ -2481,7 +2490,8 @@ fn collect_osiris_call(
         .into(),
     });
 
-    let contract = osiris_contract(OSIRIS_CONTRACTS, &name, arity);
+    let contract = osiris_contract(OSIRIS_CONTRACTS, &name, arity)
+        .filter(|contract| osiris_contract_allowed_at(contract.kind, placement));
     let mut argument_cursor = arguments_node.walk();
     for (index, argument) in arguments_node
         .named_children(&mut argument_cursor)
