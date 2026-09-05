@@ -292,7 +292,7 @@ fn osiris_status_literals_navigate_loose_data_and_keep_generic_strings_unresolve
             "IF\n",
             "TextEvent(\"ordinary text\")\n",
             "THEN\n",
-            "TextEvent((STRING)_Text)\n",
+            "TextEvent((STRING)_Text);\n",
             "EXITSECTION\n",
             "ENDEXITSECTION\n",
         ),

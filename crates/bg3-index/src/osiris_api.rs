@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// Invalidates cached packaged Osiris goal facts when their shape changes.
-pub const OSIRIS_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-osiris-facts-v9";
+pub const OSIRIS_FACTS_EXTRACTOR_VERSION: &str = "bg3-ls-osiris-facts-v10";
 
 /// Returns the generated and reviewed Osiris catalog identity components.
 pub fn osiris_catalog_cache_identity() -> String {
