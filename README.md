@@ -134,9 +134,10 @@ rejects duplicate, stale, or mismatched keys and incomplete provenance. Review
 wiki input explicitly and do not copy pages into the repository. The language
 server never fetches documentation at runtime.
 
-`catalog check-domains` is an offline maintainer check for the reviewed
-interpretation of Osiris `STRING` arguments. It validates each record against
-the generated callable kind, name, arity, parameter metadata, and catalog
+`catalog check-domains` is an offline maintainer check for the [reviewed Osiris
+argument ledger](crates/bg3-index/src/osiris_domain_records.rs). It validates
+each record against the generated callable kind, name, arity, parameter
+metadata, and catalog
 provenance, then reports the total input-string positions and the reviewed,
 resource, deferred-resource, non-resource, unresolved, and unreviewed counts.
 An unresolved row records a completed conservative review where published
@@ -149,12 +150,29 @@ build, hash, review date, and exact parameter metadata as their audit trail.
 
 Version 0.32.0 adds context-aware hover for complete Osiris type casts and
 definition navigation for exact, contract-proven `StatusData` resource strings.
-Cast hover reports the verified type family and compatibility rule. The reviewed
-resource mappings currently cover the `StatusData` arguments of the
-`StatusApplied` event and `RemoveStatus` call; generic string arguments and
+Cast hover reports the verified type family and compatibility rule. In that
+release, the reviewed resource mappings covered the `StatusData` arguments of
+the `StatusApplied` event and `RemoveStatus` call; generic string arguments and
 unmapped positions remain unresolved. Existing configuration and caches remain
 compatible, no migration or cache reset is required, and the release remains
 compatible with `tree-sitter-bg3` 0.7.2.
+
+Unreleased (planned for v0.33.0) expands the reviewed mapping to 48 exact
+callable argument positions in seven domains: `StatusData` (14), `SpellData`
+(24), `PassiveData` (4), `InterruptData` (2), `SpellSet` (1), `TreasureTable`
+(2), and `Equipment` (1). The mapping uses callable kind, name, arity, and
+exact argument index; a matching parameter name alone does not activate a row.
+It covers the status and spell operations and events, passive operations,
+reaction interrupt events, `GetSpellFromSet`, the two treasure calls, and
+`CharacterGiveEquipmentSet`.
+
+`Teleported` remains deferred because its documented spell argument can be the
+sentinel string `"Invalid"` for script teleports. Status-group arguments,
+generic `STRING` arguments, and all other unmapped positions remain unresolved.
+A missing loose declaration cannot prove that a resource is invalid, so it
+does not produce an unresolved diagnostic. Richer resource provenance remains
+deferred to issue #212. Existing configuration and caches remain compatible,
+and the release remains compatible with `tree-sitter-bg3` 0.7.2.
 
 Version 0.31.0 expands the verified Osiris description catalog with reviewed,
 provenance-backed descriptions for additional engine callables. Hover,
@@ -716,11 +734,16 @@ an intrinsic scalar, a GUID family, or an exact type from the generated
 contract catalog. The hover reports the type family and only the corresponding
 verified compatibility rule. A string literal is treated as a resource only
 when the generated catalog proves the callable kind, name, arity, and argument
-position. The reviewed mappings currently cover the `StatusData` arguments of
-the `StatusApplied` event and `RemoveStatus` call. These literals provide
-resource hover and definition navigation through the normal resource index;
-generic `STRING` arguments and unmapped positions remain unresolved. A
-packaged resource can provide hover and package-entry provenance, but it never
+position. Complete Osiris syntax is required for indexing, and explicit casts
+are accepted only when they are compatible with the generated `STRING`
+parameter type. The reviewed mapping covers 48 exact callable argument positions in
+the seven resource domains `StatusData`, `SpellData`, `PassiveData`,
+`InterruptData`, `SpellSet`, `TreasureTable`, and `Equipment`. These literals
+provide resource hover and definition navigation through the normal resource
+index; generic `STRING` arguments and unmapped positions remain unresolved.
+`Teleported` is deferred because its documented spell argument can be the
+sentinel `"Invalid"` for script teleports. A packaged resource can provide
+hover and package-entry provenance, but it never
 produces a fabricated filesystem or editor location; definition navigation
 opens a loose declaration only when one is available.
 

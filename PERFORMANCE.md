@@ -323,3 +323,81 @@ The candidate keeps only the two existing `StatusData` mappings active; all
 newly reviewed resource domains remain deferred until their supporting index
 issues are implemented. Cold and warm p95 remain below the 20% and 15%
 regression limits.
+
+## Issue #204 Stats-backed resource navigation verification
+
+Issue #204 adds context-aware navigation for Stats-backed resources. The
+comparison used five cold and five warm trials on the same machine, data
+revision, configured modules, project, and source composition as the Issue
+#203 run. Both builds used `tree-sitter-bg3` 0.7.2 with parser ABI 15. The
+isolated baseline was built from main commit `516761fa`; the candidate was
+built from the Issue #204 worktree. Both indexes contained 3,451 documents
+and 88,014 definitions, with two packaged Thoth sources (110,015 bytes in one
+package) and 15,987 packaged Stats declarations.
+
+| Metric | Main p50 | Main p95 | Issue #204 p50 | Issue #204 p95 | p95 change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold indexing | 10,392 ms | 10,540 ms | 10,755 ms | 10,905 ms | +3.5% |
+| Warm indexing | 2,611 ms | 2,733 ms | 3,332 ms | 3,657 ms | +33.8% |
+| Navigation | 1,333 ns | 1,417 ns | 1,416 ns | 1,458 ns | +2.9% |
+
+Additional measurements:
+
+- Warm cache hit rate: 100% for both builds
+- Main cache: 210,342,955 bytes in 3,464 files
+- Issue #204 cache: 210,610,615 bytes in 3,464 files (+267,660 bytes, +0.1%)
+- Main repeated-trial RSS high-water mark: 2,266,841,088 bytes
+- Issue #204 repeated-trial RSS high-water mark: 2,297,659,392 bytes (+1.4%)
+
+The candidate timing, RSS, and cache measurements came from one paired
+host-observed session. The baseline process ran first, followed by the
+candidate process, with separate disposable caches; host-idle status was not
+recorded for this session. Both builds used the same host-observed method and
+emitted the same schema digest
+`ab8dfe38b6547cba2bbf3897774f5437919193d4237892e4cc3c5306bb46177d`, grammar
+version, parser ABI, index counts, and warm hit rate. One packaged Osiris entry
+was rejected in each run, so the benchmark reported incomplete packaged
+Osiris evidence consistently. An earlier standalone candidate run and this
+session produced different results, so neither is used alone to attribute a
+performance change.
+
+### Reverse-order paired control
+
+To test order and host-state effects, a second uncontended host-observed
+session ran the candidate first and the baseline second, with fresh separate
+caches. It used the same five cold and five warm trials and the same input
+paths.
+
+| Metric | Issue #204 p50 | Issue #204 p95 | Main p50 | Main p95 | candidate p95 change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold indexing | 8,555 ms | 8,650 ms | 8,037 ms | 8,108 ms | +6.7% |
+| Warm indexing | 2,254 ms | 2,290 ms | 2,063 ms | 2,256 ms | +1.5% |
+| Navigation | 1,209 ns | 1,292 ns | 1,250 ns | 1,334 ns | -3.1% |
+
+Both reports again indexed 3,451 documents and 88,014 definitions with a 100%
+warm cache hit rate. The candidate cache was 210,610,615 bytes in 3,464 files;
+the baseline cache was 210,342,955 bytes in 3,464 files. The candidate and
+baseline RSS observations were 2,190,983,168 and 2,609,381,376 bytes,
+respectively. RSS varied across sessions, so no memory improvement is claimed.
+The earlier warm increase did not reproduce in this control; its cause remains
+unknown, so the Issue #204 warm regression remains unconfirmed.
+
+### Final known-idle baseline-first control
+
+A final host-observed session ran with the verification gate clear. It ran the
+baseline first and the candidate second, with separate fresh caches and the
+same five cold and five warm trials.
+
+| Metric | Main p50 | Main p95 | Issue #204 p50 | Issue #204 p95 | p95 change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold indexing | 8,610 ms | 8,802 ms | 7,623 ms | 7,881 ms | -10.5% |
+| Warm indexing | 2,084 ms | 2,312 ms | 2,097 ms | 2,255 ms | -2.5% |
+| Navigation | 1,250 ns | 1,292 ns | 1,250 ns | 1,333 ns | +3.2% |
+
+Both reports indexed 3,451 documents and 88,014 definitions with a 100% warm
+cache hit rate. The candidate cache was 210,610,615 bytes in 3,464 files;
+the baseline cache was 210,342,955 bytes in 3,464 files. RSS was
+2,022,555,648 bytes for main and 2,258,190,336 bytes for the candidate. The
+two known-idle order-swapped controls do not reproduce a cold or warm
+regression beyond the documented limits. The earlier baseline-first session
+remains recorded above as an anomalous result with unknown cause.

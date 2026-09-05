@@ -29,7 +29,7 @@ use crate::domain::{
 use crate::localization::valid_handle;
 use crate::osiris_catalog::{
     OSIRIS_CONTRACTS, OsirisContractKind, OsirisParameterDirection, osiris_argument_domain,
-    osiris_contract, osiris_type_class,
+    osiris_contract, osiris_type_class, osiris_type_compatibility,
 };
 use crate::schema::{SchemaCatalog, SchemaDefinition};
 use crate::xml::{attribute_range, attributes};
@@ -1698,6 +1698,12 @@ fn parse_osiris(source: SourceFile, text: &str) -> Result<ParsedFile, Error> {
     }
 
     add_osiris_database_anchors(&goal, &occurrences, &mut definitions);
+    if root.has_error() {
+        // Tree-sitter can recover a structurally complete goal around invalid
+        // source. Keep those recovery facts available to the editor, but do
+        // not turn a recovered literal into a navigable resource reference.
+        references.retain(|reference| reference.context != "osiris-string-literal");
+    }
     Ok(ParsedFile {
         source,
         definitions,
@@ -2503,11 +2509,29 @@ fn collect_osiris_call(
         let Some(domain) = osiris_argument_domain(contract.kind, &name, arity, index) else {
             continue;
         };
+        let Some(parameter) = contract.parameters.get(index) else {
+            continue;
+        };
+        if !matches!(
+            parameter.direction,
+            OsirisParameterDirection::In | OsirisParameterDirection::InOut
+        ) {
+            continue;
+        }
         let Some(value) = field(argument, "value") else {
             continue;
         };
         if value.kind() != "string_literal" {
             continue;
+        }
+        if let Some(cast) = field(argument, "cast") {
+            let Some(type_node) = field(cast, "type") else {
+                continue;
+            };
+            let cast_type = type_node.utf8_text(text.as_bytes())?;
+            if osiris_type_compatibility(cast_type, parameter.type_name) != Some(true) {
+                continue;
+            }
         }
         let Some(content) = field(value, "content") else {
             continue;
