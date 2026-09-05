@@ -28,12 +28,49 @@ fn classifies_only_verified_osiris_type_spellings() {
 
 #[test]
 fn maps_only_reviewed_generated_osiris_string_domains() {
+    let reviewed = [
+        (OsirisContractKind::Call, "ApplyStatus", 5, 1, "StatusData"),
+        (OsirisContractKind::Call, "RemoveStatus", 3, 1, "StatusData"),
+        (OsirisContractKind::Call, "AddSpell", 4, 1, "SpellData"),
+        (OsirisContractKind::Call, "AddPassive", 2, 1, "PassiveData"),
+        (
+            OsirisContractKind::Event,
+            "ReactionInterruptAdded",
+            2,
+            1,
+            "InterruptData",
+        ),
+        (
+            OsirisContractKind::Query,
+            "GetSpellFromSet",
+            3,
+            0,
+            "SpellSet",
+        ),
+        (
+            OsirisContractKind::Call,
+            "GenerateTreasure",
+            4,
+            1,
+            "TreasureTable",
+        ),
+        (
+            OsirisContractKind::Call,
+            "CharacterGiveEquipmentSet",
+            2,
+            1,
+            "Equipment",
+        ),
+    ];
+    for (kind, name, arity, index, domain) in reviewed {
+        assert_eq!(
+            osiris_argument_domain(kind, name, arity, index),
+            Some(domain),
+            "{kind:?} {name}/{arity} argument {index} should be reviewed"
+        );
+    }
     assert_eq!(
         osiris_argument_domain(OsirisContractKind::Event, "StatusApplied", 4, 1),
-        Some("StatusData")
-    );
-    assert_eq!(
-        osiris_argument_domain(OsirisContractKind::Call, "RemoveStatus", 3, 1),
         Some("StatusData")
     );
     assert_eq!(
@@ -47,6 +84,11 @@ fn maps_only_reviewed_generated_osiris_string_domains() {
     assert_eq!(
         osiris_argument_domain(OsirisContractKind::Call, "StatusApplied", 4, 1),
         None
+    );
+    assert_eq!(
+        osiris_argument_domain(OsirisContractKind::Event, "Teleported", 9, 8),
+        None,
+        "the documented Invalid sentinel keeps Teleported deferred"
     );
 }
 

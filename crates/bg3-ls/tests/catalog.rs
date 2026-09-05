@@ -54,7 +54,7 @@ fn validates_the_checked_in_argument_domain_catalog_offline() {
     );
     assert_eq!(
         String::from_utf8(checked.stdout).unwrap(),
-        "argument domain catalog is valid: total=518 reviewed=518 resource=2 deferred-resource=112 runtime-id=232 enumeration=67 expression=29 free-text=29 unresolved=47 unreviewed=0 (bg3-ls-osiris-argument-domains-v1)\n"
+        "argument domain catalog is valid: total=518 reviewed=518 resource=48 deferred-resource=66 runtime-id=232 enumeration=67 expression=29 free-text=29 unresolved=47 unreviewed=0 (bg3-ls-osiris-argument-domains-v1)\n"
     );
     assert!(checked.stderr.is_empty());
 }
